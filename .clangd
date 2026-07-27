@@ -1,0 +1,21 @@
+CompileFlags:
+  CompilationDatabase: build/Debug
+
+  Add:
+    - -mcpu=cortex-m4
+    - -mthumb
+    - -mfpu=fpv4-sp-d16
+    - -mfloat-abi=hard
+    - -std=c11
+
+  Remove:
+    - -mfloat-abi=soft
+
+Index:
+  Background: Build
+
+Diagnostics:
+  UnusedIncludes: None
+
+Hover:
+  ShowAKA: true
