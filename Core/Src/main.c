@@ -29,6 +29,9 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "bsp_dwt.h"
+#include "stdio.h"
+#include "foc_math.h"
 
 /* USER CODE END Includes */
 
@@ -88,7 +91,7 @@ int main(void)
   SystemClock_Config();
 
   /* USER CODE BEGIN SysInit */
-
+  FOC_Data_Init();
   /* USER CODE END SysInit */
 
   /* Initialize all configured peripherals */
@@ -104,13 +107,41 @@ int main(void)
   MX_OPAMP3_Init();
   MX_CORDIC_Init();
   /* USER CODE BEGIN 2 */
+  DWT_Delay_Init();
+  CORDIC_SinCos_RegisterConfig();
+  
+
+
+  HAL_ADCEx_Calibration_Start(&hadc1, ADC_SINGLE_ENDED);
+  HAL_ADCEx_Calibration_Start(&hadc2, ADC_SINGLE_ENDED);
+
+
+   if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
+  if (HAL_ADCEx_InjectedStart_IT(&hadc2) != HAL_OK)
+  {
+      Error_Handler();
+  }
+
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+
+
+  FOC_PWM_Start();
+
+
+
   while (1)
   {
+
+    DWT_Delay_Ms(1000);
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_4);
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -164,6 +195,43 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+int _write(int file, char *ptr, int len)
+{
+    (void)file;
+
+    if ((ptr == NULL) || (len <= 0))
+    {
+        return 0;
+    }
+
+    if (HAL_UART_Transmit(&huart2,
+                          (uint8_t *)ptr,
+                          (uint16_t)len,
+                          HAL_MAX_DELAY) == HAL_OK)
+    {
+        return len;
+    }
+
+    return -1;
+}
+
+void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
+  uint32_t adc[3] = {0};
+  if (hadc->Instance != ADC1) {
+    return; // 只处理 ADC1 的注入转换完成事件
+  } 
+  adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
+  adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
+  adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
+  printf(":%d,%d,%d\n", adc[0], adc[1], adc[2]);
+
+  
+}
+
+
+
+
 
 /* USER CODE END 4 */
 
