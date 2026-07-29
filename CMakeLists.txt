@@ -34,6 +34,8 @@ enable_language(C ASM)
 # Create an executable object type
 add_executable(${CMAKE_PROJECT_NAME})
 
+
+
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
@@ -47,14 +49,11 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bsp_dwt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/foc_math.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/AS5600.c
 )
 
 
-
-target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
-    -u
-    _printf_float
-)
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE

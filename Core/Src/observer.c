@@ -1,0 +1,270 @@
+#include "observer.h"
+#include "foc_math.h"
+#include "arm_math.h"
+
+void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
+                   const Observer_Config_t *config) {
+
+  obs->motor.Rs = motor->Rs;
+  obs->motor.Ls = motor->Ls;
+  obs->motor.flux_linkage = motor->flux_linkage;
+  obs->motor.pole_pairs = motor->pole_pairs;
+
+  obs->config.gain = config->gain;
+  obs->config.Ts = config->Ts;
+  obs->config.psi_min = config->psi_min;
+  obs->config.psi_max = config->psi_max;
+
+  /*
+   * 初始磁链
+   */
+
+  obs->state.x_alpha = motor->flux_linkage;
+  obs->state.x_beta = 0.0f;
+
+  obs->state.psi_alpha = motor->flux_linkage;
+  obs->state.psi_beta = 0.0f;
+
+  obs->state.psi_mag = motor->flux_linkage;
+
+  obs->state.error_alpha = 0.0f;
+  obs->state.error_beta = 0.0f;
+
+  obs->state.correction_alpha = 0.0f;
+  obs->state.correction_beta = 0.0f;
+
+  obs->state.psi_mag = 0.0f;
+
+  obs->state.initialized = 1U;
+}
+
+
+
+
+static void Observer_RebuildVoltage(
+        const Observer_Input_t *input,
+        float *u_alpha,
+        float *u_beta)
+{
+
+    float ua;
+    float ub;
+    float uc;
+
+
+    /*
+     * PWM中心点对应0电压
+     *
+     * Ua=(Duty-0.5)*Vbus
+     */
+    ua =
+        (input->duty_a - 0.5f)
+        *
+        input->vbus;
+
+
+    ub =
+        (input->duty_b - 0.5f)
+        *
+        input->vbus;
+
+
+    uc =
+        (input->duty_c - 0.5f)
+        *
+        input->vbus;
+
+
+
+    /*
+     * 三相 -> 两相
+     *
+     * Clarke
+     */
+    *u_alpha =
+        (2.0f * ua
+        - ub
+        - uc)
+        *
+        (1.0f / 3.0f);
+
+
+
+    *u_beta =
+        (ub - uc)
+        *
+        0.57735026919f;
+
+}
+
+
+
+
+/**
+ * @brief 非线性磁链观测器
+ *
+ * 输入:
+ *
+ *      u_alpha/beta
+ *      i_alpha/beta
+ *
+ * 输出:
+ *
+ *      psi_alpha
+ *      psi_beta
+ *
+ */
+void Observer_Run(Observer_Handle_t *obs,
+                  const Observer_Input_t *input)
+{
+    float Rs;
+    float Ls;
+    float Ts;
+
+    float u_alpha;
+    float u_beta;
+
+    float x_alpha;
+    float x_beta;
+
+    float psi_alpha;
+    float psi_beta;
+
+    float psi_mag_sq;
+    float error;
+
+    float correction_alpha;
+    float correction_beta;
+
+    if ((obs == NULL) || (input == NULL))
+    {
+        return;
+    }
+
+    if ((obs->state.initialized == 0U) ||
+        (obs->config.Ts <= 0.0f) ||
+        (input->vbus <= 0.1f))
+    {
+        return;
+    }
+
+    Rs = obs->motor.Rs;
+    Ls = obs->motor.Ls;
+    Ts = obs->config.Ts;
+
+    /*
+     * 由最终SVPWM占空比和母线电压
+     * 重构实际施加的Ualpha、Ubeta。
+     */
+    Observer_RebuildVoltage(
+        input,
+        &u_alpha,
+        &u_beta);
+
+    /*
+     * 读取上一拍的定子总磁链状态。
+     */
+    x_alpha = obs->state.x_alpha;
+    x_beta  = obs->state.x_beta;
+
+    /*
+     * 从定子总磁链中减去电感磁链：
+     *
+     * psi_f = x - L*i
+     *
+     * 这里得到的才是永磁体磁链，
+     * 也是后面atan2真正应该使用的量。
+     */
+    psi_alpha =
+        x_alpha -
+        Ls * input->i_alpha;
+
+    psi_beta =
+        x_beta -
+        Ls * input->i_beta;
+
+    /*
+     * 永磁磁链幅值误差。
+     */
+    psi_mag_sq =
+        psi_alpha * psi_alpha +
+        psi_beta  * psi_beta;
+
+    error =
+        obs->motor.flux_linkage *
+        obs->motor.flux_linkage -
+        psi_mag_sq;
+
+    /*
+     * 非线性径向校正。
+     *
+     * psi太小时error>0，向外修正；
+     * psi太大时error<0，向内修正。
+     */
+    correction_alpha =
+        obs->config.gain *
+        error *
+        psi_alpha;
+
+    correction_beta =
+        obs->config.gain *
+        error *
+        psi_beta;
+
+    /*
+     * 更新定子总磁链状态：
+     *
+     * x_dot = u - R*i + correction
+     */
+    x_alpha +=
+        Ts *
+        (u_alpha -
+         Rs * input->i_alpha +
+         correction_alpha);
+
+    x_beta +=
+        Ts *
+        (u_beta -
+         Rs * input->i_beta +
+         correction_beta);
+
+    /*
+     * 使用更新后的状态重新计算永磁磁链。
+     */
+    psi_alpha =
+        x_alpha -
+        Ls * input->i_alpha;
+
+    psi_beta =
+        x_beta -
+        Ls * input->i_beta;
+
+    psi_mag_sq =
+        psi_alpha * psi_alpha +
+        psi_beta  * psi_beta;
+
+    if (arm_sqrt_f32(
+            psi_mag_sq,
+            &obs->state.psi_mag) != ARM_MATH_SUCCESS)
+    {
+        obs->state.psi_mag = 0.0f;
+    }
+
+    /*
+     * 保存总磁链积分状态。
+     */
+    obs->state.x_alpha = x_alpha;
+    obs->state.x_beta  = x_beta;
+
+    /*
+     * 保存永磁磁链输出。
+     */
+    obs->state.psi_alpha = psi_alpha;
+    obs->state.psi_beta  = psi_beta;
+
+    obs->state.correction_alpha =
+        correction_alpha;
+
+    obs->state.correction_beta =
+        correction_beta;
+}
