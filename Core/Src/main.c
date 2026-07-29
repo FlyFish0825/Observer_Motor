@@ -28,16 +28,18 @@
 #include "tim.h"
 #include "usart.h"
 
-
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "AS5600.h"
+#include "arm_math.h"
 #include "bsp_dwt.h"
 #include "foc_math.h"
 #include "stdio.h"
 #include <math.h>
 #include <stdint.h>
-#include "AS5600.h"
-#include "arm_math.h"
+#include "debug_console.h"
+
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,6 +55,16 @@
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
+
+static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
+{
+    HAL_UART_Transmit(
+        &huart2,
+        (uint8_t *)data,
+        len,
+        100U);
+}
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -67,14 +79,8 @@ typedef struct {
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 
-
-
- uint16_t as5600_raw = 0U;
+uint16_t as5600_raw = 0U;
 float as5600_elec_rad = 0.0f;
-
-
-
-
 
 /* USER CODE END PV */
 
@@ -87,6 +93,10 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void);
 void JustFloat_Init(void);
 int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
                       float f5);
+
+
+
+
 
 /* ======================== 电流零偏校准 ======================== */
 
@@ -140,14 +150,19 @@ int main(void) {
   DWT_Delay_Init();
   CORDIC_SinCos_RegisterConfig();
   JustFloat_Init();
- 
-   AS5600_init();
+  AS5600_init();
 
+  if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
+    Error_Handler();
+  }
+
+  DebugConsole_RegisterF32("ud", &foc.state.u_dq.d, 
+    -8.0f, 8.0f, false);
+
+  DebugConsole_RegisterF32("uq", &foc.state.u_dq.q, 
+    -8.0f, 8.0f, false);
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
-
-
-  
 
   // FOC_Iabc_Calibration();
 
@@ -176,9 +191,7 @@ int main(void) {
 
     as5600_elec_rad = FOC_WrapToPi(-as5600_elec_rad);
 
-
-
-    //ADC1 采样母线电压
+    // ADC1 采样母线电压
     HAL_ADC_Start(&hadc1);
 
     if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
@@ -189,6 +202,9 @@ int main(void) {
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
+
+
+    DebugConsole_Process();
   }
   /* USER CODE END 3 */
 }
@@ -240,15 +256,18 @@ void SystemClock_Config(void) {
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
   static uint16_t calibration_count = 0;
-  uint32_t DWT_Cycle_Count ; // 获取当前的DWT计数器值
+  uint32_t DWT_Cycle_Count; // 获取当前的DWT计数器值
   uint32_t adc[3] = {0};
+
+  static uint32_t FOC_State_Count = 0U;
+
+  static float observer_control_offset = 0.0f;
+  static uint8_t observer_offset_valid = 0U;
 
   if (hadc->Instance != ADC1) {
     return; // 只处理 ADC1 的注入转换完成事件
   }
 
-
- 
   if (foc.calibration.calibrated == 0) {
 
     calibration_count++;
@@ -273,7 +292,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
   } else {
     DWT_Cycle_Count = DWT_GetCycle();
 
-
     adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
     adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
     adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
@@ -283,167 +301,86 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
     Observer_Input_t obs_in;
-     // SVPWM输出的真实占空比
+    // SVPWM输出的真实占空比
     obs_in.duty_a = foc.svpwm.duty_a;
     obs_in.duty_b = foc.svpwm.duty_b;
     obs_in.duty_c = foc.svpwm.duty_c;
-     //母线电压
+    // 母线电压
     obs_in.vbus = foc.state.vbus;
-     //电流
+    // 电流
     obs_in.i_alpha = foc.state.i_alpha_beta.alpha;
     obs_in.i_beta = foc.state.i_alpha_beta.beta;
 
     Observer_Run(&foc.observer, &obs_in);
-    foc.observer.state.phase_raw = FOC_Atan2_Fast(foc.observer.state.psi_beta, foc.observer.state.psi_alpha);
-
-
+    foc.observer.state.phase_raw = FOC_Atan2_Fast(foc.observer.state.psi_beta,
+                                                  foc.observer.state.psi_alpha);
 
     static uint32_t FOC_State_Count = 0;
     uint32_t obs_phase_q31;
-    uint32_t FOC_Motor_Transition_count=25000;
+    uint32_t FOC_Motor_Transition_count = 25000;
     switch (foc_motor_state) {
 
     case FOC_MOTOR_IDLE:
       break;
 
-    
-    case FOC_MOTOR_OPEN_LOOP:
+    case FOC_MOTOR_OPEN_LOOP: {
+      float theta_open_rad;
+      float theta_obs_rad;
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(0.0f, 5.0f);
-      if (FOC_State_Count > 25000 ) {
-        FOC_State_Count = 0;
-        foc_motor_state = FOC_MOTOR_TRANSITION;
+      FOC_Open_Loop(0.0f, 1.0f);
+
+      if (FOC_State_Count >= 25000U) {
+        theta_open_rad =
+            FOC_WrapToPi((float)foc.state.theta_q31 * Q32_TO_RAD_F);
+
+        theta_obs_rad = FOC_WrapToPi(foc.observer.state.phase_raw);
+
+        /*
+         * 保存当前开环控制角与观测器角的关系。
+         */
+        observer_control_offset = FOC_WrapToPi(theta_open_rad - theta_obs_rad);
+
+        observer_offset_valid = 1U;
+
+        FOC_State_Count = 0U;
+
+        foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
       }
+
       break;
-      
-    case FOC_MOTOR_TRANSITION:
-{
-    static uint8_t transition_initialized = 0U;
-    static FOC_DQ_t transition_start_dq;
-
-    FOC_DQ_t transition_cmd_dq;
-    FOC_SIN_COS_t transition_sc;
-
-    float phase_control;
-    float blend;
-
-    /*
-     * 后面有PLL时改成 pll_phase。
-     * 目前先用已经验证正确的观测器原始角度。
-     */
-    phase_control =
-        FOC_WrapToPi(
-            foc.observer.state.phase_raw);
-
-    uint32_t phase_q31 =
-        CORDIC_RadToQ31(phase_control);
-
-    CORDIC_SinCos_FastF32(
-        phase_q31,
-        &transition_sc.sin,
-        &transition_sc.cos);
-
-    /*
-     * 第一次进入过渡状态：
-     *
-     * 把上一拍开环产生的Ualpha/Ubeta，
-     * 转换到当前观测器dq坐标系。
-     *
-     * 第一拍用这个dq重新逆变换后，
-     * 得到的Ualpha/Ubeta基本不变，
-     * 所以CCR不会突然跳变。
-     */
-    if (transition_initialized == 0U)
-    {
-        FOC_Park(
-            &foc.state.u_alpha_beta,
-            &transition_sc,
-            &transition_start_dq);
-
-        FOC_State_Count = 0U;
-
-        transition_initialized = 1U;
     }
 
-    /*
-     * 过渡系数0~1。
-     */
-    blend =
-        (float)FOC_State_Count /
-        (float)FOC_Motor_Transition_count;
+    case FOC_MOTOR_CLOSED_LOOP: {
+      float phase_control;
+      uint32_t phase_q31;
 
-    if (blend > 1.0f)
-    {
-        blend = 1.0f;
-    }
+      if (observer_offset_valid == 0U) {
+        foc_motor_state = FOC_MOTOR_OPEN_LOOP;
 
-    /*
-     * smoothstep：
-     * 开始和结束时变化率都为0，
-     * 比直接线性插值更不容易产生CCR突变。
-     */
-    blend =
-        blend * blend *
-        (3.0f - 2.0f * blend);
+        break;
+      }
 
-    /*
-     * 从当前等效dq电压，
-     * 平滑过渡到闭环目标。
-     *
-     * 初次测试不要直接给Uq=5V，
-     * 先用0.5~1.0V验证切换。
-     */
-    transition_cmd_dq.d =
-        transition_start_dq.d +
-        blend *
-        (0.0f - transition_start_dq.d);
+      /*
+       * 观测器角度 + 切换时保存的固定偏移。
+       *
+       * 第一拍严格接近原开环角度，
+       * 后续随观测器持续旋转。
+       */
+      phase_control =
+          FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
 
-    transition_cmd_dq.q =
-        transition_start_dq.q +
-        blend *
-        (0.8f - transition_start_dq.q);
+      phase_q31 = (uint32_t)CORDIC_RadToQ31(phase_control);
 
-    foc.state.u_dq =
-        transition_cmd_dq;
-
-    FOC_InvPark(
-        &foc.state.u_dq,
-        &transition_sc,
-        &foc.state.u_alpha_beta);
-
-    FOC_InvClarke(
-        &foc.state.u_alpha_beta,
-        &foc.state.u_abc);
-
-    FOC_SVPWM_Run(
-        &foc.state.u_abc,
-        foc.state.vbus,
-        &foc.timer,
-        &foc.svpwm);
-
-    FOC_State_Count++;
-
-    if (FOC_State_Count >=
-        FOC_Motor_Transition_count)
-    {
-        FOC_State_Count = 0U;
-
-        transition_initialized = 0U;
-
-        foc_motor_state =
-            FOC_MOTOR_CLOSED_LOOP;
-    }
-
-    break;
-}
-
-    case FOC_MOTOR_CLOSED_LOOP:
-
-      obs_phase_q31 = CORDIC_RadToQ31(foc.observer.state.phase_raw);
-      CORDIC_SinCos_FastF32(obs_phase_q31, &observer_sin_cos.sin,
+      CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
+
+      /*
+       * 先保持与开环完全相同的电压。
+       */
+      // foc.state.u_dq.d = 1.0f;
+      // foc.state.u_dq.q = 1.0f;
 
       FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
 
@@ -453,7 +390,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       break;
     }
-
+    }
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
@@ -462,15 +399,15 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     theta_open_rad = (float)foc.state.theta_q31 * Q32_TO_RAD_F;
     theta_open_rad = FOC_WrapToPi(theta_open_rad);
 
-
     float phase_obs_rad;
     phase_obs_rad = foc.observer.state.phase_raw;
     phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
-    Fast_Send_6Floats(theta_open_rad*RAD_TO_DEG_F, phase_obs_rad*RAD_TO_DEG_F,
-                       (float)as5600_elec_rad*RAD_TO_DEG_F, foc.state.i_alpha_beta.alpha,
-                      foc.state.u_alpha_beta.alpha,foc.state.u_alpha_beta.beta);
-  }
+    Fast_Send_6Floats(
+         phase_obs_rad * RAD_TO_DEG_F,
+        (float)as5600_elec_rad * RAD_TO_DEG_F, foc_motor_state,
+        foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c);
+ }
 }
 
 int _write(int file, char *ptr, int len) {
@@ -643,6 +580,21 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   return 0;
 }
 
+
+
+void HAL_UARTEx_RxEventCallback(
+    UART_HandleTypeDef *huart,
+    uint16_t Size)
+{
+    DebugConsole_OnRxEvent(huart, Size);
+}
+
+void HAL_UART_ErrorCallback(
+    UART_HandleTypeDef *huart)
+{
+    DebugConsole_OnError(huart);
+}
+
 /* USER CODE END 4 */
 
 /**
@@ -651,7 +603,8 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
  */
 void Error_Handler(void) {
   /* USER CODE BEGIN Error_Handler_Debug */
-  /* User can add his own implementation to report the HAL error return state */
+  /* User can add his own implementation to report the HAL error return state
+   */
   __disable_irq();
   while (1) {
   }
@@ -668,8 +621,8 @@ void Error_Handler(void) {
 void assert_failed(uint8_t *file, uint32_t line) {
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line
-     number, ex: printf("Wrong parameters value: file %s on line %d\r\n", file,
-     line) */
+     number, ex: printf("Wrong parameters value: file %s on line %d\r\n",
+     file, line) */
   /* USER CODE END 6 */
 }
 #endif /* USE_FULL_ASSERT */

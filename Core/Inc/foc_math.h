@@ -78,7 +78,6 @@ typedef enum
 {
     FOC_MOTOR_IDLE = 0,
     FOC_MOTOR_OPEN_LOOP,
-    FOC_MOTOR_TRANSITION,
     FOC_MOTOR_CLOSED_LOOP,
 
 } FOC_Motor_State_t;

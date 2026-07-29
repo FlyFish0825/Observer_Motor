@@ -44,6 +44,11 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
+target_link_options(${PROJECT_NAME} PRIVATE
+    -u _printf_float
+)
+
+
 # Add sources to executable
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
@@ -51,6 +56,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/foc_math.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/AS5600.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
 )
 
 
