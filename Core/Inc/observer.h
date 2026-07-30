@@ -1,7 +1,9 @@
 #ifndef OBSERVER_H
 #define OBSERVER_H
 
+#include "controller.h"
 #include "stdint.h"
+
 
 /*
  * 电机参数
@@ -49,54 +51,57 @@ typedef struct {
 
   float psi_max;
 
+  /* 经典PLL参数 */
+  float pll_kp;
+
+  float pll_ki;
+
+  /* PLL输出电角速度限幅，单位rad/s */
+  float pll_omega_limit;
+
 } Observer_Config_t;
 
 /*
  * 观测器输入
  */
-typedef struct
-{
-    /*
-     * PWM占空比
-     * 0~1
-     */
-    float duty_a;
-    float duty_b;
-    float duty_c;
-    /*
-     * 母线电压
-     */
-    float vbus;
-    /*
-     * Clarke后的电流
-     */
-    float i_alpha;
-    float i_beta;
+typedef struct {
+  /*
+   * PWM占空比
+   * 0~1
+   */
+  float duty_a;
+  float duty_b;
+  float duty_c;
+  /*
+   * 母线电压
+   */
+  float vbus;
+  /*
+   * Clarke后的电流
+   */
+  float i_alpha;
+  float i_beta;
 
-}Observer_Input_t;
+} Observer_Input_t;
 
 /*
  * 观测器状态
  */
 typedef struct {
 
-
-
-        /*
- * 定子总磁链观测器状态：
- *
- * x = L*i + psi_f
- */
-float x_alpha;
-float x_beta;
+  /*
+   * 定子总磁链观测器状态：
+   *
+   * x = L*i + psi_f
+   */
+  float x_alpha;
+  float x_beta;
   /*
    * 磁链估计
    */
   float psi_alpha;
 
   float psi_beta;
-
-
 
   /*
    * 电流误差
@@ -118,7 +123,9 @@ float x_beta;
    * atan2(beta,alpha)
    */
   float phase_raw;
+
   float pll_phase;
+  float pll_omega_e;
   /*
    * 磁链大小
    */
@@ -142,6 +149,12 @@ typedef struct {
 
   Observer_State_t state;
 
+  /*
+   * 复用已有PI控制器：
+   * pll.error为相位误差，pll.output为电角速度。
+   */
+  PI_Controller_t pll;
+
 } Observer_Handle_t;
 
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
@@ -149,4 +162,5 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
 
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input);
 
+void Observer_PLL_Run(Observer_Handle_t *obs);
 #endif

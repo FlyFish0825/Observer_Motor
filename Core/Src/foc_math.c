@@ -58,10 +58,13 @@ void FOC_Data_Init(void) {
   Observer_Config_t observer_cfg = {/*
                                      * VESC经验值
                                      */
-                                    .gain = 5e8f,
-                                    .Ts = 0.00004f,  //25khz
+                                    .gain =1e7f,
+                                    .Ts = 0.00004f,  //25kHz
                                     .psi_min = motor.flux_linkage*0.5f,
-                                    .psi_max = motor.flux_linkage*3.0f
+                                    .psi_max = motor.flux_linkage*3.0f,
+                                    .pll_kp = 2000.0f,
+                                    .pll_ki = 1000.0f,
+                                    .pll_omega_limit = 5000.0f
                                   };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);

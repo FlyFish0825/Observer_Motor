@@ -297,7 +297,7 @@ CORDIC_SinCos_FastF32(int32_t angle_q31, float *sin_value, float *cos_value) {
  * 用于:
  *      磁链观测器角度计算
  */
-__STATIC_FORCEINLINE float FOC_Atan2_Fast(
+__STATIC_FORCEINLINE float FOC_atan2_Fast(
     float y,
     float x)
 {
