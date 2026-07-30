@@ -38,7 +38,7 @@
 #include <math.h>
 #include <stdint.h>
 #include "debug_console.h"
-
+#include "controller.h"
 
 /* USER CODE END Includes */
 
@@ -49,6 +49,10 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
+
+static PI_Controller_t pi_d;
+static PI_Controller_t pi_q;
+
 
 /* USER CODE END PD */
 
@@ -152,13 +156,16 @@ int main(void) {
   JustFloat_Init();
   AS5600_init();
 
+  PI_Controller_Init(&pi_d, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
+  PI_Controller_Init(&pi_q, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
+
+
+
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
   }
-
   DebugConsole_RegisterF32("ud", &foc.state.u_dq.d, 
     -8.0f, 8.0f, false);
-
   DebugConsole_RegisterF32("uq", &foc.state.u_dq.q, 
     -8.0f, 8.0f, false);
 
@@ -315,9 +322,16 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     foc.observer.state.phase_raw = FOC_Atan2_Fast(foc.observer.state.psi_beta,
                                                   foc.observer.state.psi_alpha);
 
+    uint32_t observer_phase_q31 = (uint32_t)CORDIC_RadToQ31(foc.observer.state.phase_raw);
+    CORDIC_SinCos_FastF32(observer_phase_q31, &observer_sin_cos.sin,
+                            &observer_sin_cos.cos); 
+
+    FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
+
     static uint32_t FOC_State_Count = 0;
-    uint32_t obs_phase_q31;
-    uint32_t FOC_Motor_Transition_count = 25000;
+
+    static float pid_output_d = 0.0f;
+    static float pid_output_q = 0.0f;
     switch (foc_motor_state) {
 
     case FOC_MOTOR_IDLE:
@@ -330,7 +344,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       FOC_State_Count++;
 
       FOC_Open_Loop(0.0f, 1.0f);
-
+     
       if (FOC_State_Count >= 25000U) {
         theta_open_rad =
             FOC_WrapToPi((float)foc.state.theta_q31 * Q32_TO_RAD_F);
@@ -345,6 +359,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         observer_offset_valid = 1U;
 
         FOC_State_Count = 0U;
+
+        PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, 0.0f,foc.state.i_dq.d);
+        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, -0.3f,foc.state.i_dq.q);
 
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
       }
@@ -368,6 +385,23 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        * 第一拍严格接近原开环角度，
        * 后续随观测器持续旋转。
        */
+       if(observer_control_offset>0.0f)
+       {
+        observer_control_offset-=0.00001f;
+       }
+       else if(observer_control_offset<0.0f)
+       {
+        observer_control_offset+=0.00001f;
+       }
+       else if (observer_control_offset<0.00001f && observer_control_offset>-0.00001f)
+       {
+        observer_control_offset=0.0f;
+       }
+      
+      pid_output_d =  PI_Controller_Run(&pi_d, foc.state.i_dq.d,-0.2f);
+      pid_output_q =  PI_Controller_Run(&pi_q, 0.5f, foc.state.i_dq.q);
+
+      
       phase_control =
           FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
 
@@ -376,11 +410,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
 
-      /*
-       * 先保持与开环完全相同的电压。
-       */
-      // foc.state.u_dq.d = 1.0f;
-      // foc.state.u_dq.q = 1.0f;
 
       FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
 
@@ -404,9 +433,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
     Fast_Send_6Floats(
-         phase_obs_rad * RAD_TO_DEG_F,
-        (float)as5600_elec_rad * RAD_TO_DEG_F, foc_motor_state,
-        foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c);
+         foc.state.i_dq.d, foc.state.i_dq.q, pid_output_d,
+         pid_output_q,foc_motor_state,foc.state.i_abc.a);
  }
 }
 

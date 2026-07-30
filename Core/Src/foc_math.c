@@ -492,3 +492,4 @@ void CORDIC_SinCos_Q31_Fast(int32_t angle_q31, int32_t *sin_q31,
 
   *sin_q31 = (int32_t)CORDIC->RDATA;
 }
+

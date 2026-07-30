@@ -231,6 +231,11 @@ void FOC_Open_Loop(float u_d, float u_q);
 HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc,float vbus,const FOC_TimerConfig_t *timer,
     FOC_SVPWM_Output_t *output);
 
+
+
+
+
+
 /* ======================== CORDIC 接口 ======================== */
 
 /**
