@@ -118,7 +118,7 @@ float x_beta;
    * atan2(beta,alpha)
    */
   float phase_raw;
-
+  float Pll_phase;
   /*
    * 磁链大小
    */
