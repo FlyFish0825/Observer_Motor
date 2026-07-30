@@ -141,11 +141,11 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   handle->current.adc_c = adc3;
 
   handle->state.i_abc.a =
-      ((float)adc1 - handle->calibration.ia_offset) * handle->current.gain_a;
+      (handle->calibration.ia_offset - (float)adc1) * handle->current.gain_a;
   handle->state.i_abc.b =
-      ((float)adc2 - handle->calibration.ib_offset) * handle->current.gain_b;
+      (handle->calibration.ib_offset - (float)adc2) * handle->current.gain_b;
   handle->state.i_abc.c =
-      ((float)adc3 - handle->calibration.ic_offset) * handle->current.gain_c;
+      (handle->calibration.ic_offset - (float)adc3) * handle->current.gain_c;
 
   if (ccr_max > ((float)handle->timer.pwm_arr * 0.95f)) {
     switch (handle->current.rebuild) {

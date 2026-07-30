@@ -156,8 +156,8 @@ int main(void) {
   JustFloat_Init();
   AS5600_init();
 
-  PI_Controller_Init(&pi_d, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
-  PI_Controller_Init(&pi_q, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
+  PI_Controller_Init(&pi_d, 0.010f, 25.0f, 0.00004f, -7.0f, 7.0f);
+  PI_Controller_Init(&pi_q, 0.0010f, 10.0f, 0.00004f, -7.0f, 7.0f);
 
 
 
@@ -322,9 +322,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     foc.observer.state.phase_raw = FOC_Atan2_Fast(foc.observer.state.psi_beta,
                                                   foc.observer.state.psi_alpha);
 
-    uint32_t observer_phase_q31 = (uint32_t)CORDIC_RadToQ31(foc.observer.state.phase_raw);
+    uint32_t observer_phase_q31 = (uint32_t)CORDIC_RadToQ31(as5600_elec_rad);
+    
     CORDIC_SinCos_FastF32(observer_phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos); 
+
 
     FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
 
@@ -361,7 +363,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         FOC_State_Count = 0U;
 
         PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, 0.0f,foc.state.i_dq.d);
-        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, -0.3f,foc.state.i_dq.q);
+        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, 0.0f,foc.state.i_dq.q);
 
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
       }
@@ -385,27 +387,33 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        * 第一拍严格接近原开环角度，
        * 后续随观测器持续旋转。
        */
-       if(observer_control_offset>0.0f)
+       if(observer_control_offset>0.001f)
        {
-        observer_control_offset-=0.00001f;
+        observer_control_offset-=0.0001f;
        }
-       else if(observer_control_offset<0.0f)
+       else if(observer_control_offset<-0.001f)
        {
-        observer_control_offset+=0.00001f;
+        observer_control_offset+=0.0001f;
        }
-       else if (observer_control_offset<0.00001f && observer_control_offset>-0.00001f)
+       else if (observer_control_offset<0.001f && observer_control_offset>-0.001f)
        {
         observer_control_offset=0.0f;
+        // pid_output_d =  PI_Controller_Run(&pi_d, 0.0f, foc.state.i_dq.d);
+        // pid_output_q =  PI_Controller_Run(&pi_q, 1.0f, foc.state.i_dq.q);
+        // foc.state.u_dq.d =pid_output_d;
+        // foc.state.u_dq.q = pid_output_q;
        }
       
-      pid_output_d =  PI_Controller_Run(&pi_d, foc.state.i_dq.d,-0.2f);
-      pid_output_q =  PI_Controller_Run(&pi_q, 0.5f, foc.state.i_dq.q);
-
+      observer_control_offset=0.0f;
+        pid_output_d =  PI_Controller_Run(&pi_d, 0.0f, foc.state.i_dq.d);
+        pid_output_q =  PI_Controller_Run(&pi_q, 1.0f, foc.state.i_dq.q);
+        foc.state.u_dq.d =pid_output_d;
+        foc.state.u_dq.q = pid_output_q;
       
       phase_control =
           FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
 
-      phase_q31 = (uint32_t)CORDIC_RadToQ31(phase_control);
+      phase_q31 = (uint32_t)CORDIC_RadToQ31(as5600_elec_rad);
 
       CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
@@ -433,8 +441,12 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
     Fast_Send_6Floats(
-         foc.state.i_dq.d, foc.state.i_dq.q, pid_output_d,
-         pid_output_q,foc_motor_state,foc.state.i_abc.a);
+    pid_output_d,
+    pid_output_q,
+    foc.state.i_dq.d,
+    foc.state.i_dq.q,
+    as5600_elec_rad*RAD_TO_DEG_F,
+    foc.observer.state.phase_raw*RAD_TO_DEG_F);
  }
 }
 
