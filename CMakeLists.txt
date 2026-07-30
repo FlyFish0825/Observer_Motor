@@ -58,6 +58,10 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/AS5600.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vesc/Src/vesc_observer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vesc/Src/vesc_current_controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vesc/Src/vesc_sensorless_foc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/vesc/Src/vesc_speed_controller.c
 )
 
 
@@ -65,6 +69,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined include paths
+    ${CMAKE_CURRENT_SOURCE_DIR}/vesc/Inc
 )
 
 # Add project symbols (macros)

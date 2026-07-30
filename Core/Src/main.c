@@ -39,6 +39,8 @@
 #include <stdint.h>
 #include "debug_console.h"
 #include "controller.h"
+#include "vesc_project_config.h"
+#include "vesc_sensorless_foc.h"
 
 /* USER CODE END Includes */
 
@@ -49,9 +51,6 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
-static PI_Controller_t pi_d;
-static PI_Controller_t pi_q;
 
 
 /* USER CODE END PD */
@@ -85,6 +84,27 @@ static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 
 uint16_t as5600_raw = 0U;
 float as5600_elec_rad = 0.0f;
+
+/* VESC核心：观测器、电流环和无感启动状态机 */
+static VESC_SensorlessFOC_t g_vesc_foc;
+static VESC_SensorlessFOC_Output_t g_vesc_out;
+static float g_vesc_iq_command_a = 0.3f;
+
+static float VESC_Port_Atan2(float y, float x) {
+  return FOC_Atan2_Fast(y, x);
+}
+
+static void VESC_Port_SinCos(float angle_rad, float *s, float *c) {
+  uint32_t angle_q31 = (uint32_t)CORDIC_RadToQ31(angle_rad);
+  CORDIC_SinCos_FastF32(angle_q31, s, c);
+}
+
+static void VESC_Port_Init(void) {
+  VESC_SensorlessFOC_Config_t cfg = VESC_Project_DefaultConfig();
+  cfg.observer.atan2_fn = VESC_Port_Atan2;
+  cfg.sincos_fn = VESC_Port_SinCos;
+  VESC_SensorlessFOC_Init(&g_vesc_foc, &cfg);
+}
 
 /* USER CODE END PV */
 
@@ -156,9 +176,7 @@ int main(void) {
   JustFloat_Init();
   AS5600_init();
 
-  PI_Controller_Init(&pi_d, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
-  PI_Controller_Init(&pi_q, 0.0010f, 0.1f, 0.00004f, -7.0f, 7.0f);
-
+  VESC_Port_Init();
 
 
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
@@ -262,23 +280,16 @@ void SystemClock_Config(void) {
 
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
-  static uint16_t calibration_count = 0;
-  uint32_t DWT_Cycle_Count; // 获取当前的DWT计数器值
-  uint32_t adc[3] = {0};
-
-  static uint32_t FOC_State_Count = 0U;
-
-  static float observer_control_offset = 0.0f;
-  static uint8_t observer_offset_valid = 0U;
+  static uint16_t calibration_count = 0U;
+  static uint16_t debug_divider = 0U;
+  uint32_t adc[3] = {0U};
 
   if (hadc->Instance != ADC1) {
-    return; // 只处理 ADC1 的注入转换完成事件
+    return;
   }
 
-  if (foc.calibration.calibrated == 0) {
-
+  if (foc.calibration.calibrated == 0U) {
     calibration_count++;
-    // 校准阶段，计算零偏
 
     foc.calibration.ia_offset +=
         HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
@@ -288,154 +299,76 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
 
     if (calibration_count >= CURRENT_OFFSET_SAMPLE_NUM) {
-      // 校准完成，计算平均值
       foc.calibration.ia_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.ib_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.ic_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
-      foc.calibration.calibrated = 1; // 设置校准完成标志
+      foc.calibration.calibrated = 1U;
     }
+    return;
+  }
 
-    // 校准完成
-  } else {
-    DWT_Cycle_Count = DWT_GetCycle();
+  adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
+  adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
+  adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
 
-    adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
-    adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
-    adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
+  FOC_Get_Iabc(&foc, adc[0], adc[1], adc[2]);
+  FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
-    FOC_Get_Iabc(&foc, adc[0], adc[1], adc[2]);
+  /*
+   * foc.svpwm.duty_a/b/c 是上一控制拍真正施加的占空比，
+   * 正好用于本拍观测器的电压重构。
+   */
+  VESC_SensorlessFOC_Input_t vesc_in = {
+      .enable = (uint8_t)(foc_motor_state != FOC_MOTOR_IDLE),
+      .iq_ref_a = g_vesc_iq_command_a,
+      .i_alpha = foc.state.i_alpha_beta.alpha,
+      .i_beta = foc.state.i_alpha_beta.beta,
+      .duty_a = foc.svpwm.duty_a,
+      .duty_b = foc.svpwm.duty_b,
+      .duty_c = foc.svpwm.duty_c,
+      .vbus = foc.state.vbus,
+  };
 
-    FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
+  VESC_SensorlessFOC_Run(&g_vesc_foc, &vesc_in, &g_vesc_out);
 
-    Observer_Input_t obs_in;
-    // SVPWM输出的真实占空比
-    obs_in.duty_a = foc.svpwm.duty_a;
-    obs_in.duty_b = foc.svpwm.duty_b;
-    obs_in.duty_c = foc.svpwm.duty_c;
-    // 母线电压
-    obs_in.vbus = foc.state.vbus;
-    // 电流
-    obs_in.i_alpha = foc.state.i_alpha_beta.alpha;
-    obs_in.i_beta = foc.state.i_alpha_beta.beta;
+  /* 保存到原项目数据结构，便于原有调试工具继续使用。 */
+  foc.state.i_dq.d = g_vesc_out.id;
+  foc.state.i_dq.q = g_vesc_out.iq;
+  foc.state.u_dq.d = g_vesc_out.ud;
+  foc.state.u_dq.q = g_vesc_out.uq;
+  foc.state.u_alpha_beta.alpha = g_vesc_out.u_alpha;
+  foc.state.u_alpha_beta.beta = g_vesc_out.u_beta;
 
-    Observer_Run(&foc.observer, &obs_in);
-    foc.observer.state.phase_raw = FOC_Atan2_Fast(foc.observer.state.psi_beta,
-                                                  foc.observer.state.psi_alpha);
+  /* IDLE/FAULT时g_vesc_out电压为0，SVPWM输出零线电压，避免保留旧CCR。 */
+  FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
+  FOC_SVPWM_Run(&foc.state.u_abc,
+                foc.state.vbus,
+                &foc.timer,
+                &foc.svpwm);
 
-    uint32_t observer_phase_q31 = (uint32_t)CORDIC_RadToQ31(foc.observer.state.phase_raw);
-    CORDIC_SinCos_FastF32(observer_phase_q31, &observer_sin_cos.sin,
-                            &observer_sin_cos.cos); 
+  TIM1->CCR1 = foc.svpwm.ccr_a;
+  TIM1->CCR2 = foc.svpwm.ccr_b;
+  TIM1->CCR3 = foc.svpwm.ccr_c;
 
-    FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
+  /* 25kHz中断不能每拍发串口；25分频后为1kHz。 */
+  debug_divider++;
+  if (debug_divider >= 25U) {
+    debug_divider = 0U;
 
-    static uint32_t FOC_State_Count = 0;
-
-    static float pid_output_d = 0.0f;
-    static float pid_output_q = 0.0f;
-    switch (foc_motor_state) {
-
-    case FOC_MOTOR_IDLE:
-      break;
-
-    case FOC_MOTOR_OPEN_LOOP: {
-      float theta_open_rad;
-      float theta_obs_rad;
-
-      FOC_State_Count++;
-
-      FOC_Open_Loop(0.0f, 1.0f);
-     
-      if (FOC_State_Count >= 25000U) {
-        theta_open_rad =
-            FOC_WrapToPi((float)foc.state.theta_q31 * Q32_TO_RAD_F);
-
-        theta_obs_rad = FOC_WrapToPi(foc.observer.state.phase_raw);
-
-        /*
-         * 保存当前开环控制角与观测器角的关系。
-         */
-        observer_control_offset = FOC_WrapToPi(theta_open_rad - theta_obs_rad);
-
-        observer_offset_valid = 1U;
-
-        FOC_State_Count = 0U;
-
-        PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, 0.0f,foc.state.i_dq.d);
-        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, -0.3f,foc.state.i_dq.q);
-
-        foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
-      }
-
-      break;
-    }
-
-    case FOC_MOTOR_CLOSED_LOOP: {
-      float phase_control;
-      uint32_t phase_q31;
-
-      if (observer_offset_valid == 0U) {
-        foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-
-        break;
-      }
-
-      /*
-       * 观测器角度 + 切换时保存的固定偏移。
-       *
-       * 第一拍严格接近原开环角度，
-       * 后续随观测器持续旋转。
-       */
-       if(observer_control_offset>0.0f)
-       {
-        observer_control_offset-=0.00001f;
-       }
-       else if(observer_control_offset<0.0f)
-       {
-        observer_control_offset+=0.00001f;
-       }
-       else if (observer_control_offset<0.00001f && observer_control_offset>-0.00001f)
-       {
-        observer_control_offset=0.0f;
-       }
-      
-      pid_output_d =  PI_Controller_Run(&pi_d, foc.state.i_dq.d,-0.2f);
-      pid_output_q =  PI_Controller_Run(&pi_q, 0.5f, foc.state.i_dq.q);
-
-      
-      phase_control =
-          FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
-
-      phase_q31 = (uint32_t)CORDIC_RadToQ31(phase_control);
-
-      CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
-                            &observer_sin_cos.cos);
-
-
-      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
-
-      FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
-
-      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
-
-      break;
-    }
-    }
-    TIM1->CCR1 = foc.svpwm.ccr_a;
-    TIM1->CCR2 = foc.svpwm.ccr_b;
-    TIM1->CCR3 = foc.svpwm.ccr_c;
-
-    float theta_open_rad;
-    theta_open_rad = (float)foc.state.theta_q31 * Q32_TO_RAD_F;
-    theta_open_rad = FOC_WrapToPi(theta_open_rad);
-
-    float phase_obs_rad;
-    phase_obs_rad = foc.observer.state.phase_raw;
-    phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
     Fast_Send_6Floats(
-         foc.state.i_dq.d, foc.state.i_dq.q, pid_output_d,
-         pid_output_q,foc_motor_state,foc.state.i_abc.a);
- }
+    (float)g_vesc_out.state,       /* CH0 状态 */
+    g_vesc_out.transition_offset,  /* CH1 保存的角度偏移 */
+    g_vesc_out.iq_ref,             /* CH2 Iq参考 */
+    g_vesc_out.iq,                 /* CH3 实际Iq */
+    g_vesc_out.uq,                 /* CH4 Uq输出 */
+    g_vesc_out.omega_e             /* CH5 电角速度 */
+);
+
+
+
+
+  }
 }
 
 int _write(int file, char *ptr, int len) {
