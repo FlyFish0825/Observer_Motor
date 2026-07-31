@@ -104,8 +104,6 @@ float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   float output_unsaturated;
   float output;
 
-  uint8_t block_integrator = 0U;
-
   if (pi == NULL) {
     return 0.0f;
   }
@@ -140,37 +138,23 @@ float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   integral_candidate = PI_Clamp(integral_candidate, integral_min, integral_max);
 
   /*
-   * 使用新的积分值计算未限幅输出
+   * 使用新的积分值计算未限幅输出。
    */
   output_unsaturated = pi->proportional + integral_candidate;
 
-  output = PI_Clamp(output_unsaturated, output_min, output_max);
-
   /*
-   * 条件积分抗饱和：
+   * 条件积分抗饱和。
    *
-   * 输出已经达到上限并且误差仍要求继续增大输出，
-   * 则停止积分。
-   *
-   * 输出已经达到下限并且误差仍要求继续减小输出，
-   * 则停止积分。
+   * 先决定是否撤销本拍积分，最后只执行一次输出限幅。
+   * 原实现会先限幅一次；发生积分阻塞时又重新计算并限幅一次。
    */
-  if ((output_unsaturated > output_max) && (error > 0.0f)) {
-    block_integrator = 1U;
-  } else if ((output_unsaturated < output_min) && (error < 0.0f)) {
-    block_integrator = 1U;
-  }
-
-  if (block_integrator != 0U) {
-    /*
-     * 保持原积分值。
-     */
+  if (((output_unsaturated > output_max) && (error > 0.0f)) ||
+      ((output_unsaturated < output_min) && (error < 0.0f))) {
     integral_candidate = integral_old;
-
-    output_unsaturated = pi->proportional + integral_candidate;
-
-    output = PI_Clamp(output_unsaturated, output_min, output_max);
+    output_unsaturated = pi->proportional + integral_old;
   }
+
+  output = PI_Clamp(output_unsaturated, output_min, output_max);
 
   pi->integral = integral_candidate;
 
