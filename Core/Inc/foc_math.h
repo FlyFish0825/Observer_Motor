@@ -268,12 +268,25 @@ void CORDIC_SinCos_Q31_Fast(int32_t angle_q31, int32_t *sin_q31,
  * @brief Q31 角度输入，float 正余弦输出。
  * @note  适合当前“Q31角度 + 浮点FOC”的结构。
  */
-__attribute__((always_inline)) static inline void
+__STATIC_FORCEINLINE void
 CORDIC_SinCos_FastF32(int32_t angle_q31, float *sin_value, float *cos_value) {
-  int32_t sin_q31;
   int32_t cos_q31;
+  int32_t sin_q31;
 
-  CORDIC_SinCos_Q31_Fast(angle_q31, &sin_q31, &cos_q31);
+  /*
+   * 高频路径直接访问CORDIC寄存器，避免再调用
+   * CORDIC_SinCos_Q31_Fast()产生函数调用和指针传参开销。
+   */
+  CORDIC->WDATA = (uint32_t)angle_q31;
+
+  cos_q31 = (int32_t)CORDIC->RDATA;
+  sin_q31 = (int32_t)CORDIC->RDATA;
+   * CORDIC_SinCos_Q31_Fast()产生函数调用和指针传参开销。
+   */
+  CORDIC->WDATA = (uint32_t)angle_q31;
+
+  cos_q31 = (int32_t)CORDIC->RDATA;
+  sin_q31 = (int32_t)CORDIC->RDATA;
 
   *sin_value = (float)sin_q31 * CORDIC_Q31_TO_FLOAT_F;
 
