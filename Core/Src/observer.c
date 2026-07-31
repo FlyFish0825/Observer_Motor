@@ -46,7 +46,7 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
   obs->state.initialized = 1U;
 }
 
-static __STATIC_FORCEINLINE void
+__STATIC_FORCEINLINE void
 Observer_RebuildVoltage(const Observer_Input_t *input,
                         float *u_alpha,
                         float *u_beta)
