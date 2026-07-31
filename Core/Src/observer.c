@@ -251,9 +251,11 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     /*
      * 磁链归一化。
      */
-    psi_alpha_n = obs->state.psi_alpha / obs->state.psi_mag;
+    /* 一次除法得到倒数，替代原来的两次浮点除法。 */
+    inv_psi_mag = 1.0f / obs->state.psi_mag;
 
-    psi_beta_n = obs->state.psi_beta / obs->state.psi_mag;
+    psi_alpha_n = obs->state.psi_alpha * inv_psi_mag;
+    psi_beta_n = obs->state.psi_beta * inv_psi_mag;
 
     /*
      * 根据PLL估计角度计算sin/cos。
