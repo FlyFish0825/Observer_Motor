@@ -126,6 +126,11 @@ typedef struct {
 
   float pll_phase;
   float pll_omega_e;
+  //机械角速度
+  float omega_m;
+  //机械转速  单位  rpm
+  float speed_rpm;
+
   /*
    * 磁链大小
    */

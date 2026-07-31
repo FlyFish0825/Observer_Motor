@@ -276,6 +276,10 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
      */
     omega_e = PI_Controller_RunError(&obs->pll, pll_error);
     obs->state.pll_omega_e = omega_e;
+
+    obs->state.omega_m = omega_e / 7.0f;
+
+    obs->state.speed_rpm = omega_e * 60.0f / (2.0f * FOC_PI * 7.0f);
   }
 
   /*

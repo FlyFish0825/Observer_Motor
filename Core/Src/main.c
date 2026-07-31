@@ -50,11 +50,7 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-static PI_Controller_t pi_d;
-static PI_Controller_t pi_q;
-
-static float pi_d_ref = 0.0f;
-static float pi_q_ref = 0.20f;
+static FOC_Control_t motor_control;
 
 
 /* USER CODE END PD */
@@ -81,6 +77,7 @@ static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 typedef struct {
   float data[6];
   uint32_t tail;
+  uint8_t just_float_on_off;
 } JustFloatFrame_t;
 
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
@@ -159,18 +156,36 @@ int main(void) {
   JustFloat_Init();
   AS5600_init();
 
-  PI_Controller_Init(&pi_d, 0.2f, 100.0f, 0.00004f, -7.0f, 7.0f);
-  PI_Controller_Init(&pi_q, 0.5f, 300.0f, 0.00004f, -8.0f, 8.0f);
+  /*
+   * 初始化电流环和速度环。
+   * 电流环参数仍为当前已经跑通的参数：
+   * Id: Kp=0.2, Ki=100, 输出-7~7V
+   * Iq: Kp=0.5, Ki=300, 输出-8~8V
+   */
+  FOC_Control_Init(&motor_control, foc.timer.Ts);
 
 
 
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
   }
-  DebugConsole_RegisterF32("id", &pi_d_ref, 
+
+
+  DebugConsole_RegisterF32("id", &motor_control.id_ref,
     -8.0f, 8.0f, false);
-  DebugConsole_RegisterF32("iq", &pi_q_ref, 
+  DebugConsole_RegisterF32("iq", &motor_control.iq_ref,
     -8.0f, 8.0f, false);
+  /* 速度模式参数：speed单位rpm，speed_en为0/1。 */
+  DebugConsole_RegisterF32("speed", &motor_control.speed_ref_rpm,
+    -10000.0f, 10000.0f, false);
+  DebugConsole_RegisterF32("speed_kp", &motor_control.speed_pi.kp,
+    0.0f, 1.0f, false);
+  DebugConsole_RegisterF32("speed_ki", &motor_control.speed_pi.ki,
+    0.0f, 100.0f, false);
+  DebugConsole_RegisterBool("speed_en",
+    &motor_control.speed_loop_enable, false);
+    DebugConsole_RegisterBool("just_float",
+    (uint32_t *)&tx_frame.just_float_on_off, false);
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -300,8 +315,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     // 校准完成
   } else {
-    DWT_Cycle_Count = DWT_GetCycle();
+    
 
+    DWT_Cycle_Count = DWT_GetCycle();
     adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
     adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
     adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
@@ -310,6 +326,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
+   
     Observer_Input_t obs_in;
     // SVPWM输出的真实占空比
     obs_in.duty_a = foc.svpwm.duty_a;
@@ -322,18 +339,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     obs_in.i_beta = foc.state.i_alpha_beta.beta;
 
     Observer_Run(&foc.observer, &obs_in);
-    
 
 
-    FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
-
-    static uint32_t FOC_State_Count = 0;
-
-    static float pid_output_d = 0.0f;
-    static float pid_output_q = 0.0f;
-
-
-    
     switch (foc_motor_state) {
 
     case FOC_MOTOR_IDLE:
@@ -346,24 +353,36 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       FOC_State_Count++;
 
       FOC_Open_Loop(0.0f, 1.0f);
-     
+
+      /*
+       * 开环阶段的Id/Iq也使用开环角度计算。
+       * 这样切换前的电流反馈与当前实际输出坐标系一致。
+       */
+      FOC_Park(&foc.state.i_alpha_beta, &foc_sin_cos, &foc.state.i_dq);
+
       if (FOC_State_Count >= 25000U) {
         theta_open_rad =
             FOC_WrapToPi((float)foc.state.theta_q31 * Q32_TO_RAD_F);
 
         theta_obs_rad = FOC_WrapToPi(foc.observer.state.phase_raw);
 
-        /*
-         * 保存当前开环控制角与观测器角的关系。
-         */
+        /* 保存当前开环控制角与观测器角的关系。 */
         observer_control_offset = FOC_WrapToPi(theta_open_rad - theta_obs_rad);
 
         observer_offset_valid = 1U;
-
         FOC_State_Count = 0U;
 
-        PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, pi_d_ref,foc.state.i_dq.d);
-        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, pi_q_ref,foc.state.i_dq.q);
+        /*
+         * 一次预装载完成Id、Iq电流环；
+         * 若提前启用了速度模式，也会预装载速度环。
+         */
+        FOC_Control_PreloadClosedLoop(
+            &motor_control,
+            foc.state.u_dq.d,
+            foc.state.u_dq.q,
+            foc.state.i_dq.d,
+            foc.state.i_dq.q,
+            foc.observer.state.speed_rpm);
 
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
       }
@@ -377,35 +396,18 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       if (observer_offset_valid == 0U) {
         foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-
         break;
       }
 
-      /*
-       * 观测器角度 + 切换时保存的固定偏移。
-       *
-       * 第一拍严格接近原开环角度，
-       * 后续随观测器持续旋转。
-       */
-       if(observer_control_offset>0.001f)
-       {
-        observer_control_offset-=0.0001f;
-       }
-       else if(observer_control_offset<-0.001f)
-       {
-        observer_control_offset+=0.0001f;
-       }
-       else if (observer_control_offset<0.001f && observer_control_offset>-0.001f)
-       {
-        observer_control_offset=0.0f;
-       }
-      
-     
-        pid_output_d =  PI_Controller_Run(&pi_d, pi_d_ref, foc.state.i_dq.d);
-        pid_output_q =  PI_Controller_Run(&pi_q, pi_q_ref, foc.state.i_dq.q);
-        foc.state.u_dq.d =pid_output_d;
-        foc.state.u_dq.q = pid_output_q;
-      
+      /* 逐步释放开环切换时保存的角度偏移。 */
+      if (observer_control_offset > 0.001f) {
+        observer_control_offset -= 0.0001f;
+      } else if (observer_control_offset < -0.001f) {
+        observer_control_offset += 0.0001f;
+      } else {
+        observer_control_offset = 0.0f;
+      }
+
       phase_control =
           FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
 
@@ -414,16 +416,33 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
 
+      /*
+       * Park、控制器、反Park严格使用同一个phase_control。
+       */
+      FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos,
+               &foc.state.i_dq);
 
-      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
+      FOC_Control_Run(
+          &motor_control,
+          foc.state.i_dq.d,
+          foc.state.i_dq.q,
+          foc.observer.state.speed_rpm,
+          &foc.state.u_dq.d,
+          &foc.state.u_dq.q);
+
+      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos,
+                  &foc.state.u_alpha_beta);
 
       FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
 
-      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
+      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus,
+                    &foc.timer, &foc.svpwm);
 
       break;
     }
     }
+
+    
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
@@ -436,15 +455,15 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     phase_obs_rad = foc.observer.state.phase_raw;
     phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
-    Fast_Send_6Floats(
-    foc.state.i_dq.d,
-    foc.state.i_dq.q,
-    foc.observer.state.speed_rpm,
-    foc.state.u_dq.d ,
-    foc.state.u_dq.q  ,
-  foc.observer.state.pll_phase*RAD_TO_DEG_F
-  );
- }
+    if (tx_frame.just_float_on_off == 1U) {
+      Fast_Send_6Floats(foc.state.i_dq.d, foc.state.i_dq.q,
+                        foc.observer.state.speed_rpm,
+                        DWT_ElapsedCycle(DWT_Cycle_Count), foc.state.u_dq.q,
+                        foc.observer.state.pll_phase * RAD_TO_DEG_F);
+
+    
+    }
+  }
 }
 
 int _write(int file, char *ptr, int len) {
@@ -509,7 +528,7 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void) {
 void JustFloat_Init(void) {
   /* VOFA+ JustFloat 帧尾 */
   tx_frame.tail = 0x7F800000UL;
-
+  tx_frame.just_float_on_off = 1U;
   /* 暂时关闭 USART DMA 发送请求 */
   CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
 
