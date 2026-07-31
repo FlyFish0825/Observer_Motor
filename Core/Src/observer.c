@@ -46,32 +46,33 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
   obs->state.initialized = 1U;
 }
 
-static void Observer_RebuildVoltage(const Observer_Input_t *input,
-                                    float *u_alpha, float *u_beta) {
+static __STATIC_FORCEINLINE void
+Observer_RebuildVoltage(const Observer_Input_t *input,
+                        float *u_alpha,
+                        float *u_beta)
+{
+  float vbus;
 
-  float ua;
-  float ub;
-  float uc;
-
-  /*
-   * PWM中心点对应0电压
-   *
-   * Ua=(Duty-0.5)*Vbus
-   */
-  ua = (input->duty_a - 0.5f) * input->vbus;
-
-  ub = (input->duty_b - 0.5f) * input->vbus;
-
-  uc = (input->duty_c - 0.5f) * input->vbus;
+  vbus = input->vbus;
 
   /*
-   * 三相 -> 两相
+   * 原式先计算三相相电压：
+   *   Ua=(Da-0.5)*Vbus
+   * 再做Clarke变换。
    *
-   * Clarke
+   * 展开后0.5公共项会完全抵消，因此可直接由占空比重构：
+   *   Ualpha = Vbus * (2Da-Db-Dc) / 3
+   *   Ubeta  = Vbus * (Db-Dc) / sqrt(3)
+   *
+   * 数学结果相同，但减少3次减法和多次浮点乘法。
    */
-  *u_alpha = (2.0f * ua - ub - uc) * (1.0f / 3.0f);
+  *u_alpha =
+      vbus *
+      (2.0f * input->duty_a - input->duty_b - input->duty_c) *
+      FOC_ONE_THIRD_F;
 
-  *u_beta = (ub - uc) * 0.57735026919f;
+  *u_beta =
+      vbus * (input->duty_b - input->duty_c) * FOC_INV_SQRT3_F;
 }
 
 /**
