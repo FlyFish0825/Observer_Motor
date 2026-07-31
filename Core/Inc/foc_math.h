@@ -281,16 +281,31 @@ CORDIC_SinCos_FastF32(int32_t angle_q31, float *sin_value, float *cos_value) {
 
   cos_q31 = (int32_t)CORDIC->RDATA;
   sin_q31 = (int32_t)CORDIC->RDATA;
-   * CORDIC_SinCos_Q31_Fast()产生函数调用和指针传参开销。
-   */
-  CORDIC->WDATA = (uint32_t)angle_q31;
-
-  cos_q31 = (int32_t)CORDIC->RDATA;
-  sin_q31 = (int32_t)CORDIC->RDATA;
 
   *sin_value = (float)sin_q31 * CORDIC_Q31_TO_FLOAT_F;
-
   *cos_value = (float)cos_q31 * CORDIC_Q31_TO_FLOAT_F;
+}
+
+/**
+ * @brief 已经位于[-pi, pi]范围内的弧度角快速转换为Q1.31。
+ * @note 不执行循环归一化，供观测器和闭环ISR的高频路径使用。
+ */
+__STATIC_FORCEINLINE int32_t
+CORDIC_RadToQ31_WrappedFast(float angle_rad)
+{
+    float normalized_angle = angle_rad * CORDIC_INV_PI_F;
+
+    /* Q1.31不能表示+1.0，保护恰好为+pi的情况。 */
+    if (normalized_angle >= 1.0f)
+    {
+        normalized_angle = 0.99999994f;
+    }
+    else if (normalized_angle < -1.0f)
+    {
+        normalized_angle = -1.0f;
+    }
+
+    return (int32_t)(normalized_angle * CORDIC_Q31_SCALE_F);
 }
 
 
@@ -482,27 +497,29 @@ __STATIC_FORCEINLINE float FOC_WrapToPi(float angle)
         angle -= 2.0f * FOC_PI;
     }
 
-
     while(angle < -FOC_PI)
     {
         angle += 2.0f * FOC_PI;
     }
 
+    return angle;
+}
+
+/**
+ * @brief 单步角度归一化。
+ * @note 仅用于已知输入最多越界一个2pi周期的高频路径。
+ */
+__STATIC_FORCEINLINE float FOC_WrapToPiFast(float angle)
+{
+    if (angle > FOC_PI)
+    {
+        angle -= CORDIC_TWO_PI_F;
+    }
+    else if (angle < -FOC_PI)
+    {
+        angle += CORDIC_TWO_PI_F;
+    }
 
     return angle;
 }
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-#endif
