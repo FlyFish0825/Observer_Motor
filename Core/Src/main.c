@@ -408,17 +408,21 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         break;
       }
 
-      /* 逐步释放开环切换时保存的角度偏移。 */
-      if (observer_control_offset > 0.001f) {
-        observer_control_offset -= 0.0001f;
-      } else if (observer_control_offset < -0.001f) {
-        observer_control_offset += 0.0001f;
-      } else {
-        observer_control_offset = 0.0f;
-      }
+      // /* 逐步释放开环切换时保存的角度偏移。 */
+      // if (observer_control_offset > 0.001f) {
+      //   observer_control_offset -= 0.0001f;
+      // } else if (observer_control_offset < -0.001f) {
+      //   observer_control_offset += 0.0001f;
+      // } else {
+      //   observer_control_offset = 0.0f;
+      // }
+      // observer_control_offset = 0.0f;
+      // phase_control = FOC_WrapToPiFast(
+      //     foc.observer.state.pll_phase + observer_control_offset);
+
 
       phase_control = FOC_WrapToPiFast(
-          foc.observer.state.phase_raw + observer_control_offset);
+      foc.observer.state.pll_phase);
 
       phase_q31 =
           (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
@@ -464,7 +468,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
 
 
-    
+
     /*
      * UART忙时不要先计算6个实参再进入发送函数返回。
      * 115200波特率下DMA绝大多数电流环周期都处于忙状态，
@@ -476,8 +480,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
           foc.state.i_dq.d,
           foc.state.i_dq.q,
           foc.observer.state.speed_rpm,
-          (float)(DWT->CYCCNT - DWT_Cycle_Count),
-          foc.state.u_dq.q,
+          foc.observer.state.psi_mag,
+          foc.observer.state.phase_raw * RAD_TO_DEG_F,
           foc.observer.state.pll_phase * RAD_TO_DEG_F);
     }
   }
