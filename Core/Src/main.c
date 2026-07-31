@@ -53,6 +53,9 @@
 static PI_Controller_t pi_d;
 static PI_Controller_t pi_q;
 
+static float pi_d_ref = 0.0f;
+static float pi_q_ref = 0.20f;
+
 
 /* USER CODE END PD */
 
@@ -156,17 +159,17 @@ int main(void) {
   JustFloat_Init();
   AS5600_init();
 
-  PI_Controller_Init(&pi_d, 0.010f, 25.0f, 0.00004f, -7.0f, 7.0f);
-  PI_Controller_Init(&pi_q, 0.0050f, 15.0f, 0.00004f, -7.0f, 7.0f);
+  PI_Controller_Init(&pi_d, 0.2f, 100.0f, 0.00004f, -7.0f, 7.0f);
+  PI_Controller_Init(&pi_q, 0.5f, 300.0f, 0.00004f, -8.0f, 8.0f);
 
 
 
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
   }
-  DebugConsole_RegisterF32("ud", &foc.state.u_dq.d, 
+  DebugConsole_RegisterF32("id", &pi_d_ref, 
     -8.0f, 8.0f, false);
-  DebugConsole_RegisterF32("uq", &foc.state.u_dq.q, 
+  DebugConsole_RegisterF32("iq", &pi_q_ref, 
     -8.0f, 8.0f, false);
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
@@ -342,7 +345,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(1.0f, 1.0f);
+      FOC_Open_Loop(0.0f, 1.0f);
      
       if (FOC_State_Count >= 25000U) {
         theta_open_rad =
@@ -359,8 +362,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
         FOC_State_Count = 0U;
 
-        PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, 0.0f,foc.state.i_dq.d);
-        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, 0.0f,foc.state.i_dq.q);
+        PI_Controller_PreloadOutput(&pi_d, foc.state.u_dq.d, pi_d_ref,foc.state.i_dq.d);
+        PI_Controller_PreloadOutput(&pi_q, foc.state.u_dq.q, pi_q_ref,foc.state.i_dq.q);
 
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
       }
@@ -395,15 +398,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        else if (observer_control_offset<0.001f && observer_control_offset>-0.001f)
        {
         observer_control_offset=0.0f;
-        // pid_output_d =  PI_Controller_Run(&pi_d, 0.0f, foc.state.i_dq.d);
-        // pid_output_q =  PI_Controller_Run(&pi_q, 1.0f, foc.state.i_dq.q);
-        // foc.state.u_dq.d =pid_output_d;
-        // foc.state.u_dq.q = pid_output_q;
        }
       
      
-         pid_output_d =  PI_Controller_Run(&pi_d, 0.0f, foc.state.i_dq.d);
-        pid_output_q =  PI_Controller_Run(&pi_q, 1.0f, foc.state.i_dq.q);
+        pid_output_d =  PI_Controller_Run(&pi_d, pi_d_ref, foc.state.i_dq.d);
+        pid_output_q =  PI_Controller_Run(&pi_q, pi_q_ref, foc.state.i_dq.q);
         foc.state.u_dq.d =pid_output_d;
         foc.state.u_dq.q = pid_output_q;
       
@@ -440,9 +439,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     Fast_Send_6Floats(
     foc.state.i_dq.d,
     foc.state.i_dq.q,
-    foc.observer.pll.output,
-    as5600_elec_rad*RAD_TO_DEG_F,
-    foc.observer.state.phase_raw*RAD_TO_DEG_F,
+    foc.observer.state.speed_rpm,
+    foc.state.u_dq.d ,
+    foc.state.u_dq.q  ,
   foc.observer.state.pll_phase*RAD_TO_DEG_F
   );
  }
