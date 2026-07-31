@@ -205,8 +205,7 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
 
   obs->state.correction_beta = correction_beta;
 
-  obs->state.phase_raw =
-      FOC_atan2_Fast(obs->state.psi_beta, obs->state.psi_alpha);
+  obs->state.phase_raw = FOC_atan2_Fast(psi_beta, psi_alpha);
   Observer_PLL_Run(obs);
 }
 
@@ -223,6 +222,7 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
   float psi_alpha_n;
   float psi_beta_n;
 
+  float inv_psi_mag;
   float pll_error;
   float omega_e;
 
@@ -260,7 +260,8 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     /*
      * 根据PLL估计角度计算sin/cos。
      */
-    pll_phase_q31 = CORDIC_RadToQ31(obs->state.pll_phase);
+    /* pll_phase始终已经保持在[-pi, pi]，无需再次循环归一化。 */
+    pll_phase_q31 = CORDIC_RadToQ31_WrappedFast(obs->state.pll_phase);
 
     CORDIC_SinCos_FastF32(pll_phase_q31, &observer_sin_cos.sin,
                           &observer_sin_cos.cos);
@@ -280,9 +281,10 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     omega_e = PI_Controller_RunError(&obs->pll, pll_error);
     obs->state.pll_omega_e = omega_e;
 
-    obs->state.omega_m = omega_e / 7.0f;
-
-    obs->state.speed_rpm = omega_e * 60.0f / (2.0f * FOC_PI * 7.0f);
+    /* 常数乘法替代每拍浮点除法。 */
+    obs->state.omega_m = omega_e * (1.0f / 7.0f);
+    obs->state.speed_rpm =
+        omega_e * (60.0f / (2.0f * FOC_PI * 7.0f));
   }
 
   /*
@@ -290,5 +292,5 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
    * 都必须让PLL角度继续前进。
    */
   obs->state.pll_phase =
-      FOC_WrapToPi(obs->state.pll_phase + omega_e * obs->config.Ts);
+      FOC_WrapToPiFast(obs->state.pll_phase + omega_e * obs->config.Ts);
 }
