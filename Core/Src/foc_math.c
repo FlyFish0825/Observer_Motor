@@ -53,11 +53,11 @@ void FOC_Data_Init(void) {
   foc.state.omega = 0.0f;
 
   Observer_MotorParam_t motor = {
-      .Rs = 2.55f, 
-      .Ls = 0.00086f, 
-      .flux_linkage = 0.0035f, 
-      .pole_pairs = 7
-    };
+    .Rs = 6.97f,          /* 相电阻：Ω */
+    .Ls = 0.00535f,       /* 相电感：5.35 mH */
+    .flux_linkage = 0.0239f, /* 永磁磁链：Wb */
+    .pole_pairs = 4U      /* 4对极 */
+};
 
   Observer_Config_t observer_cfg = {/*
                                      * VESC经验值
