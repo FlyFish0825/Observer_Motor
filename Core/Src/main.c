@@ -77,11 +77,13 @@ static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 typedef struct {
   float data[6];
   uint32_t tail;
-  uint8_t just_float_on_off;
 } JustFloatFrame_t;
 
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
+
+/* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
+static volatile uint32_t just_float_on_off = 1U;
 
 uint16_t as5600_raw = 0U;
 float as5600_elec_rad = 0.0f;
