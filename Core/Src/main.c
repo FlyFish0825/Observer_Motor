@@ -186,8 +186,8 @@ int main(void) {
     0.0f, 100.0f, false);
   DebugConsole_RegisterBool("speed_en",
     &motor_control.speed_loop_enable, false);
-    DebugConsole_RegisterBool("just_float",
-    (uint32_t *)&tx_frame.just_float_on_off, false);
+  DebugConsole_RegisterBool("just_float",
+    &just_float_on_off, false);
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -284,7 +284,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
   static uint16_t calibration_count = 0;
   uint32_t DWT_Cycle_Count; // 获取当前的DWT计数器值
-  uint32_t adc[3] = {0};
+  uint16_t adc_a;
+  uint16_t adc_b;
+  uint16_t adc_c;
 
   static uint32_t FOC_State_Count = 0U;
 
@@ -415,10 +417,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         observer_control_offset = 0.0f;
       }
 
-      phase_control =
-          FOC_WrapToPi(foc.observer.state.phase_raw + observer_control_offset);
+      phase_control = FOC_WrapToPiFast(
+          foc.observer.state.phase_raw + observer_control_offset);
 
-      phase_q31 = (uint32_t)CORDIC_RadToQ31(phase_control);
+      phase_q31 =
+          (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
 
       CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
@@ -472,11 +475,10 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       Fast_Send_6Floats(
           foc.state.i_dq.d,
           foc.state.i_dq.q,
-                        foc.observer.state.speed_rpm,
-                        DWT_ElapsedCycle(DWT_Cycle_Count), foc.state.u_dq.q,
-                        foc.observer.state.pll_phase * RAD_TO_DEG_F);
-
-    
+          foc.observer.state.speed_rpm,
+          (float)(DWT->CYCCNT - DWT_Cycle_Count),
+          foc.state.u_dq.q,
+          foc.observer.state.pll_phase * RAD_TO_DEG_F);
     }
   }
 }
@@ -543,7 +545,7 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void) {
 void JustFloat_Init(void) {
   /* VOFA+ JustFloat 帧尾 */
   tx_frame.tail = 0x7F800000UL;
-  tx_frame.just_float_on_off = 1U;
+  just_float_on_off = 1U;
   /* 暂时关闭 USART DMA 发送请求 */
   CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
 
@@ -612,17 +614,8 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
                        __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart2_tx));
 
   /*
-   * CPAR正常情况下初始化一次即可。
-   * 这里再次写入，方便排除初始化错误。
-   */
-  hdma_usart2_tx.Instance->CPAR = (uint32_t)&USART2->TDR;
-
-  hdma_usart2_tx.Instance->CMAR = (uint32_t)&tx_frame;
-
-  /*
-   * 注意：
-   * 只有DMA内存和外设数据宽度均为Byte时，
-   * CNDTR才等于字节数量28。
+   * CPAR和CMAR已在JustFloat_Init()中固定配置，
+   * 每次发送只需重新装载传输数量。
    */
   hdma_usart2_tx.Instance->CNDTR = sizeof(JustFloatFrame_t);
 
@@ -639,12 +632,8 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   __DMB();
 
   /*
-   * 如果担心其他代码关闭了DMAT，可以再次确保使能。
-   */
-  SET_BIT(USART2->CR3, USART_CR3_DMAT);
-
-  /*
-   * 开启DMA，USART的TX请求会立即触发数据搬运。
+   * DMAT已在JustFloat_Init()中保持使能。
+   * 开启DMA后USART TX请求立即开始搬运。
    */
   __HAL_DMA_ENABLE(&hdma_usart2_tx);
 
