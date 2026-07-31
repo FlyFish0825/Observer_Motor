@@ -523,3 +523,4 @@ __STATIC_FORCEINLINE float FOC_WrapToPiFast(float angle)
     return angle;
 }
 
+#endif /* __FOC_MATH_H */
