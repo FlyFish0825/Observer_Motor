@@ -11,7 +11,8 @@ FOC_SIN_COS_t foc_sin_cos = {0};
 FOC_SIN_COS_t observer_sin_cos = {0};
 FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE;
 
-
+/* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */
+static uint32_t foc_current_rebuild_threshold = 0U;
 
 /**
  * @brief FOC 数据初始化。
@@ -28,6 +29,9 @@ void FOC_Data_Init(void) {
    */
   foc.timer.Ts =
       (foc.timer.pwm_arr + 1.0f) * 2.0f / (float)foc.timer.clock_freq;
+
+  foc_current_rebuild_threshold =
+      (foc.timer.pwm_arr * 95U) / 100U;
 
   foc.calibration.calibrated = 0U;
   foc.calibration.ia_offset = 0.0f;
@@ -283,15 +287,15 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
    */
   if ((u_abc == NULL) || (timer == NULL) || (timer->pwm_arr == 0U))
   {
-  output->duty_a = 0.5f;
-  output->duty_b = 0.5f;
-  output->duty_c = 0.5f;
-  output->ccr_a = 0U;
-  output->ccr_b = 0U;
-  output->ccr_c = 0U;
-  output->common_mode = 0.0f;
-  output->voltage_scale = 1.0f;
-  output->limited = 0U;
+    output->duty_a = 0.5f;
+    output->duty_b = 0.5f;
+    output->duty_c = 0.5f;
+    output->ccr_a = 0U;
+    output->ccr_b = 0U;
+    output->ccr_c = 0U;
+    output->common_mode = 0.0f;
+    output->voltage_scale = 1.0f;
+    output->limited = 0U;
     return HAL_ERROR;
   }
 
@@ -303,7 +307,7 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
     if (middle_ccr > arr)
     {
       middle_ccr = arr;
-  }
+    }
 
     output->duty_a = 0.5f;
     output->duty_b = 0.5f;
@@ -463,4 +467,3 @@ void CORDIC_SinCos_Q31_Fast(int32_t angle_q31, int32_t *sin_q31,
 
   *sin_q31 = (int32_t)CORDIC->RDATA;
 }
-
