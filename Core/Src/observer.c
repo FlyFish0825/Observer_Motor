@@ -282,9 +282,11 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     obs->state.pll_omega_e = omega_e;
 
     /* 常数乘法替代每拍浮点除法。 */
-    obs->state.omega_m = omega_e * (1.0f / 7.0f);
-    obs->state.speed_rpm =
-        omega_e * (60.0f / (2.0f * FOC_PI * 7.0f));
+    float inv_pole_pairs = 1.0f / (float)obs->motor.pole_pairs;
+
+    obs->state.omega_m = omega_e * inv_pole_pairs;
+
+    obs->state.speed_rpm = obs->state.omega_m * (60.0f / (2.0f * FOC_PI));
   }
 
   /*

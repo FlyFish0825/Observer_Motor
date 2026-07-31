@@ -214,7 +214,7 @@ int main(void) {
     as5600_raw = ((uint16_t)(buf[0] & 0x0FU) << 8) | (uint16_t)buf[1];
     int32_t delta_raw = (int32_t)as5600_raw - 1017;
 
-    as5600_elec_rad = (float)delta_raw * 7.0f * (2.0f * FOC_PI / 4096.0f);
+    as5600_elec_rad = (float)delta_raw *foc.observer.motor.pole_pairs * (2.0f * FOC_PI / 4096.0f);
 
     as5600_elec_rad = FOC_WrapToPi(-as5600_elec_rad);
 
@@ -361,7 +361,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(0.0f, 1.0f);
+      FOC_Open_Loop(0.0f, 5.0f);
 
       /*
        * 开环阶段的Id/Iq也使用开环角度计算。
@@ -408,17 +408,16 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         break;
       }
 
-      // /* 逐步释放开环切换时保存的角度偏移。 */
-      // if (observer_control_offset > 0.001f) {
-      //   observer_control_offset -= 0.0001f;
-      // } else if (observer_control_offset < -0.001f) {
-      //   observer_control_offset += 0.0001f;
-      // } else {
-      //   observer_control_offset = 0.0f;
-      // }
-      // observer_control_offset = 0.0f;
-      // phase_control = FOC_WrapToPiFast(
-      //     foc.observer.state.pll_phase + observer_control_offset);
+      /* 逐步释放开环切换时保存的角度偏移。 */
+      if (observer_control_offset > 0.001f) {
+        observer_control_offset -= 0.0001f;
+      } else if (observer_control_offset < -0.001f) {
+        observer_control_offset += 0.0001f;
+      } else {
+        observer_control_offset = 0.0f;
+      }
+      phase_control = FOC_WrapToPiFast(
+          foc.observer.state.pll_phase + observer_control_offset);
 
 
       phase_control = FOC_WrapToPiFast(

@@ -13,6 +13,8 @@ FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE;
 
 /* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */
 static uint32_t foc_current_rebuild_threshold = 0U;
+static uint32_t open_loop_phase_step = 0U;
+
 
 /**
  * @brief FOC 数据初始化。
@@ -62,14 +64,14 @@ void FOC_Data_Init(void) {
   Observer_Config_t observer_cfg = {/*
                                      * VESC经验值
                                      */
-                                    .gain =1e7f,
-                                    .Ts = 0.00004f,  //25kHz
-                                    .psi_min = motor.flux_linkage*0.5f,
-                                    .psi_max = motor.flux_linkage*3.0f,
-                                    .pll_kp = 3000.0f,
-                                    .pll_ki = 20000.0f,
-                                    .pll_omega_limit = 5000.0f
-                                  };
+                                    .gain = 2.0e5f,
+                                    .Ts = foc.timer.Ts, // 25kHz
+                                    .psi_min = 0.007f,
+                                    .psi_max = 0.050f,
+                                    .pll_kp = 266.0f,
+                                    .pll_ki = 35500.0f,
+
+                                    .pll_omega_limit = 1000.0f};
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
 
@@ -175,19 +177,63 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   }
 }
 
-void FOC_Open_Loop(float u_d, float u_q) {
 
-  foc.state.u_dq.d = u_d;
-  foc.state.u_dq.q = u_q;
-  foc.state.theta_q31 = foc.state.theta_q31 + 0x250000;
-  CORDIC_SinCos_FastF32(foc.state.theta_q31, &foc_sin_cos.sin,
-                        &foc_sin_cos.cos);
+void FOC_OpenLoop_Reset(void)
+{
+    open_loop_phase_step = 0U;
+    foc.state.theta_q31 = 0U;
+}
 
-  FOC_InvPark(&foc.state.u_dq, &foc_sin_cos, &foc.state.u_alpha_beta);
 
-  FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
+void FOC_Open_Loop(float u_d, float u_q)
+{
+    const uint32_t target_step =
+        0x003210D9U;
 
-  FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
+    const uint32_t acceleration_step =
+        0x40U;
+
+    uint32_t next_step;
+
+    foc.state.u_dq.d = u_d;
+    foc.state.u_dq.q = u_q;
+
+    if (open_loop_phase_step < target_step)
+    {
+        next_step =
+            open_loop_phase_step +
+            acceleration_step;
+
+        if (next_step > target_step)
+        {
+            next_step = target_step;
+        }
+
+        open_loop_phase_step = next_step;
+    }
+
+    foc.state.theta_q31 +=
+        open_loop_phase_step;
+
+    CORDIC_SinCos_FastF32(
+        foc.state.theta_q31,
+        &foc_sin_cos.sin,
+        &foc_sin_cos.cos);
+
+    FOC_InvPark(
+        &foc.state.u_dq,
+        &foc_sin_cos,
+        &foc.state.u_alpha_beta);
+
+    FOC_InvClarke(
+        &foc.state.u_alpha_beta,
+        &foc.state.u_abc);
+
+    FOC_SVPWM_Run(
+        &foc.state.u_abc,
+        foc.state.vbus,
+        &foc.timer,
+        &foc.svpwm);
 }
 
 /**

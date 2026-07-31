@@ -26,6 +26,10 @@
 #define FOC_PI            3.14159265358979323846f
 #define CURRENT_OFFSET_SAMPLE_NUM 1000 // 校准采样次数
 
+//开环对应的 Q31 每拍角度增量大约为：
+#define OPEN_LOOP_PHASE_STEP_TARGET 0x003210DU
+//加速度
+#define OPEN_LOOP_ACCEL_STEP 0x80U
 /* ======================== FOC 结构体变量 ======================== */
 
 /*
