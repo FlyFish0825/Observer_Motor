@@ -250,165 +250,132 @@ HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
  */
 HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
                                 const FOC_TimerConfig_t *timer,
-                                FOC_SVPWM_Output_t *output) {
+                                FOC_SVPWM_Output_t *output)
+{
+  float ua;
+  float ub;
+  float uc;
+
   float u_max;
   float u_min;
   float u_span;
 
   float common_mode;
   float voltage_scale;
+  float inv_vbus;
 
-  float u_a_pwm;
-  float u_b_pwm;
-  float u_c_pwm;
+  float duty_a;
+  float duty_b;
+  float duty_c;
 
+  uint32_t arr;
   uint32_t middle_ccr;
 
-  /*
-   * output为空时无法返回结果。
-   */
-  if (output == NULL) {
+  if (output == NULL)
+  {
     return HAL_ERROR;
   }
 
   /*
-   * 默认输出零电压矢量：
-   * 三相占空比全部为50%。
+   * 错误路径才生成安全的50%占空比。
+   * 正常FOC路径不再每拍先写一遍默认值、随后又覆盖。
    */
+  if ((u_abc == NULL) || (timer == NULL) || (timer->pwm_arr == 0U))
+  {
   output->duty_a = 0.5f;
   output->duty_b = 0.5f;
   output->duty_c = 0.5f;
-
   output->ccr_a = 0U;
   output->ccr_b = 0U;
   output->ccr_c = 0U;
-
   output->common_mode = 0.0f;
   output->voltage_scale = 1.0f;
   output->limited = 0U;
-
-  /*
-   * 参数检查。
-   */
-  if ((u_abc == NULL) || (timer == NULL) || (timer->pwm_arr == 0U)) {
     return HAL_ERROR;
   }
 
-  /*
-   * 参数错误时仍返回50%占空比对应的CCR，
-   * 保持三相线电压为零。
-   */
-  middle_ccr = (timer->pwm_arr + 1U) / 2U;
+  arr = timer->pwm_arr;
 
-  if (middle_ccr > timer->pwm_arr) {
-    middle_ccr = timer->pwm_arr;
+  if (vbus <= 0.001f)
+  {
+    middle_ccr = (arr + 1U) >> 1U;
+    if (middle_ccr > arr)
+    {
+      middle_ccr = arr;
   }
 
-  output->ccr_a = middle_ccr;
-  output->ccr_b = middle_ccr;
-  output->ccr_c = middle_ccr;
-
-  /*
-   * 母线电压过低，禁止进行除法计算。
-   */
-  if (vbus <= 0.001f) {
+    output->duty_a = 0.5f;
+    output->duty_b = 0.5f;
+    output->duty_c = 0.5f;
+    output->ccr_a = middle_ccr;
+    output->ccr_b = middle_ccr;
+    output->ccr_c = middle_ccr;
+    output->common_mode = 0.0f;
+    output->voltage_scale = 1.0f;
+    output->limited = 0U;
     return HAL_ERROR;
   }
 
-  /*
-   * 查找三相参考电压中的最大值和最小值。
-   */
-  u_max = u_abc->a;
+  /* 三相输入只读一次，减少结构体重复访存。 */
+  ua = u_abc->a;
+  ub = u_abc->b;
+  uc = u_abc->c;
 
-  if (u_abc->b > u_max) {
-    u_max = u_abc->b;
+  u_max = ua;
+  if (ub > u_max)
+  {
+    u_max = ub;
+  }
+  if (uc > u_max)
+  {
+    u_max = uc;
   }
 
-  if (u_abc->c > u_max) {
-    u_max = u_abc->c;
+  u_min = ua;
+  if (ub < u_min)
+  {
+    u_min = ub;
+  }
+  if (uc < u_min)
+  {
+    u_min = uc;
   }
 
-  u_min = u_abc->a;
-
-  if (u_abc->b < u_min) {
-    u_min = u_abc->b;
-  }
-
-  if (u_abc->c < u_min) {
-    u_min = u_abc->c;
-  }
-
-  /*
-   * 三相电压跨度。
-   *
-   * SVPWM能够正常输出的条件：
-   *
-   *     u_max - u_min <= Vbus
-   */
   u_span = u_max - u_min;
-
-  /*
-   * 输入电压超过母线能力时，三相一起缩放。
-   *
-   * 不能分别对三相硬截断，否则会改变电压矢量方向，
-   * 引入明显的电流畸变。
-   */
   voltage_scale = 1.0f;
 
-  if (u_span > vbus) {
+  if (u_span > vbus)
+  {
     voltage_scale = vbus / u_span;
-    output->limited = 1U;
   }
 
-  /*
-   * 公共模电压注入：
-   *
-   * common_mode = -(Umax + Umin) / 2
-   *
-   * 注入后最大相和最小相关于0对称，
-   * 可以充分利用直流母线电压。
-   */
   common_mode = -0.5f * (u_max + u_min);
 
   /*
-   * 加入公共模电压，并进行统一缩放。
+   * 每拍只计算一次1/Vbus，三相占空比全部改用乘法。
+   * 原代码在正常路径中进行了3次相同的浮点除法。
    */
-  u_a_pwm = (u_abc->a + common_mode) * voltage_scale;
-  u_b_pwm = (u_abc->b + common_mode) * voltage_scale;
-  u_c_pwm = (u_abc->c + common_mode) * voltage_scale;
+  inv_vbus = 1.0f / vbus;
 
-  /*
-   * 相电压转占空比：
-   *
-   * duty = 0.5 + Uphase / Vbus
-   */
-  output->duty_a = 0.5f + u_a_pwm / vbus;
-  output->duty_b = 0.5f + u_b_pwm / vbus;
-  output->duty_c = 0.5f + u_c_pwm / vbus;
+  duty_a = 0.5f + (ua + common_mode) * voltage_scale * inv_vbus;
+  duty_b = 0.5f + (ub + common_mode) * voltage_scale * inv_vbus;
+  duty_c = 0.5f + (uc + common_mode) * voltage_scale * inv_vbus;
 
-  /*
-   * 防止浮点误差导致占空比略微越界。
-   */
-  output->duty_a = FOC_ClampDuty(output->duty_a);
-  output->duty_b = FOC_ClampDuty(output->duty_b);
-  output->duty_c = FOC_ClampDuty(output->duty_c);
+  duty_a = FOC_ClampDuty(duty_a);
+  duty_b = FOC_ClampDuty(duty_b);
+  duty_c = FOC_ClampDuty(duty_c);
 
-  /*
-   * 占空比转换为定时器CCR。
-   */
-  output->ccr_a = FOC_DutyToCCR(output->duty_a, timer->pwm_arr);
+  output->duty_a = duty_a;
+  output->duty_b = duty_b;
+  output->duty_c = duty_c;
 
-  output->ccr_b = FOC_DutyToCCR(output->duty_b, timer->pwm_arr);
+  output->ccr_a = FOC_DutyToCCR(duty_a, arr);
+  output->ccr_b = FOC_DutyToCCR(duty_b, arr);
+  output->ccr_c = FOC_DutyToCCR(duty_c, arr);
 
-  output->ccr_c = FOC_DutyToCCR(output->duty_c, timer->pwm_arr);
-
-  /*
-   * 记录实际加入的公共模电压。
-   * 因为最终三相电压经过了统一缩放，所以公共模也要乘比例。
-   */
   output->common_mode = common_mode * voltage_scale;
-
   output->voltage_scale = voltage_scale;
+  output->limited = (voltage_scale < 1.0f) ? 1U : 0U;
 
   return HAL_OK;
 }
