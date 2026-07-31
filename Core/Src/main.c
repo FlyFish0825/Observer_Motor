@@ -452,16 +452,24 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
 
-    float theta_open_rad;
-    theta_open_rad = (float)foc.state.theta_q31 * Q32_TO_RAD_F;
-    theta_open_rad = FOC_WrapToPi(theta_open_rad);
 
-    float phase_obs_rad;
-    phase_obs_rad = foc.observer.state.phase_raw;
-    phase_obs_rad = FOC_WrapToPi(phase_obs_rad);
 
-    if (tx_frame.just_float_on_off == 1U) {
-      Fast_Send_6Floats(foc.state.i_dq.d, foc.state.i_dq.q,
+
+
+
+
+
+    
+    /*
+     * UART忙时不要先计算6个实参再进入发送函数返回。
+     * 115200波特率下DMA绝大多数电流环周期都处于忙状态，
+     * 外层先判断TC可减少函数调用、周期差计算和浮点角度换算。
+     */
+    if ((just_float_on_off != 0U) &&
+        ((USART2->ISR & USART_ISR_TC) != 0U)) {
+      Fast_Send_6Floats(
+          foc.state.i_dq.d,
+          foc.state.i_dq.q,
                         foc.observer.state.speed_rpm,
                         DWT_ElapsedCycle(DWT_Cycle_Count), foc.state.u_dq.q,
                         foc.observer.state.pll_phase * RAD_TO_DEG_F);
