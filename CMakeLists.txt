@@ -39,6 +39,15 @@ add_executable(${CMAKE_PROJECT_NAME})
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
 
+# Release speed optimization for the high-frequency FOC control path.
+# The toolchain currently uses -Os for Release; -O3 below appears later
+# on the compiler command line and therefore takes precedence.
+# LTO allows GCC to inline and optimize across main.c/foc_math.c/
+# observer.c/controller.c without changing the source architecture.
+target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
+    "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C>>:-O3;-flto>"
+)
+
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
