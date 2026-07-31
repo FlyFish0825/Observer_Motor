@@ -150,7 +150,8 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   handle->state.i_abc.c =
       (handle->calibration.ic_offset - (float)adc3) * handle->current.gain_c;
 
-  if (ccr_max > ((float)handle->timer.pwm_arr * 0.95f)) {
+  /* 使用初始化时算好的整数阈值，避免ISR中每拍做整型转浮点和乘法。 */
+  if (ccr_max > foc_current_rebuild_threshold) {
     switch (handle->current.rebuild) {
     case CURRENT_REBUILD_A:
       handle->state.i_abc.a = -handle->state.i_abc.b - handle->state.i_abc.c;
