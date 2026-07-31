@@ -317,12 +317,17 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
   } else {
     
 
-    DWT_Cycle_Count = DWT_GetCycle();
-    adc[0] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_1);
-    adc[1] = HAL_ADCEx_InjectedGetValue(&hadc2, ADC_INJECTED_RANK_1);
-    adc[2] = HAL_ADCEx_InjectedGetValue(&hadc1, ADC_INJECTED_RANK_2);
+    /*
+     * 高频ISR直接读取注入数据寄存器。
+     * ADC注入Rank与工程配置固定：ADC1 JDR1=Ia，ADC2 JDR1=Ib，ADC1 JDR2=Ic。
+     */
+    DWT_Cycle_Count = DWT->CYCCNT;
 
-    FOC_Get_Iabc(&foc, adc[0], adc[1], adc[2]);
+    adc_a = (uint16_t)ADC1->JDR1;
+    adc_b = (uint16_t)ADC2->JDR1;
+    adc_c = (uint16_t)ADC1->JDR2;
+
+    FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
 
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
