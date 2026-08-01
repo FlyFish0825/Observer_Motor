@@ -53,23 +53,22 @@ void FOC_Data_Init(void) {
   foc.state.omega = 0.0f;
 
   Observer_MotorParam_t motor = {
-      .Rs = 3.7f, 
-      .Ls = 0.00016f, 
-      .flux_linkage = 0.005f, 
-      .pole_pairs = 7
-    };
+    .Rs = 3.70f,
+    .Ls = 0.00163f,
+    .flux_linkage = 0.00056f,
+    .pole_pairs = 7U
+};
 
-  Observer_Config_t observer_cfg = {/*
-                                     * VESC经验值
-                                     */
-                                    .gain =1e7f,
-                                    .Ts = 0.00004f,  //25kHz
-                                    .psi_min = motor.flux_linkage*0.5f,
-                                    .psi_max = motor.flux_linkage*3.0f,
-                                    .pll_kp = 3000.0f,
-                                    .pll_ki = 20000.0f,
-                                    .pll_omega_limit = 5000.0f
-                                  };
+  Observer_Config_t observer_cfg = {.gain = 1.0e9f,
+                                    .Ts = 0.00004f,
+
+                                    .psi_min = 0.00018f,
+                                    .psi_max = 0.00150f,
+
+                                    .pll_kp = 180.0f,
+                                    .pll_ki = 16000.0f,
+
+                                    .pll_omega_limit = 1500.0f};
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
 
@@ -177,9 +176,31 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
 
 void FOC_Open_Loop(float u_d, float u_q) {
 
+  static uint32_t phase_step = 0U;
+
+  /*
+   * 300 rpm机械转速，7对极，25kHz控制频率。
+   */
+  const uint32_t phase_step_target = 0x005BC01AU;
+
+  /*
+   * 约1秒加速到300 rpm。
+   */
+  const uint32_t acceleration_step = 0x100U;
+
   foc.state.u_dq.d = u_d;
   foc.state.u_dq.q = u_q;
-  foc.state.theta_q31 = foc.state.theta_q31 + 0x250000;
+
+  if (phase_step < phase_step_target) {
+    phase_step += acceleration_step;
+
+    if (phase_step > phase_step_target) {
+      phase_step = phase_step_target;
+    }
+  }
+
+  foc.state.theta_q31 += phase_step;
+
   CORDIC_SinCos_FastF32(foc.state.theta_q31, &foc_sin_cos.sin,
                         &foc_sin_cos.cos);
 

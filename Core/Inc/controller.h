@@ -51,16 +51,17 @@ typedef struct {
  * 电流环参数保持当前工程中的数值不变。
  * 电流环每次ADC注入转换完成时运行，当前频率25kHz。
  */
-#define FOC_ID_PI_KP_DEFAULT 0.2f
-#define FOC_ID_PI_KI_DEFAULT 100.0f
-#define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-7.0f)
-#define FOC_ID_PI_OUTPUT_MAX_DEFAULT 7.0f
+#define FOC_ID_PI_KP_DEFAULT 1.0f
+#define FOC_ID_PI_KI_DEFAULT 2300.0f
+#define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-8.0f)
+#define FOC_ID_PI_OUTPUT_MAX_DEFAULT   8.0f
 
-#define FOC_IQ_PI_KP_DEFAULT 0.5f
-#define FOC_IQ_PI_KI_DEFAULT 300.0f
+
+
+#define FOC_IQ_PI_KP_DEFAULT 1.0f
+#define FOC_IQ_PI_KI_DEFAULT 2300.0f
 #define FOC_IQ_PI_OUTPUT_MIN_DEFAULT (-8.0f)
-#define FOC_IQ_PI_OUTPUT_MAX_DEFAULT 8.0f
-
+#define FOC_IQ_PI_OUTPUT_MAX_DEFAULT   8.0f
 /*
  * 速度环先使用一组偏保守的初值，后续可在线微调。
  * 单位：
