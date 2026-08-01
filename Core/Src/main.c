@@ -353,7 +353,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(0.0f, 1.0f);
+      FOC_Open_Loop(0.0f, 0.5f);
 
       /*
        * 开环阶段的Id/Iq也使用开环角度计算。
@@ -400,21 +400,21 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         break;
       }
 
-      // /* 逐步释放开环切换时保存的角度偏移。 */
-      // if (observer_control_offset > 0.001f) {
-      //   observer_control_offset -= 0.0001f;
-      // } else if (observer_control_offset < -0.001f) {
-      //   observer_control_offset += 0.0001f;
-      // } else {
-      //   observer_control_offset = 0.0f;
-      // }
-      // observer_control_offset = 0.0f;
-      // phase_control = FOC_WrapToPiFast(
-      //     foc.observer.state.pll_phase + observer_control_offset);
-
-
+      /* 逐步释放开环切换时保存的角度偏移。 */
+      if (observer_control_offset > 0.001f) {
+        observer_control_offset -= 0.0001f;
+      } else if (observer_control_offset < -0.001f) {
+        observer_control_offset += 0.0001f;
+      } else {
+        observer_control_offset = 0.0f;
+      }
+      observer_control_offset = 0.0f;
       phase_control = FOC_WrapToPiFast(
-      foc.observer.state.pll_phase);
+          foc.observer.state.pll_phase + observer_control_offset);
+
+
+      // phase_control = FOC_WrapToPiFast(
+      // foc.observer.state.pll_phase);
 
       phase_q31 =
           (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
@@ -470,7 +470,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         ((USART2->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
           foc.state.i_dq.d,
-          foc.state.i_dq.q,
+          foc.observer.state.psi_valid,
           foc.observer.state.speed_rpm,
           foc.observer.state.psi_mag,
           foc.observer.state.phase_raw * RAD_TO_DEG_F,

@@ -141,6 +141,8 @@ typedef struct {
    */
   uint8_t initialized;
 
+  uint8_t psi_valid;
+
 } Observer_State_t;
 
 /*

@@ -55,20 +55,20 @@ void FOC_Data_Init(void) {
   Observer_MotorParam_t motor = {
     .Rs = 3.70f,
     .Ls = 0.00163f,
-    .flux_linkage = 0.00056f,
+    .flux_linkage = 0.008458f,
     .pole_pairs = 7U
 };
 
-  Observer_Config_t observer_cfg = {.gain = 1.0e9f,
+  Observer_Config_t observer_cfg = {.gain = 2.0e7f,
                                     .Ts = 0.00004f,
 
                                     .psi_min = 0.00018f,
                                     .psi_max = 0.00150f,
 
-                                    .pll_kp = 180.0f,
-                                    .pll_ki = 16000.0f,
+                                    .pll_kp = 444.0f,
+                                    .pll_ki = 20000.0f,
 
-                                    .pll_omega_limit = 1500.0f};
+                                    .pll_omega_limit = 5000.0f};
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
 

@@ -326,7 +326,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
                      FOC_SPEED_PI_OUTPUT_MAX_DEFAULT);
 
   control->id_ref = 0.0f;
-  control->iq_ref = 0.050f;
+  control->iq_ref = 0.50f;
   control->speed_ref_rpm = 200.0f;
 
   /* 默认仍然保持原工程的电流模式。 */

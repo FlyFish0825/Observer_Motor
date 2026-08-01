@@ -247,6 +247,7 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
    */
   omega_e = obs->pll.output;
 
+  obs->state.psi_valid = psi_valid;
   if (psi_valid != 0U) {
     /*
      * 磁链归一化。
@@ -282,9 +283,9 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     obs->state.pll_omega_e = omega_e;
 
     /* 常数乘法替代每拍浮点除法。 */
-    obs->state.omega_m = omega_e * (1.0f / 7.0f);
+    obs->state.omega_m = omega_e * (1.0f / obs->motor.pole_pairs);
     obs->state.speed_rpm =
-        omega_e * (60.0f / (2.0f * FOC_PI * 7.0f));
+        omega_e * (60.0f / (2.0f * FOC_PI * obs->motor.pole_pairs));
   }
 
   /*
@@ -293,4 +294,6 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
    */
   obs->state.pll_phase =
       FOC_WrapToPiFast(obs->state.pll_phase + omega_e * obs->config.Ts);
+
+ 
 }
