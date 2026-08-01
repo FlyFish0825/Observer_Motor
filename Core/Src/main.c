@@ -206,17 +206,9 @@ int main(void) {
     Error_Handler();
   }
 
-  uint8_t buf[2];
+
   while (1) {
-    HAL_I2C_Mem_Read(&hi2c1, (0x36U << 1), 0x0CU, I2C_MEMADD_SIZE_8BIT, buf, 2U,
-                     10U);
-
-    as5600_raw = ((uint16_t)(buf[0] & 0x0FU) << 8) | (uint16_t)buf[1];
-    int32_t delta_raw = (int32_t)as5600_raw - 1017;
-
-    as5600_elec_rad = (float)delta_raw * 7.0f * (2.0f * FOC_PI / 4096.0f);
-
-    as5600_elec_rad = FOC_WrapToPi(-as5600_elec_rad);
+   
 
     // ADC1 采样母线电压
     HAL_ADC_Start(&hadc1);
