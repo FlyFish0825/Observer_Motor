@@ -177,9 +177,11 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
 
 void FOC_Open_Loop(float u_d, float u_q) {
 
+  static uint32_t FOC_OpenLoop_speed = 0x250U;
   foc.state.u_dq.d = u_d;
   foc.state.u_dq.q = u_q;
-  foc.state.theta_q31 = foc.state.theta_q31 + 0x250000;
+  FOC_OpenLoop_speed++;
+  foc.state.theta_q31 = foc.state.theta_q31 + 0x250*FOC_OpenLoop_speed;
   CORDIC_SinCos_FastF32(foc.state.theta_q31, &foc_sin_cos.sin,
                         &foc_sin_cos.cos);
 

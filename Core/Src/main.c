@@ -361,7 +361,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(0.0f, 1.0f);
+      FOC_Open_Loop(0.0f, 0.8f);
 
       /*
        * 开环阶段的Id/Iq也使用开环角度计算。
