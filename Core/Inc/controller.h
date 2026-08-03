@@ -53,13 +53,13 @@ typedef struct {
  */
 #define FOC_ID_PI_KP_DEFAULT 0.2f
 #define FOC_ID_PI_KI_DEFAULT 100.0f
-#define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-7.0f)
-#define FOC_ID_PI_OUTPUT_MAX_DEFAULT 7.0f
+#define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-20.0f)
+#define FOC_ID_PI_OUTPUT_MAX_DEFAULT 20.0f
 
 #define FOC_IQ_PI_KP_DEFAULT 0.5f
 #define FOC_IQ_PI_KI_DEFAULT 300.0f
-#define FOC_IQ_PI_OUTPUT_MIN_DEFAULT (-8.0f)
-#define FOC_IQ_PI_OUTPUT_MAX_DEFAULT 8.0f
+#define FOC_IQ_PI_OUTPUT_MIN_DEFAULT (-20.0f)
+#define FOC_IQ_PI_OUTPUT_MAX_DEFAULT 20.0f
 
 /*
  * 速度环先使用一组偏保守的初值，后续可在线微调。
