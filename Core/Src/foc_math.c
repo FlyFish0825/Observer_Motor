@@ -42,9 +42,9 @@ void FOC_Data_Init(void) {
    * 4倍硬件过采样后右移量未在ADC硬件中完成，
    * 因此保留原来的0.25比例。
    */
-  foc.current.gain_a = 0.0219726562500f * 0.25f;
-  foc.current.gain_b = 0.0219726562500f * 0.25f;
-  foc.current.gain_c = 0.0219726562500f * 0.25f;
+  foc.current.gain_a = 0.0056982421875f * 0.25f;
+  foc.current.gain_b = 0.0056982421875f * 0.25f;
+  foc.current.gain_c = 0.0056982421875f * 0.25f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;
