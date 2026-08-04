@@ -125,6 +125,7 @@ typedef struct {
   float phase_raw;
 
   float pll_phase;
+  float pll_phase_;//角度补偿
   float pll_omega_e;
   //机械角速度
   float omega_m;

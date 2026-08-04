@@ -560,7 +560,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       float phase_control;
       uint32_t phase_q31;
 
-      phase_control = FOC_WrapToPiFast(foc.observer.state.pll_phase);
+      phase_control = FOC_WrapToPiFast(foc.observer.state.phase_raw);
 
       phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
 
@@ -599,7 +599,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     if ((just_float_on_off != 0U) &&
         ((USART2->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
-          foc.state.i_abc.a,
+          DWT->CYCCNT-DWT_Cycle_Count,
           foc.state.i_abc.b,
           foc.state.i_abc.c,
           foc.observer.state.speed_rpm,
