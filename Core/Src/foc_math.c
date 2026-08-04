@@ -42,9 +42,9 @@ void FOC_Data_Init(void) {
    * 4倍硬件过采样后右移量未在ADC硬件中完成，
    * 因此保留原来的0.25比例。
    */
-  foc.current.gain_a = 0.0056982421875f * 0.25f;
-  foc.current.gain_b = 0.0056982421875f * 0.25f;
-  foc.current.gain_c = 0.0056982421875f * 0.25f;
+  foc.current.gain_a = 0.0056982421875f;
+  foc.current.gain_b = 0.0056982421875f;
+  foc.current.gain_c = 0.0056982421875f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;
@@ -175,13 +175,13 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   }
 }
 
-void FOC_Open_Loop(float u_d, float u_q) {
 
-  static uint32_t FOC_OpenLoop_speed = 0x250U;
+void FOC_Open_Loop(float u_d, float u_q, uint32_t theta_step_q32) {
   foc.state.u_dq.d = u_d;
   foc.state.u_dq.q = u_q;
-  FOC_OpenLoop_speed++;
-  foc.state.theta_q31 = foc.state.theta_q31 + 0x250*FOC_OpenLoop_speed;
+
+  foc.state.theta_q31 += theta_step_q32;
+
   CORDIC_SinCos_FastF32(foc.state.theta_q31, &foc_sin_cos.sin,
                         &foc_sin_cos.cos);
 
@@ -191,6 +191,7 @@ void FOC_Open_Loop(float u_d, float u_q) {
 
   FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
 }
+
 
 /**
  * @brief 读取ADC的常规转换数据。

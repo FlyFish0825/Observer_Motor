@@ -21,12 +21,11 @@
 #include "adc.h"
 #include "cordic.h"
 #include "dma.h"
-#include "gpio.h"
 #include "i2c.h"
 #include "opamp.h"
-#include "stm32g4xx_hal_adc.h"
 #include "tim.h"
 #include "usart.h"
+#include "gpio.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -51,6 +50,19 @@
 /* USER CODE BEGIN PD */
 
 static FOC_Control_t motor_control;
+
+
+
+
+
+#define OBSERVER_LOCK_SAMPLE_COUNT      2000U
+/*
+ * 角度偏移释放速度(rad/s)
+ * 10rad/s × 40us ≈ 0.0004rad/周期
+ * 约2500周期释放完1rad偏移
+ */
+#define HANDOVER_OFFSET_RATE_RAD_S       10.0f
+
 
 
 /* USER CODE END PD */
@@ -114,10 +126,11 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 /* USER CODE END 0 */
 
 /**
- * @brief  The application entry point.
- * @retval int
- */
-int main(void) {
+  * @brief  The application entry point.
+  * @retval int
+  */
+int main(void)
+{
 
   /* USER CODE BEGIN 1 */
 
@@ -125,8 +138,7 @@ int main(void) {
 
   /* MCU Configuration--------------------------------------------------------*/
 
-  /* Reset of all peripherals, Initializes the Flash interface and the Systick.
-   */
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
 
   /* USER CODE BEGIN Init */
@@ -237,20 +249,21 @@ int main(void) {
 }
 
 /**
- * @brief System Clock Configuration
- * @retval None
- */
-void SystemClock_Config(void) {
+  * @brief System Clock Configuration
+  * @retval None
+  */
+void SystemClock_Config(void)
+{
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
   /** Configure the main internal regulator output voltage
-   */
+  */
   HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
 
   /** Initializes the RCC Oscillators according to the specified parameters
-   * in the RCC_OscInitTypeDef structure.
-   */
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -260,20 +273,22 @@ void SystemClock_Config(void) {
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK) {
+  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
+  {
     Error_Handler();
   }
 
   /** Initializes the CPU, AHB and APB buses clocks
-   */
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
   RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK) {
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
+  {
     Error_Handler();
   }
 }
@@ -288,6 +303,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
   uint16_t adc_b;
   uint16_t adc_c;
 
+  static uint32_t open_loop_step_q32 = 0U;
+  static uint32_t observer_lock_count = 0U;
   static uint32_t FOC_State_Count = 0U;
 
   static float observer_control_offset = 0.0f;
@@ -357,43 +374,183 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     case FOC_MOTOR_OPEN_LOOP: {
       float theta_open_rad;
-      float theta_obs_rad;
+      float theta_raw_rad;
+      float phase_raw_pll_error;
+      float phase_open_raw_error;
+      float speed_error;
+
+      uint8_t psi_valid;
+      uint8_t observer_locked;
 
       FOC_State_Count++;
 
-      FOC_Open_Loop(0.0f, 0.8f);
+      /*
+       * 逐渐提高开环电角速度。
+       */
+      if (open_loop_step_q32 < OPEN_LOOP_TARGET_STEP_Q32) {
+        open_loop_step_q32 += OPEN_LOOP_RAMP_INCREMENT_Q32;
+
+        if (open_loop_step_q32 > OPEN_LOOP_TARGET_STEP_Q32) {
+          open_loop_step_q32 = OPEN_LOOP_TARGET_STEP_Q32;
+        }
+      }
+
+      FOC_Open_Loop(0.0f, 1.0f, open_loop_step_q32);
 
       /*
-       * 开环阶段的Id/Iq也使用开环角度计算。
-       * 这样切换前的电流反馈与当前实际输出坐标系一致。
+       * 当前开环坐标系中的Id、Iq。
        */
       FOC_Park(&foc.state.i_alpha_beta, &foc_sin_cos, &foc.state.i_dq);
 
-      if (FOC_State_Count >= 25000U) {
-        theta_open_rad =
-            FOC_WrapToPi((float)foc.state.theta_q31 * Q32_TO_RAD_F);
+      theta_open_rad =
+          FOC_WrapToPiFast((float)foc.state.theta_q31 * Q32_TO_RAD_F);
 
-        theta_obs_rad = FOC_WrapToPi(foc.observer.state.phase_raw);
+      theta_raw_rad = FOC_WrapToPiFast(foc.observer.state.phase_raw);
 
-        /* 保存当前开环控制角与观测器角的关系。 */
-        observer_control_offset = FOC_WrapToPi(theta_open_rad - theta_obs_rad);
+      /*
+       * PLL是否真正跟随原始磁链角。
+       */
+      phase_raw_pll_error =
+          fabsf(FOC_WrapToPiFast(theta_raw_rad - foc.observer.state.pll_phase));
+
+      /*
+       * 观测磁链角是否与开环旋转方向大致一致。
+       *
+       * 正常同步运行时，负载角应小于90°左右。
+       */
+      phase_open_raw_error =
+          fabsf(FOC_WrapToPiFast(theta_raw_rad - theta_open_rad));
+
+      speed_error =
+          fabsf(foc.observer.state.pll_omega_e - OPEN_LOOP_TARGET_OMEGA_E);
+
+      psi_valid = isfinite(foc.observer.state.psi_mag) &&
+                  (foc.observer.state.psi_mag >= foc.observer.config.psi_min) &&
+                  (foc.observer.state.psi_mag <= foc.observer.config.psi_max);
+
+      observer_locked = (open_loop_step_q32 >= OPEN_LOOP_TARGET_STEP_Q32) &&
+                        (psi_valid != 0U) &&
+
+                        /* 方向必须正确 */
+                        (foc.observer.state.pll_omega_e > 0.0f) &&
+
+                        /* 速度误差小于目标速度30% */
+                        (speed_error < OPEN_LOOP_TARGET_OMEGA_E * 0.30f) &&
+
+                        /* PLL与raw误差小于15° */
+                        (phase_raw_pll_error < 15.0f * FOC_PI / 180.0f) &&
+
+                        /* 观测角与开环角相差不超过90° */
+                        (phase_open_raw_error < 90.0f * FOC_PI / 180.0f);
+
+      if (observer_locked != 0U) {
+        if (observer_lock_count < OBSERVER_LOCK_SAMPLE_COUNT) {
+          observer_lock_count++;
+        }
+      } else {
+        observer_lock_count = 0U;
+      }
+
+      /*
+       * 不再按固定1秒强制切换。
+       * 必须连续锁定80ms才切换。
+       */
+      if (observer_lock_count >= OBSERVER_LOCK_SAMPLE_COUNT) {
+        /*
+         * 注意：闭环使用pll_phase，
+         * 所以偏移必须相对于pll_phase计算。
+         */
+        observer_control_offset =
+            FOC_WrapToPiFast(theta_open_rad - foc.observer.state.pll_phase);
 
         observer_offset_valid = 1U;
-        FOC_State_Count = 0U;
+        observer_lock_count = 0U;
 
         /*
-         * 一次预装载完成Id、Iq电流环；
-         * 若提前启用了速度模式，也会预装载速度环。
+         * 切换期间关闭速度环。
+         */
+        motor_control.speed_loop_enable = 0U;
+
+        /*
+         * 如果开环阶段仍然是固定Uq，
+         * 就保留这次电流PI预装载。
          */
         FOC_Control_PreloadClosedLoop(
-            &motor_control,
-            foc.state.u_dq.d,
-            foc.state.u_dq.q,
-            foc.state.i_dq.d,
-            foc.state.i_dq.q,
-            foc.observer.state.speed_rpm);
+            &motor_control, foc.state.u_dq.d, foc.state.u_dq.q,
+            foc.state.i_dq.d, foc.state.i_dq.q, foc.observer.state.speed_rpm);
 
+        foc_motor_state = FOC_MOTOR_TRANSITION;
+      }
+
+      break;
+    }
+
+    case FOC_MOTOR_TRANSITION: {
+      float phase_control;
+      float offset_step;
+      uint32_t phase_q31;
+
+      if (observer_offset_valid == 0U) {
+        foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+        break;
+      }
+
+      /*
+       * 第一拍严格满足：
+       *
+       * pll_phase + offset = theta_open
+       *
+       * 所以不会产生角度阶跃。
+       */
+      phase_control = FOC_WrapToPiFast(foc.observer.state.pll_phase +
+                                       observer_control_offset);
+
+      phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
+
+      CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
+                            &observer_sin_cos.cos);
+
+      FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
+
+      /*
+       * 转换期间只运行电流环，不运行速度环。
+       */
+      motor_control.speed_loop_enable = 0U;
+
+      FOC_Control_Run(&motor_control, foc.state.i_dq.d, foc.state.i_dq.q,
+                      foc.observer.state.speed_rpm, &foc.state.u_dq.d,
+                      &foc.state.u_dq.q);
+
+      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
+
+      FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
+
+      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
+
+      /*
+       * 用rad/s定义释放速度，
+       * 不要使用没有物理意义的固定魔数。
+       */
+      offset_step = HANDOVER_OFFSET_RATE_RAD_S * foc.timer.Ts;
+
+      if (observer_control_offset > offset_step) {
+        observer_control_offset -= offset_step;
+      } else if (observer_control_offset < -offset_step) {
+        observer_control_offset += offset_step;
+      } else {
+        observer_control_offset = 0.0f;
+
+        /*
+         * 进入完全闭环。
+         */
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
+
+        /*
+         * 先把速度参考设置为当前速度。
+         * 暂时仍然不要自动开启速度环。
+         */
+        motor_control.speed_ref_rpm = 1500;
+        motor_control.speed_loop_enable = 1U;
       }
 
       break;
@@ -403,67 +560,32 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       float phase_control;
       uint32_t phase_q31;
 
-      if (observer_offset_valid == 0U) {
-        foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-        break;
-      }
+      phase_control = FOC_WrapToPiFast(foc.observer.state.pll_phase);
 
-      // /* 逐步释放开环切换时保存的角度偏移。 */
-      // if (observer_control_offset > 0.001f) {
-      //   observer_control_offset -= 0.0001f;
-      // } else if (observer_control_offset < -0.001f) {
-      //   observer_control_offset += 0.0001f;
-      // } else {
-      //   observer_control_offset = 0.0f;
-      // }
-      // observer_control_offset = 0.0f;
-      // phase_control = FOC_WrapToPiFast(
-      //     foc.observer.state.pll_phase + observer_control_offset);
-
-
-      phase_control = FOC_WrapToPiFast(
-      foc.observer.state.pll_phase);
-
-      phase_q31 =
-          (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
+      phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
 
       CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
                             &observer_sin_cos.cos);
 
-      /*
-       * Park、控制器、反Park严格使用同一个phase_control。
-       */
-      FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos,
-               &foc.state.i_dq);
+      FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
 
-      FOC_Control_Run(
-          &motor_control,
-          foc.state.i_dq.d,
-          foc.state.i_dq.q,
-          foc.observer.state.speed_rpm,
-          &foc.state.u_dq.d,
-          &foc.state.u_dq.q);
+      FOC_Control_Run(&motor_control, foc.state.i_dq.d, foc.state.i_dq.q,
+                      foc.observer.state.speed_rpm, &foc.state.u_dq.d,
+                      &foc.state.u_dq.q);
 
-      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos,
-                  &foc.state.u_alpha_beta);
+      FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
 
       FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
 
-      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus,
-                    &foc.timer, &foc.svpwm);
+      FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
 
       break;
     }
     }
 
-    
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
-
-
-
-
 
 
 
@@ -662,10 +784,11 @@ void HAL_UART_ErrorCallback(
 /* USER CODE END 4 */
 
 /**
- * @brief  This function is executed in case of error occurrence.
- * @retval None
- */
-void Error_Handler(void) {
+  * @brief  This function is executed in case of error occurrence.
+  * @retval None
+  */
+void Error_Handler(void)
+{
   /* USER CODE BEGIN Error_Handler_Debug */
   /* User can add his own implementation to report the HAL error return state
    */
@@ -676,13 +799,14 @@ void Error_Handler(void) {
 }
 #ifdef USE_FULL_ASSERT
 /**
- * @brief  Reports the name of the source file and the source line number
- *         where the assert_param error has occurred.
- * @param  file: pointer to the source file name
- * @param  line: assert_param error line source number
- * @retval None
- */
-void assert_failed(uint8_t *file, uint32_t line) {
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
   /* USER CODE BEGIN 6 */
   /* User can add his own implementation to report the file name and line
      number, ex: printf("Wrong parameters value: file %s on line %d\r\n",

@@ -45,19 +45,31 @@ typedef struct {
   PI_Saturation_t saturation;
 } PI_Controller_t;
 
+
+/* ======================== 电机开环默认参数 ======================== */
+
+
+#define OPEN_LOOP_TARGET_STEP_Q32  0x0098EAD6U
+
+#define OPEN_LOOP_TARGET_OMEGA_E   366.51914f
+
+#define OPEN_LOOP_RAMP_INCREMENT_Q32  481U
+
+
 /* ======================== 电机闭环默认参数 ======================== */
 
 /*
  * 电流环参数保持当前工程中的数值不变。
  * 电流环每次ADC注入转换完成时运行，当前频率25kHz。
  */
-#define FOC_ID_PI_KP_DEFAULT 0.2f
-#define FOC_ID_PI_KI_DEFAULT 100.0f
+
 #define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-20.0f)
 #define FOC_ID_PI_OUTPUT_MAX_DEFAULT 20.0f
+#define FOC_ID_PI_KP_DEFAULT  0.220f
+#define FOC_ID_PI_KI_DEFAULT  1257.0f
 
-#define FOC_IQ_PI_KP_DEFAULT 0.5f
-#define FOC_IQ_PI_KI_DEFAULT 300.0f
+#define FOC_IQ_PI_KP_DEFAULT  0.220f
+#define FOC_IQ_PI_KI_DEFAULT  1257.0f
 #define FOC_IQ_PI_OUTPUT_MIN_DEFAULT (-20.0f)
 #define FOC_IQ_PI_OUTPUT_MAX_DEFAULT 20.0f
 

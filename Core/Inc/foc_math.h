@@ -78,6 +78,7 @@ typedef enum
 {
     FOC_MOTOR_IDLE = 0,
     FOC_MOTOR_OPEN_LOOP,
+    FOC_MOTOR_TRANSITION,
     FOC_MOTOR_CLOSED_LOOP,
 
 } FOC_Motor_State_t;
@@ -223,7 +224,7 @@ void FOC_Iabc_Calibration(void);
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
 
 
-void FOC_Open_Loop(float u_d, float u_q);
+void FOC_Open_Loop(float u_d, float u_q,uint32_t theta_step_q32);
 
 
 /* ======================== FOC 计算函数 ======================== */
