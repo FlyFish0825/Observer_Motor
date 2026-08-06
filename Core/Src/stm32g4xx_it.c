@@ -351,7 +351,7 @@ void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   FOC_PWM_Stop();
     break;
   case GPIO_PIN_13:
-
+    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
 
     break;
   }
