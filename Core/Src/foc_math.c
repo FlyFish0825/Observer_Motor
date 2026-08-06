@@ -117,32 +117,7 @@ void FOC_PWM_Stop(void) {
  */
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
                   uint16_t adc3) {
-  uint32_t ccr_a;
-  uint32_t ccr_b;
-  uint32_t ccr_c;
-  uint32_t ccr_max;
-
-  if (handle == NULL) {
-    return;
-  }
-
-  ccr_a = TIM1->CCR1;
-  ccr_b = TIM1->CCR2;
-  ccr_c = TIM1->CCR3;
-  ccr_max = ccr_a;
-
-  handle->current.rebuild = CURRENT_REBUILD_A;
-
-  if (ccr_b > ccr_max) {
-    ccr_max = ccr_b;
-    handle->current.rebuild = CURRENT_REBUILD_B;
-  }
-
-  if (ccr_c > ccr_max) {
-    ccr_max = ccr_c;
-    handle->current.rebuild = CURRENT_REBUILD_C;
-  }
-
+  
   handle->current.adc_a = adc1;
   handle->current.adc_b = adc2;
   handle->current.adc_c = adc3;
@@ -151,28 +126,9 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
       (handle->calibration.ia_offset - (float)adc1) * handle->current.gain_a;
   handle->state.i_abc.b =
       (handle->calibration.ib_offset - (float)adc2) * handle->current.gain_b;
-  handle->state.i_abc.c =
-      (handle->calibration.ic_offset - (float)adc3) * handle->current.gain_c;
+  handle->state.i_abc.c =-handle->state.i_abc.a-handle->state.i_abc.b;
+     
 
-  /* 使用初始化时算好的整数阈值，避免ISR中每拍做整型转浮点和乘法。 */
-  if (ccr_max > foc_current_rebuild_threshold) {
-    switch (handle->current.rebuild) {
-    case CURRENT_REBUILD_A:
-      handle->state.i_abc.a = -handle->state.i_abc.b - handle->state.i_abc.c;
-      break;
-
-    case CURRENT_REBUILD_B:
-      handle->state.i_abc.b = -handle->state.i_abc.a - handle->state.i_abc.c;
-      break;
-
-    case CURRENT_REBUILD_C:
-      handle->state.i_abc.c = -handle->state.i_abc.a - handle->state.i_abc.b;
-      break;
-
-    default:
-      break;
-    }
-  }
 }
 
 void FOC_Open_Loop(float u_d, float u_q) {
