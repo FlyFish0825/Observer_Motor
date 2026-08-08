@@ -197,7 +197,7 @@ int main(void)
   DebugConsole_RegisterF32("iq", &motor_control.iq_ref,
     -8.0f, 8.0f, false);
   /* 速度模式参数：speed单位rpm，speed_en为0/1。 */
-  DebugConsole_RegisterF32("speed", &motor_control.speed_ref_rpm,
+  DebugConsole_RegisterF32("speed", &motor_control.direction.speed_command_rpm,
     -10000.0f, 10000.0f, false);
   DebugConsole_RegisterF32("speed_kp", &motor_control.speed_pi.kp,
     0.0f, 1.0f, false);
@@ -352,7 +352,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
   uint16_t adc_b;
   uint16_t adc_c;
 
-  static uint32_t open_loop_step_q32 = 0U;
   static uint32_t observer_lock_count = 0U;
   static uint32_t FOC_State_Count = 0U;
 
@@ -427,24 +426,37 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       float phase_raw_pll_error;
       float phase_open_raw_error;
       float speed_error;
+      float target_omega_e;
+      int32_t open_loop_step_q32;
 
       uint8_t psi_valid;
       uint8_t observer_locked;
+      uint32_t observer_lock_sample_count;
 
       FOC_State_Count++;
 
-      /*
-       * 逐渐提高开环电角速度。
-       */
-      if (open_loop_step_q32 < OPEN_LOOP_TARGET_STEP_Q32) {
-        open_loop_step_q32 += OPEN_LOOP_RAMP_INCREMENT_Q32;
-
-        if (open_loop_step_q32 > OPEN_LOOP_TARGET_STEP_Q32) {
-          open_loop_step_q32 = OPEN_LOOP_TARGET_STEP_Q32;
-        }
+      if (motor_control.direction.open_loop_initialized == 0U) {
+        FOC_DirectionControl_PrepareOpenLoop(&motor_control);
+        observer_lock_count = 0U;
+        observer_offset_valid = 0U;
       }
 
-      FOC_Open_Loop(0.0f, 1.0f, open_loop_step_q32);
+      open_loop_step_q32 =
+          FOC_DirectionControl_UpdateOpenLoop(&motor_control);
+
+      target_omega_e =
+          OPEN_LOOP_TARGET_OMEGA_E *
+          (float)motor_control.direction.open_loop_direction;
+
+      /*
+       * theta_step和Uq必须保持同一转矩方向。
+       * 正转：step>0，Uq>0
+       * 反转：step<0，Uq<0
+       */
+      FOC_Open_Loop(
+          0.0f,
+          (float)motor_control.direction.open_loop_direction,
+          (uint32_t)open_loop_step_q32);
 
       /*
        * 当前开环坐标系中的Id、Iq。
@@ -471,17 +483,26 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
           fabsf(FOC_WrapToPiFast(theta_raw_rad - theta_open_rad));
 
       speed_error =
-          fabsf(foc.observer.state.pll_omega_e - OPEN_LOOP_TARGET_OMEGA_E);
+          fabsf(foc.observer.state.pll_omega_e - target_omega_e);
 
       psi_valid = isfinite(foc.observer.state.psi_mag) &&
                   (foc.observer.state.psi_mag >= foc.observer.config.psi_min) &&
                   (foc.observer.state.psi_mag <= foc.observer.config.psi_max);
 
-      observer_locked = (open_loop_step_q32 >= OPEN_LOOP_TARGET_STEP_Q32) &&
+      observer_lock_sample_count =
+          (motor_control.direction.state == FOC_REVERSAL_RESTART)
+              ? FOC_REVERSAL_LOCK_SAMPLE_COUNT
+              : OBSERVER_LOCK_SAMPLE_COUNT;
+
+      observer_locked =
+                        (open_loop_step_q32 ==
+                         (int32_t)OPEN_LOOP_TARGET_STEP_Q32 *
+                         (int32_t)motor_control.direction.open_loop_direction) &&
                         (psi_valid != 0U) &&
 
-                        /* 方向必须正确 */
-                        (foc.observer.state.pll_omega_e > 0.0f) &&
+                        /* 方向必须与当前开环方向一致 */
+                        ((float)motor_control.direction.open_loop_direction *
+                         foc.observer.state.pll_omega_e > 0.0f) &&
 
                         /* 速度误差小于目标速度30% */
                         (speed_error < OPEN_LOOP_TARGET_OMEGA_E * 0.30f) &&
@@ -504,7 +525,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        * 不再按固定1秒强制切换。
        * 必须连续锁定80ms才切换。
        */
-      if (observer_lock_count >= OBSERVER_LOCK_SAMPLE_COUNT) {
+      if (observer_lock_count >= observer_lock_sample_count) {
         /*
          * 注意：闭环使用pll_phase，
          * 所以偏移必须相对于pll_phase计算。
@@ -514,6 +535,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
         observer_offset_valid = 1U;
         observer_lock_count = 0U;
+        motor_control.direction.open_loop_initialized = 0U;
 
         /*
          * 切换期间关闭速度环。
@@ -580,7 +602,12 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        * 用rad/s定义释放速度，
        * 不要使用没有物理意义的固定魔数。
        */
-      offset_step = HANDOVER_OFFSET_RATE_RAD_S * foc.timer.Ts;
+      if (motor_control.direction.state == FOC_REVERSAL_RESTART) {
+        offset_step =
+            FOC_REVERSAL_HANDOVER_RATE_RAD_S * foc.timer.Ts;
+      } else {
+        offset_step = HANDOVER_OFFSET_RATE_RAD_S * foc.timer.Ts;
+      }
 
       if (observer_control_offset > offset_step) {
         observer_control_offset -= offset_step;
@@ -594,12 +621,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
          */
         foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
 
-        /*
-         * 先把速度参考设置为当前速度。
-         * 暂时仍然不要自动开启速度环。
-         */
-        motor_control.speed_ref_rpm = 1500;
-        motor_control.speed_loop_enable = 1U;
+        FOC_DirectionControl_ClosedLoopEntered(
+            &motor_control, foc.observer.state.speed_rpm);
       }
 
       break;
@@ -608,6 +631,31 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     case FOC_MOTOR_CLOSED_LOOP: {
       float phase_control;
       uint32_t phase_q31;
+
+      if (FOC_DirectionControl_RunClosedLoop(
+              &motor_control, foc.observer.state.speed_rpm,
+              foc.timer.Ts) != 0U) {
+        /*
+         * 无感观测器在零速附近不可靠。
+         * 从最后一个可信磁链角重新进入反向开环启动。
+         */
+        foc.state.theta_q31 =
+            (uint32_t)CORDIC_RadToQ31_WrappedFast(
+                foc.observer.state.phase_raw);
+
+        /*
+         * PLL上一方向的积分和正速度不能带入反向开环。
+         * 只复位PLL，保留磁链观测器x/psi状态。
+         */
+        Observer_PLL_ResetToPhase(
+            &foc.observer, foc.observer.state.phase_raw);
+
+        observer_lock_count = 0U;
+        observer_offset_valid = 0U;
+
+        foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+        break;
+      }
 
       phase_control = FOC_WrapToPiFast(foc.observer.state.phase_raw);
 

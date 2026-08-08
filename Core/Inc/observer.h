@@ -169,4 +169,10 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input);
 
 void Observer_PLL_Run(Observer_Handle_t *obs);
+
+/**
+ * @brief 换向重新开环前，只复位PLL动态状态，不清空磁链观测器
+ */
+void Observer_PLL_ResetToPhase(Observer_Handle_t *obs, float phase);
+
 #endif

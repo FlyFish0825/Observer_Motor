@@ -46,6 +46,23 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
   obs->state.initialized = 1U;
 }
 
+void Observer_PLL_ResetToPhase(Observer_Handle_t *obs, float phase) {
+  if (obs == NULL) {
+    return;
+  }
+
+  /*
+   * 保留x_alpha/x_beta和psi_alpha/psi_beta，
+   * 只清掉上一旋转方向留下的PLL积分和速度状态。
+   */
+  PI_Controller_Reset(&obs->pll);
+
+  obs->state.pll_phase = FOC_WrapToPiFast(phase);
+  obs->state.pll_omega_e = 0.0f;
+  obs->state.omega_m = 0.0f;
+  obs->state.speed_rpm = 0.0f;
+}
+
 __STATIC_FORCEINLINE void
 Observer_RebuildVoltage(const Observer_Input_t *input,
                         float *u_alpha,

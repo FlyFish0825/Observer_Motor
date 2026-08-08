@@ -46,14 +46,15 @@ typedef struct {
 } PI_Controller_t;
 
 
-/* ======================== 电机开环默认参数 ======================== */
+/* ======================== 电机开环启动默认参数 ======================== */
 
 
 #define OPEN_LOOP_TARGET_STEP_Q32  0x0098EAD6U
 
 #define OPEN_LOOP_TARGET_OMEGA_E   366.51914f
 
-#define OPEN_LOOP_RAMP_INCREMENT_Q32  481U
+
+#define OPEN_LOOP_RAMP_INCREMENT_Q32  1600U
 
 
 /* ======================== 电机闭环默认参数 ======================== */
@@ -87,6 +88,62 @@ typedef struct {
 /* 25kHz电流环 / 25 = 1kHz速度环 */
 #define FOC_SPEED_LOOP_DIVIDER_DEFAULT 25U
 
+
+/* ======================== 电机正反转换向 ======================== */
+
+/*
+ * 无感FOC换向时先闭环减速到低速，
+ * 再重新反向开环启动，避免观测器直接穿越零速。
+ */
+/*
+ * 换向时先直接降到同方向500rpm。
+ * 这一段继续使用已经跑通的速度闭环，不做慢斜坡。
+ */
+#define FOC_REVERSAL_DECEL_TARGET_RPM        500.0f
+#define FOC_REVERSAL_DECEL_REACHED_RPM       550.0f
+
+/*
+ * 500rpm以下直接给0rpm主动制动。
+ * 实际速度进入80rpm以内并稳定4ms后才退出无感闭环。
+ */
+#define FOC_REVERSAL_RESTART_SPEED_RPM       80.0f
+#define FOC_REVERSAL_ZERO_HOLD_COUNT         100U
+
+/*
+ * 正常第一次启动仍使用OPEN_LOOP_RAMP_INCREMENT_Q32。
+ * 只有换向重新拉起时加快开环速度斜坡。
+ */
+#define FOC_REVERSAL_OPEN_LOOP_INCREMENT_Q32 1600U
+
+/* 换向重新锁定连续40ms即可进入TRANSITION。 */
+#define FOC_REVERSAL_LOCK_SAMPLE_COUNT       1000U
+
+/* 换向时加快开环角到PLL角的偏移释放。 */
+#define FOC_REVERSAL_HANDOVER_RATE_RAD_S     30.0f
+
+typedef enum {
+  FOC_REVERSAL_IDLE = 0,
+  FOC_REVERSAL_DECEL,
+  FOC_REVERSAL_BRAKE_ZERO,
+  FOC_REVERSAL_RESTART
+} FOC_ReversalState_t;
+
+typedef struct {
+  /* 用户最终速度命令，speed_ref_rpm仍作为速度PI内部参考 */
+  volatile float speed_command_rpm;
+
+  /* 正数正转，负数反转 */
+  int32_t open_loop_step_q32;
+  int8_t open_loop_direction;
+
+  FOC_ReversalState_t state;
+
+  uint16_t zero_speed_count;
+  uint8_t open_loop_initialized;
+
+} FOC_DirectionControl_t;
+
+
 /**
  * @brief FOC电流环和速度环总控制器
  *
@@ -107,6 +164,9 @@ typedef struct {
   volatile float iq_ref;
   volatile float speed_ref_rpm;
   volatile uint32_t speed_loop_enable;
+
+  /* 正反转换向控制 */
+  FOC_DirectionControl_t direction;
 
   /* 调度参数和内部状态 */
   uint32_t speed_loop_enable_last;
@@ -187,6 +247,39 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
  * @param enable 0=电流模式，非0=速度模式
  */
 void FOC_Control_EnableSpeedLoop(FOC_Control_t *control, uint8_t enable);
+
+
+/* ======================== FOC正反转换向接口 ======================== */
+
+/**
+ * @brief 初始化换向控制数据
+ */
+void FOC_DirectionControl_Init(FOC_DirectionControl_t *direction,
+                               float speed_command_rpm);
+
+/**
+ * @brief 每次进入开环时初始化开环方向和步进
+ */
+void FOC_DirectionControl_PrepareOpenLoop(FOC_Control_t *control);
+
+/**
+ * @brief 更新开环电角速度步进，返回带方向的Q32步进值
+ */
+int32_t FOC_DirectionControl_UpdateOpenLoop(FOC_Control_t *control);
+
+/**
+ * @brief 闭环阶段处理正反转换向
+ * @retval 0：继续闭环；1：已减速到低速，需要重新进入开环
+ */
+uint8_t FOC_DirectionControl_RunClosedLoop(FOC_Control_t *control,
+                                           float speed_feedback_rpm,
+                                           float sample_time);
+
+/**
+ * @brief OPEN_LOOP -> TRANSITION完成后重新开启速度环
+ */
+void FOC_DirectionControl_ClosedLoopEntered(FOC_Control_t *control,
+                                            float speed_feedback_rpm);
 
 #ifdef __cplusplus
 }

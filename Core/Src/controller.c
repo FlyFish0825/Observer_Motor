@@ -1,5 +1,6 @@
 #include "controller.h"
 
+#include <math.h>
 #include <stddef.h>
 
 /**
@@ -343,6 +344,8 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
   control->ud_output = 0.0f;
   control->uq_output = 0.0f;
+
+  FOC_DirectionControl_Init(&control->direction, control->speed_ref_rpm);
 }
 
 void FOC_Control_Reset(FOC_Control_t *control) {
@@ -497,4 +500,219 @@ void FOC_Control_EnableSpeedLoop(FOC_Control_t *control, uint8_t enable) {
   }
 
   control->speed_loop_enable = (enable != 0U) ? 1U : 0U;
+}
+
+
+/* ======================== FOC正反转换向 ======================== */
+
+void FOC_DirectionControl_Init(FOC_DirectionControl_t *direction,
+                               float speed_command_rpm) {
+  if (direction == NULL) {
+    return;
+  }
+
+  direction->speed_command_rpm = speed_command_rpm;
+
+  direction->open_loop_step_q32 = 0;
+  direction->open_loop_direction = (speed_command_rpm < 0.0f) ? -1 : 1;
+
+  direction->state = FOC_REVERSAL_IDLE;
+
+  direction->zero_speed_count = 0U;
+  direction->open_loop_initialized = 0U;
+}
+
+void FOC_DirectionControl_PrepareOpenLoop(FOC_Control_t *control) {
+  FOC_DirectionControl_t *direction;
+
+  if (control == NULL) {
+    return;
+  }
+
+  direction = &control->direction;
+
+  direction->open_loop_step_q32 = 0;
+  direction->open_loop_direction =
+      (direction->speed_command_rpm < 0.0f) ? -1 : 1;
+
+  direction->zero_speed_count = 0U;
+  direction->open_loop_initialized = 1U;
+
+  /*
+   * 开环电压方向由旋转角方向决定。
+   * Iq参考只用于后续开环切电流闭环时保持正确转矩方向。
+   */
+  control->iq_ref =
+      fabsf(control->iq_ref) * (float)direction->open_loop_direction;
+}
+
+int32_t FOC_DirectionControl_UpdateOpenLoop(FOC_Control_t *control) {
+  FOC_DirectionControl_t *direction;
+  int32_t target_step_q32;
+  int32_t ramp_increment_q32;
+
+  if (control == NULL) {
+    return 0;
+  }
+
+  direction = &control->direction;
+
+  target_step_q32 =
+      (int32_t)OPEN_LOOP_TARGET_STEP_Q32 *
+      (int32_t)direction->open_loop_direction;
+
+  /*
+   * 正常上电启动保持原来的开环斜坡。
+   * 换向重新启动时加快到约原来的3.3倍。
+   */
+  if (direction->state == FOC_REVERSAL_RESTART) {
+    ramp_increment_q32 = (int32_t)FOC_REVERSAL_OPEN_LOOP_INCREMENT_Q32;
+  } else {
+    ramp_increment_q32 = (int32_t)OPEN_LOOP_RAMP_INCREMENT_Q32;
+  }
+
+  if (direction->open_loop_step_q32 < target_step_q32) {
+    direction->open_loop_step_q32 += ramp_increment_q32;
+
+    if (direction->open_loop_step_q32 > target_step_q32) {
+      direction->open_loop_step_q32 = target_step_q32;
+    }
+  } else if (direction->open_loop_step_q32 > target_step_q32) {
+    direction->open_loop_step_q32 -= ramp_increment_q32;
+
+    if (direction->open_loop_step_q32 < target_step_q32) {
+      direction->open_loop_step_q32 = target_step_q32;
+    }
+  }
+
+  return direction->open_loop_step_q32;
+}
+
+uint8_t FOC_DirectionControl_RunClosedLoop(FOC_Control_t *control,
+                                           float speed_feedback_rpm,
+                                           float sample_time) {
+  FOC_DirectionControl_t *direction;
+  float decel_speed_rpm;
+
+  (void)sample_time;
+
+  if (control == NULL) {
+    return 0U;
+  }
+
+  direction = &control->direction;
+
+  /*
+   * open_loop_direction表示当前已经建立的真实旋转方向。
+   * 只有最终速度命令跨过0，才进入换向流程。
+   */
+  if (direction->state == FOC_REVERSAL_IDLE) {
+    if (((direction->speed_command_rpm < 0.0f) &&
+         (direction->open_loop_direction > 0)) ||
+        ((direction->speed_command_rpm > 0.0f) &&
+         (direction->open_loop_direction < 0))) {
+      direction->state = FOC_REVERSAL_DECEL;
+      direction->zero_speed_count = 0U;
+    }
+  }
+
+  /*
+   * 换向过程中如果用户又改回原方向，立即取消换向。
+   */
+  if ((direction->state == FOC_REVERSAL_DECEL) ||
+      (direction->state == FOC_REVERSAL_BRAKE_ZERO)) {
+    if (((direction->speed_command_rpm >= 0.0f) &&
+         (direction->open_loop_direction > 0)) ||
+        ((direction->speed_command_rpm <= 0.0f) &&
+         (direction->open_loop_direction < 0))) {
+      direction->state = FOC_REVERSAL_IDLE;
+      direction->zero_speed_count = 0U;
+      control->speed_ref_rpm = direction->speed_command_rpm;
+      return 0U;
+    }
+  }
+
+  switch (direction->state) {
+  case FOC_REVERSAL_IDLE:
+    /*
+     * 同方向调速完全保持原行为。
+     */
+    control->speed_ref_rpm = direction->speed_command_rpm;
+    break;
+
+  case FOC_REVERSAL_DECEL:
+    /*
+     * 第一阶段直接把速度参考降到同方向500rpm。
+     * 不再使用上一版1500rpm/s的慢斜坡。
+     */
+    decel_speed_rpm =
+        FOC_REVERSAL_DECEL_TARGET_RPM *
+        (float)direction->open_loop_direction;
+
+    control->speed_ref_rpm = decel_speed_rpm;
+
+    if (fabsf(speed_feedback_rpm) <= FOC_REVERSAL_DECEL_REACHED_RPM) {
+      direction->state = FOC_REVERSAL_BRAKE_ZERO;
+      direction->zero_speed_count = 0U;
+      control->speed_ref_rpm = 0.0f;
+    }
+    break;
+
+  case FOC_REVERSAL_BRAKE_ZERO:
+    /*
+     * 500rpm以下直接给0rpm，继续使用当前可信的Observer角主动制动。
+     */
+    control->speed_ref_rpm = 0.0f;
+
+    if (fabsf(speed_feedback_rpm) <= FOC_REVERSAL_RESTART_SPEED_RPM) {
+      if (direction->zero_speed_count < FOC_REVERSAL_ZERO_HOLD_COUNT) {
+        direction->zero_speed_count++;
+      }
+    } else {
+      direction->zero_speed_count = 0U;
+    }
+
+    if (direction->zero_speed_count >= FOC_REVERSAL_ZERO_HOLD_COUNT) {
+      direction->zero_speed_count = 0U;
+      direction->open_loop_initialized = 0U;
+      direction->state = FOC_REVERSAL_RESTART;
+
+      control->speed_loop_enable = 0U;
+
+      return 1U;
+    }
+    break;
+
+  case FOC_REVERSAL_RESTART:
+    /*
+     * 该状态由OPEN_LOOP和TRANSITION处理。
+     */
+    break;
+
+  default:
+    direction->state = FOC_REVERSAL_IDLE;
+    direction->zero_speed_count = 0U;
+    break;
+  }
+
+  return 0U;
+}
+
+void FOC_DirectionControl_ClosedLoopEntered(FOC_Control_t *control,
+                                            float speed_feedback_rpm) {
+  (void)speed_feedback_rpm;
+
+  if (control == NULL) {
+    return;
+  }
+
+  /*
+   * 反向已经通过OPEN_LOOP和TRANSITION重新建立稳定闭环。
+   * 之后属于同方向调速，直接恢复最终速度命令。
+   */
+  control->speed_ref_rpm = control->direction.speed_command_rpm;
+  control->speed_loop_enable = 1U;
+
+  control->direction.zero_speed_count = 0U;
+  control->direction.state = FOC_REVERSAL_IDLE;
 }
