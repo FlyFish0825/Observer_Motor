@@ -68,7 +68,7 @@ void FOC_Data_Init(void) {
                                     .psi_max = motor.flux_linkage*3.0f,
                                     .pll_kp = 3000.0f,
                                     .pll_ki = 20000.0f,
-                                    .pll_omega_limit = 5000.0f
+                                    .pll_omega_limit = 10000.0f
                                   };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
