@@ -159,10 +159,7 @@ int main(void) {
   AS5600_init();
 
   /*
-   * 初始化电流环和速度环。
-   * 电流环参数仍为当前已经跑通的参数：
-   * Id: Kp=0.2, Ki=100, 输出-7~7V
-   * Iq: Kp=0.5, Ki=300, 输出-8~8V
+   * 初始化电流环和速度环
    */
   FOC_Control_Init(&motor_control, foc.timer.Ts);
 
