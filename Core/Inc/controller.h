@@ -80,10 +80,10 @@ typedef struct {
  *   speed PI输入  = rpm
  *   speed PI输出  = Iq参考值，A
  */
-#define FOC_SPEED_PI_KP_DEFAULT 0.001f
-#define FOC_SPEED_PI_KI_DEFAULT 0.05f
-#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-0.5f)
-#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 0.5f
+#define FOC_SPEED_PI_KP_DEFAULT 0.0005f
+#define FOC_SPEED_PI_KI_DEFAULT 0.005f
+#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-100.0f)
+#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 100.0f
 
 /* 25kHz电流环 / 25 = 1kHz速度环 */
 #define FOC_SPEED_LOOP_DIVIDER_DEFAULT 25U

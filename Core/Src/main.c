@@ -198,7 +198,7 @@ int main(void)
     -8.0f, 8.0f, false);
   /* 速度模式参数：speed单位rpm，speed_en为0/1。 */
   DebugConsole_RegisterF32("speed", &motor_control.direction.speed_command_rpm,
-    -10000.0f, 10000.0f, false);
+    -15000.0f, 15000.0f, false);
   DebugConsole_RegisterF32("speed_kp", &motor_control.speed_pi.kp,
     0.0f, 1.0f, false);
   DebugConsole_RegisterF32("speed_ki", &motor_control.speed_pi.ki,
@@ -697,11 +697,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         ((USART2->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
           DWT->CYCCNT-DWT_Cycle_Count,
-          foc.state.i_abc.b,
-          foc.state.i_abc.c,
+          foc.state.i_dq.q,
+          foc.state.u_dq.q,
           foc.observer.state.speed_rpm,
           foc.observer.state.phase_raw * RAD_TO_DEG_F,
-          foc.observer.state.pll_phase * RAD_TO_DEG_F);
+          foc.state.vbus);
     }
   }
 }
