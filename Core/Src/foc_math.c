@@ -53,9 +53,9 @@ void FOC_Data_Init(void) {
   foc.state.omega = 0.0f;
 
   Observer_MotorParam_t motor = {
-      .Rs = 0.2f, 
-      .Ls = 0.000035f, 
-      .flux_linkage = 0.0016f, 
+      .Rs = 0.5f, 
+      .Ls = 0.000100f, 
+      .flux_linkage = 0.00284f, 
       .pole_pairs = 7
     };
 

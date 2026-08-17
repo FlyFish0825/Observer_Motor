@@ -696,9 +696,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     if ((just_float_on_off != 0U) &&
         ((USART2->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
-          DWT->CYCCNT-DWT_Cycle_Count,
-          foc.state.i_dq.q,
-          foc.state.u_dq.q,
+          foc.state.i_abc.a,
+          foc.state.i_abc.b,
+          foc.state.i_abc.c, 
           foc.observer.state.speed_rpm,
           foc.observer.state.phase_raw * RAD_TO_DEG_F,
           foc.state.vbus);
