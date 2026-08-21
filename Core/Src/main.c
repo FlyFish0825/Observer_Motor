@@ -455,7 +455,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
        */
       FOC_Open_Loop(
           0.0f,
-          (float)motor_control.direction.open_loop_direction,
+          2.0f*(float)motor_control.direction.open_loop_direction,
           (uint32_t)open_loop_step_q32);
 
       /*
@@ -697,8 +697,8 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
         ((USART2->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
           foc.state.i_abc.a,
-          foc.state.i_abc.b,
-          foc.state.i_abc.c, 
+          foc.observer.state.psi_alpha,
+          foc.observer.state.psi_beta,
           foc.observer.state.speed_rpm,
           foc.observer.state.phase_raw * RAD_TO_DEG_F,
           foc.state.vbus);

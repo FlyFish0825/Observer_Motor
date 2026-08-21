@@ -54,7 +54,7 @@ typedef struct {
 #define OPEN_LOOP_TARGET_OMEGA_E   366.51914f
 
 
-#define OPEN_LOOP_RAMP_INCREMENT_Q32  1600U
+#define OPEN_LOOP_RAMP_INCREMENT_Q32  1000U
 
 
 /* ======================== 电机闭环默认参数 ======================== */

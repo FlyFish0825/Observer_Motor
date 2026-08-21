@@ -328,7 +328,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
   control->id_ref = 0.0f;
   control->iq_ref = 0.20f;
-  control->speed_ref_rpm = 1500.0f;
+  control->speed_ref_rpm = 8000.0f;
 
   /* 默认仍然保持原工程的电流模式。 */
   control->speed_loop_enable = 1U;
