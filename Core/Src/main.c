@@ -63,6 +63,7 @@ static FOC_Control_t motor_control;
 
 
 #define OBSERVER_LOCK_SAMPLE_COUNT      2000U
+#define VBUS_DIVIDER_GAIN               ((100.0f + 4.7f) / 4.7f)
 /*
  * 角度偏移释放速度(rad/s)
  * 10rad/s × 40us ≈ 0.0004rad/周期
@@ -232,7 +233,8 @@ int main(void)
     if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
       uint16_t adc_value = (uint16_t)HAL_ADC_GetValue(&hadc1);
 
-      foc.state.vbus = (float)adc_value * 26.0f * 3.3f / 4096.0f;
+      foc.state.vbus =
+          (float)adc_value * VBUS_DIVIDER_GAIN * 3.3f / 4096.0f;
     }
     /* USER CODE END WHILE */
 

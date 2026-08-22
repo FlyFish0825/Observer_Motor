@@ -39,12 +39,13 @@ void FOC_Data_Init(void) {
   foc.calibration.ic_offset = 0.0f;
 
   /*
-   * 4倍硬件过采样后右移量未在ADC硬件中完成，
-   * 因此保留原来的0.25比例。
+   * 新板电流采样：5 mOhm分流电阻、约24倍模拟增益。
+   * ADC注入组4倍过采样且不右移，因此每个累加计数对应：
+   * 3.3 / 4096 / (0.005 * 24) / 4 = 0.001678466796875 A。
    */
-  foc.current.gain_a = 0.0056982421875f;
-  foc.current.gain_b = 0.0056982421875f;
-  foc.current.gain_c = 0.0056982421875f;
+  foc.current.gain_a = 0.001678466796875f;
+  foc.current.gain_b = 0.001678466796875f;
+  foc.current.gain_c = 0.001678466796875f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;
