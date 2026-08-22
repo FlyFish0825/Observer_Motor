@@ -22,7 +22,6 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "foc_math.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -321,27 +320,4 @@ void CORDIC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
-{
-  switch (GPIO_Pin) {
-  case GPIO_PIN_10:
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-  FOC_PWM_Start();
-    break;
-  case GPIO_PIN_11:
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  foc_motor_state = FOC_MOTOR_IDLE;
-  FOC_PWM_Stop();
-    break;
-  case GPIO_PIN_13:
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-
-    break;
-  }
-
-
-
-
-}
 /* USER CODE END 1 */
