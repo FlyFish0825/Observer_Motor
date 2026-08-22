@@ -18,14 +18,14 @@ static uint32_t foc_current_rebuild_threshold = 0U;
  * @brief FOC 数据初始化。
  */
 void FOC_Data_Init(void) {
-  foc.timer.pwm_arr = 3359U;
-  foc.timer.adc_trigger = 3358U;
+  foc.timer.pwm_arr = 3399U;
+  foc.timer.adc_trigger = 3398U;
   foc.timer.dead_time = 20U;
-  foc.timer.clock_freq = 168000000U;
+  foc.timer.clock_freq = 170000000U;
 
   /*
    * 中心对齐PWM周期，单位为秒。
-   * 当前参数：(3359 + 1) * 2 / 168 MHz = 40 us。
+   * 当前参数：(3399 + 1) * 2 / 170 MHz = 40 us。
    */
   foc.timer.Ts =
       (foc.timer.pwm_arr + 1.0f) * 2.0f / (float)foc.timer.clock_freq;
