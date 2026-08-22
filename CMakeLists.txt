@@ -65,7 +65,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bsp_dwt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/foc_math.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/AS5600.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
 )

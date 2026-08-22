@@ -21,7 +21,7 @@
 #include "adc.h"
 #include "cordic.h"
 #include "dma.h"
-#include "i2c.h"
+#include "fdcan.h"
 #include "opamp.h"
 #include "tim.h"
 #include "usart.h"
@@ -29,7 +29,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "AS5600.h"
+
 #include "arm_math.h"
 #include "bsp_dwt.h"
 #include "foc_math.h"
@@ -81,7 +81,7 @@ static FOC_Control_t motor_control;
 static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 {
     HAL_UART_Transmit(
-        &huart2,
+        &huart1,
         (uint8_t *)data,
         len,
         100U);
@@ -162,20 +162,19 @@ int main(void)
   /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_DMA_Init();
-  MX_USART2_UART_Init();
   MX_TIM1_Init();
   MX_ADC1_Init();
-  MX_I2C1_Init();
   MX_ADC2_Init();
   MX_OPAMP1_Init();
   MX_OPAMP2_Init();
   MX_OPAMP3_Init();
   MX_CORDIC_Init();
+  MX_FDCAN1_Init();
+  MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
   DWT_Delay_Init();
   CORDIC_SinCos_RegisterConfig();
   JustFloat_Init();
-  AS5600_init();
 
   /*
    * 初始化电流环和速度环。
@@ -187,7 +186,7 @@ int main(void)
 
 
 
-  if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
+  if (DebugConsole_Init(&huart1, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
   }
 
@@ -225,17 +224,7 @@ int main(void)
     Error_Handler();
   }
 
-  uint8_t buf[2];
   while (1) {
-    HAL_I2C_Mem_Read(&hi2c1, (0x36U << 1), 0x0CU, I2C_MEMADD_SIZE_8BIT, buf, 2U,
-                     10U);
-
-    as5600_raw = ((uint16_t)(buf[0] & 0x0FU) << 8) | (uint16_t)buf[1];
-    int32_t delta_raw = (int32_t)as5600_raw - 1017;
-
-    as5600_elec_rad = (float)delta_raw * 7.0f * (2.0f * FOC_PI / 4096.0f);
-
-    as5600_elec_rad = FOC_WrapToPi(-as5600_elec_rad);
 
     // ADC1 采样母线电压
     HAL_ADC_Start(&hadc1);
@@ -267,53 +256,16 @@ void SystemClock_Config(void)
   /** Configure the main internal regulator output voltage
   */
   HAL_PWREx_ControlVoltageScaling(PWR_REGULATOR_VOLTAGE_SCALE1_BOOST);
-  if(USE_INTERNAL_CLOCK==1)
-  {
-/** Initializes the RCC Oscillators according to the specified parameters
+
+  /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
-  RCC_OscInitStruct.PLL.PLLN = 84;
-  RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
-  RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
-  RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
-  if (HAL_RCC_OscConfig(&RCC_OscInitStruct) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-  /** Initializes the CPU, AHB and APB buses clocks
-  */
-    RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK |
-                                RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 |
-                                RCC_CLOCKTYPE_PCLK2;
-
-  RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
-  RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
-  RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV1;
-  RCC_ClkInitStruct.APB2CLKDivider = RCC_HCLK_DIV1;
-
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_4) != HAL_OK)
-  {
-    Error_Handler();
-  }
-
-
-  }
-  else {
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV2;
-  RCC_OscInitStruct.PLL.PLLN = 28;
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
+  RCC_OscInitStruct.PLL.PLLN = 85;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
@@ -335,12 +287,7 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-  }
-  
 }
-
-
-
 
 /* USER CODE BEGIN 4 */
 
@@ -690,11 +637,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     /*
      * UART忙时不要先计算6个实参再进入发送函数返回。
-     * 115200波特率下DMA绝大多数电流环周期都处于忙状态，
+     * 2 Mbps波特率下仍先判断TC，避免DMA忙时计算无用的发送数据。
      * 外层先判断TC可减少函数调用、周期差计算和浮点角度换算。
      */
     if ((just_float_on_off != 0U) &&
-        ((USART2->ISR & USART_ISR_TC) != 0U)) {
+        ((USART1->ISR & USART_ISR_TC) != 0U)) {
       Fast_Send_6Floats(
           foc.state.i_abc.a,
           foc.observer.state.psi_alpha,
@@ -713,7 +660,7 @@ int _write(int file, char *ptr, int len) {
     return 0;
   }
 
-  if (HAL_UART_Transmit(&huart2, (uint8_t *)ptr, (uint16_t)len,
+  if (HAL_UART_Transmit(&huart1, (uint8_t *)ptr, (uint16_t)len,
                         HAL_MAX_DELAY) == HAL_OK) {
     return len;
   }
@@ -763,41 +710,41 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void) {
 }
 
 /**
- * @brief 初始化 JustFloat 和 USART2 TX DMA
+ * @brief 初始化 JustFloat 和 USART1 TX DMA
  */
 void JustFloat_Init(void) {
   /* VOFA+ JustFloat 帧尾 */
   tx_frame.tail = 0x7F800000UL;
   just_float_on_off = 1U;
   /* 暂时关闭 USART DMA 发送请求 */
-  CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
+  CLEAR_BIT(USART1->CR3, USART_CR3_DMAT);
 
   /* 禁用 DMA 通道 */
-  __HAL_DMA_DISABLE(&hdma_usart2_tx);
+  __HAL_DMA_DISABLE(&hdma_usart1_tx);
 
-  while ((hdma_usart2_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
+  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
   }
 
   /* 清除该 DMA 通道的全部标志 */
-  __HAL_DMA_CLEAR_FLAG(&hdma_usart2_tx,
-                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart2_tx));
+  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
+                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
 
   /*
-   * 关键：DMA 外设地址必须是 USART2 发送数据寄存器
+   * 关键：DMA 外设地址必须是 USART1 发送数据寄存器
    */
-  hdma_usart2_tx.Instance->CPAR = (uint32_t)&USART2->TDR;
+  hdma_usart1_tx.Instance->CPAR = (uint32_t)&USART1->TDR;
 
   /*
    * 内存地址指向发送缓冲区
    */
-  hdma_usart2_tx.Instance->CMAR = (uint32_t)&tx_frame;
+  hdma_usart1_tx.Instance->CMAR = (uint32_t)&tx_frame;
 
-  hdma_usart2_tx.Instance->CNDTR = 0U;
+  hdma_usart1_tx.Instance->CNDTR = 0U;
 
   /*
-   * 关键：允许 USART2 产生 TX DMA 请求
+   * 关键：允许 USART1 产生 TX DMA 请求
    */
-  SET_BIT(USART2->CR3, USART_CR3_DMAT);
+  SET_BIT(USART1->CR3, USART_CR3_DMAT);
 }
 
 /**
@@ -811,7 +758,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
    * TC=1 表示：
    * DMA、TDR、移位寄存器中的数据全部发送完成。
    */
-  if ((USART2->ISR & USART_ISR_TC) == 0U) {
+  if ((USART1->ISR & USART_ISR_TC) == 0U) {
     return -1;
   }
 
@@ -825,28 +772,28 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   /*
    * 修改 CNDTR、CMAR 之前，必须关闭 DMA。
    */
-  __HAL_DMA_DISABLE(&hdma_usart2_tx);
+  __HAL_DMA_DISABLE(&hdma_usart1_tx);
 
-  while ((hdma_usart2_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
+  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
   }
 
   /*
    * 必须清除上一次传输的 TC、HT、TE 等 DMA 标志。
    */
-  __HAL_DMA_CLEAR_FLAG(&hdma_usart2_tx,
-                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart2_tx));
+  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
+                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
 
   /*
    * CPAR和CMAR已在JustFloat_Init()中固定配置，
    * 每次发送只需重新装载传输数量。
    */
-  hdma_usart2_tx.Instance->CNDTR = sizeof(JustFloatFrame_t);
+  hdma_usart1_tx.Instance->CNDTR = sizeof(JustFloatFrame_t);
 
   /*
    * 清除USART发送完成标志。
    * 新数据真正发送完后，TC才会重新置1。
    */
-  USART2->ICR = USART_ICR_TCCF;
+  USART1->ICR = USART_ICR_TCCF;
 
   /*
    * 保证CPU写入缓冲区的数据在DMA启动前完成。
@@ -858,7 +805,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
    * DMAT已在JustFloat_Init()中保持使能。
    * 开启DMA后USART TX请求立即开始搬运。
    */
-  __HAL_DMA_ENABLE(&hdma_usart2_tx);
+  __HAL_DMA_ENABLE(&hdma_usart1_tx);
 
   return 0;
 }
