@@ -45,12 +45,6 @@
 /* USER CODE BEGIN PTD */
 
 
-//时钟选择，内部还是外部 
-// 1-表示内部   0-表示外部
-#define USE_INTERNAL_CLOCK 0  
-
-
-
 /* USER CODE END PTD */
 
 /* Private define ------------------------------------------------------------*/
@@ -296,7 +290,6 @@ void SystemClock_Config(void)
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
   static uint16_t calibration_count = 0;
-  uint32_t DWT_Cycle_Count; // 获取当前的DWT计数器值
   uint16_t adc_a;
   uint16_t adc_b;
   uint16_t adc_c;
@@ -339,8 +332,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
      * 高频ISR直接读取注入数据寄存器。
      * ADC注入Rank与工程配置固定：ADC1 JDR1=Ia，ADC2 JDR1=Ib，ADC1 JDR2=Ic。
      */
-    DWT_Cycle_Count = DWT->CYCCNT;
-
     adc_a = (uint16_t)ADC1->JDR1;
     adc_b = (uint16_t)ADC2->JDR1;
     adc_c = (uint16_t)ADC1->JDR2;
