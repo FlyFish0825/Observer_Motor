@@ -47,7 +47,7 @@
 
 //时钟选择，内部还是外部 
 // 1-表示内部   0-表示外部
-#define USE_INTERNAL_CLOCK 1  
+#define USE_INTERNAL_CLOCK 0  
 
 
 
