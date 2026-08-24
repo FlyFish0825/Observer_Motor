@@ -181,6 +181,53 @@ int main(void)
 
 
 
+  /* 临时CAN FD发波测试：1 Mbps仲裁段，5 Mbps数据段。 */
+  FDCAN_TxHeaderTypeDef can_tx_header = {0};
+  uint8_t can_tx_data[12] = {
+      0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C
+  };
+
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_BRS;
+  hfdcan1.Init.Mode = FDCAN_MODE_EXTERNAL_LOOPBACK;
+  hfdcan1.Init.DataPrescaler = 2U;
+  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK) {
+    Error_Handler();
+  }
+
+  can_tx_header.Identifier = 0x123U;
+  can_tx_header.IdType = FDCAN_STANDARD_ID;
+  can_tx_header.TxFrameType = FDCAN_DATA_FRAME;
+  can_tx_header.DataLength = FDCAN_DLC_BYTES_12;
+  can_tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+  can_tx_header.BitRateSwitch = FDCAN_BRS_ON;
+  can_tx_header.FDFormat = FDCAN_FD_CAN;
+  can_tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+  can_tx_header.MessageMarker = 0U;
+
+  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
+    Error_Handler();
+  }
+  uint8_t pData[] = "Hello, World!\r\n";
+
+  HAL_TIM_Base_Start(&htim1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+
+  while (1) {
+    if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U) {
+      if (HAL_FDCAN_AddMessageToTxFifoQ(
+              &hfdcan1, &can_tx_header, can_tx_data) != HAL_OK) {
+        Error_Handler();
+      }
+    }
+    HAL_UART_Transmit(&huart1, pData, sizeof(pData) - 1, HAL_MAX_DELAY);
+    HAL_Delay(10U);
+  }
+
   if (DebugConsole_Init(&huart1, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
   }
