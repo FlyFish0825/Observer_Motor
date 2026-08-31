@@ -39,7 +39,8 @@
 #include <stdint.h>
 #include "debug_console.h"
 #include "controller.h"
-
+#include "thrust_allocator.h"
+#include "stdio.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -58,7 +59,7 @@
 /* USER CODE BEGIN PD */
 
 static FOC_Control_t motor_control;
-
+static float fan_thrust[8];
 
 /* USER CODE END PD */
 
@@ -165,6 +166,59 @@ int main(void)
   CORDIC_SinCos_RegisterConfig();
   JustFloat_Init();
   AS5600_init();
+
+
+  if (!ThrustAllocator_Init()) Error_Handler();
+
+
+
+  uint32_t cycle_start;
+uint32_t cycle_now;
+
+uint32_t cycle_min = 0xFFFFFFFFU;
+uint32_t cycle_max = 0U;
+uint64_t cycle_sum = 0U;
+
+for (int i = 0; i < 1000; i++)
+{
+    cycle_start = DWT->CYCCNT;
+
+    ThrustAllocator_Solve(
+        0.0f,
+        0.0f,
+        50.0f,
+        0.0f,
+        0.0f,
+        0.0f,
+        fan_thrust);
+
+    cycle_now = DWT->CYCCNT - cycle_start;
+
+    if (cycle_now < cycle_min)
+        cycle_min = cycle_now;
+
+    if (cycle_now > cycle_max)
+        cycle_max = cycle_now;
+
+    cycle_sum += cycle_now;
+}
+
+uint32_t cycle_avg = (uint32_t)(cycle_sum / 1000U);
+
+printf("QP cycles:\r\n");
+printf("min = %lu\r\n", cycle_min);
+printf("avg = %lu\r\n", cycle_avg);
+printf("max = %lu\r\n", cycle_max);
+
+printf("QP time:\r\n");
+printf("min = %.3f us\r\n", (float)cycle_min / 168.0f);
+printf("avg = %.3f us\r\n", (float)cycle_avg / 168.0f);
+printf("max = %.3f us\r\n", (float)cycle_max / 168.0f);
+  
+
+
+
+
 
   /*
    * 初始化电流环和速度环。
