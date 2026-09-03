@@ -56,7 +56,13 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 32K
-FLASH (rx)      : ORIGIN = 0x8000000, LENGTH = 128K
+/*
+ * Bootloader APP 版本：
+ * 0x08000000~0x08004FFF：20 KiB Bootloader
+ * 0x08005000~0x0801F7FF：106 KiB APP
+ * 0x0801F800~0x0801FFFF：2 KiB 配置页（不属于本链接区域）
+ */
+FLASH (rx)      : ORIGIN = 0x08005000, LENGTH = 106K
 }
 
 /* Highest address of the user mode stack */

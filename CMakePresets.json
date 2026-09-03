@@ -13,15 +13,37 @@
         {
             "name": "Debug",
             "inherits": "default",
+            "displayName": "Standalone APP - Debug",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Debug"
+                "CMAKE_BUILD_TYPE": "Debug",
+                "APP_LAYOUT": "standalone"
             }
         },
         {
             "name": "Release",
             "inherits": "default",
+            "displayName": "Standalone APP - Release",
             "cacheVariables": {
-                "CMAKE_BUILD_TYPE": "Release"
+                "CMAKE_BUILD_TYPE": "Release",
+                "APP_LAYOUT": "standalone"
+            }
+        },
+        {
+            "name": "Boot-Debug",
+            "inherits": "default",
+            "displayName": "Bootloader APP - Debug",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Debug",
+                "APP_LAYOUT": "boot"
+            }
+        },
+        {
+            "name": "Boot-Release",
+            "inherits": "default",
+            "displayName": "Bootloader APP - Release",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "APP_LAYOUT": "boot"
             }
         }
     ],
@@ -33,6 +55,14 @@
         {
             "name": "Release",
             "configurePreset": "Release"
+        },
+        {
+            "name": "Boot-Debug",
+            "configurePreset": "Boot-Debug"
+        },
+        {
+            "name": "Boot-Release",
+            "configurePreset": "Boot-Release"
         }
     ]
     

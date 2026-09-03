@@ -40,6 +40,7 @@
 #include "debug_console.h"
 #include "controller.h"
 
+#include "app_memory.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -128,7 +129,14 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
-
+  /*
+   * 必须在 HAL_Init() 开启 SysTick 中断前完成向量表重定位。
+   * standalone：APP_FLASH_START = 0x08000000
+   * boot      ：APP_FLASH_START = 0x08005000
+   */
+  SCB->VTOR = APP_FLASH_START;
+  __DSB();
+  __ISB();
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
