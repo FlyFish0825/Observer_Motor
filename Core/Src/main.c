@@ -50,6 +50,18 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
+/*
+ * System clock source selection for PCB bring-up:
+ *   1U: external 16 MHz HSE crystal/oscillator
+ *   0U: internal 16 MHz HSI RC oscillator
+ * Both modes keep SYSCLK at 170 MHz.
+ */
+#define SYSTEM_CLOCK_USE_HSE  0U
+
+#if ((SYSTEM_CLOCK_USE_HSE != 0U) && (SYSTEM_CLOCK_USE_HSE != 1U))
+#error "SYSTEM_CLOCK_USE_HSE must be 0U (HSI) or 1U (HSE)"
+#endif
+
 static FOC_Control_t motor_control;
 
 
@@ -135,7 +147,25 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  /*
+   * Power-stage safe state: force all six TIM1 gate-drive pins LOW
+   * as early as possible after reset, before the clock/peripheral init.
+   * TIM1 later takes ownership of these pins through alternate function.
+   */
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  HAL_GPIO_WritePin(GPIOA, GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15, GPIO_PIN_RESET);
 
+  GPIO_InitTypeDef safe_gpio = {0};
+  safe_gpio.Mode = GPIO_MODE_OUTPUT_PP;
+  safe_gpio.Pull = GPIO_NOPULL;
+  safe_gpio.Speed = GPIO_SPEED_FREQ_LOW;
+
+  safe_gpio.Pin = GPIO_PIN_8 | GPIO_PIN_9 | GPIO_PIN_10;
+  HAL_GPIO_Init(GPIOA, &safe_gpio);
+  safe_gpio.Pin = GPIO_PIN_13 | GPIO_PIN_14 | GPIO_PIN_15;
+  HAL_GPIO_Init(GPIOB, &safe_gpio);
   /* USER CODE END 1 */
 
   /* MCU Configuration--------------------------------------------------------*/
@@ -207,26 +237,22 @@ int main(void)
   if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
     Error_Handler();
   }
-  uint8_t pData[] = "Hello, World!\r\n";
+  uint8_t pData[] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
 
-  HAL_TIM_Base_Start(&htim1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_3);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_1);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_2);
-  HAL_TIMEx_PWMN_Start(&htim1, TIM_CHANNEL_3);
+  // foc_motor_state = FOC_MOTOR_OPEN_LOOP;
 
-  while (1) {
-    if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U) {
-      if (HAL_FDCAN_AddMessageToTxFifoQ(
-              &hfdcan1, &can_tx_header, can_tx_data) != HAL_OK) {
-        Error_Handler();
-      }
-    }
-    HAL_UART_Transmit(&huart1, pData, sizeof(pData) - 1, HAL_MAX_DELAY);
-    HAL_Delay(10U);
-  }
+  /*
+   * Keep the whole three-phase bridge disabled after power-up.
+   * CH1/2/3 and CH1N/2N/3N remain at their configured LOW idle state.
+   * Do not start PWM here; start it explicitly only when the power stage is ready.
+   */
+  TIM1->CCR1 = 0U;
+  TIM1->CCR2 = 0U;
+  TIM1->CCR3 = 0U;
+  TIM1->CCR4 = 0U;
+  __HAL_TIM_MOE_DISABLE(&htim1);
+
+
 
   if (DebugConsole_Init(&huart1, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
@@ -280,7 +306,14 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
+       if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U) {
+      if (HAL_FDCAN_AddMessageToTxFifoQ(
+              &hfdcan1, &can_tx_header, can_tx_data) != HAL_OK) {
+        Error_Handler();
+      }
+    }
+    HAL_UART_Transmit(&huart1, pData, sizeof(pData), HAL_MAX_DELAY);
+    HAL_Delay(10U);
 
     DebugConsole_Process();
   }
@@ -303,10 +336,17 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
+#if SYSTEM_CLOCK_USE_HSE
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+#else
+  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
+  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
+  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
+#endif
+  RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
   RCC_OscInitStruct.PLL.PLLN = 85;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
@@ -682,13 +722,13 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
      */
     if ((just_float_on_off != 0U) &&
         ((USART1->ISR & USART_ISR_TC) != 0U)) {
-      Fast_Send_6Floats(
-          foc.state.i_abc.a,
-          foc.observer.state.psi_alpha,
-          foc.observer.state.psi_beta,
-          foc.observer.state.speed_rpm,
-          foc.observer.state.phase_raw * RAD_TO_DEG_F,
-          foc.state.vbus);
+      // Fast_Send_6Floats(
+      //     foc.state.i_abc.a,
+      //     foc.observer.state.psi_alpha,
+      //     foc.observer.state.psi_beta,
+      //     foc.observer.state.speed_rpm,
+      //     foc.observer.state.phase_raw * RAD_TO_DEG_F,
+      //     foc.state.vbus);
     }
   }
 }

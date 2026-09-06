@@ -95,8 +95,8 @@ void MX_TIM1_Init(void)
   }
   __HAL_TIM_DISABLE_OCxPRELOAD(&htim1, TIM_CHANNEL_4);
   HAL_TIMEx_EnableDeadTimePreload(&htim1);
-  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
-  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_ENABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_ENABLE;
   sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
   sBreakDeadTimeConfig.DeadTime = 90;
   sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
