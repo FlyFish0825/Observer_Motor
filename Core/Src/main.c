@@ -242,6 +242,11 @@ int main(void)
 
       foc.state.vbus = (float)adc_value * 26.0f * 3.3f / 4096.0f;
     }
+
+     HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_4);
+     HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
+    HAL_Delay(500U);
+
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
