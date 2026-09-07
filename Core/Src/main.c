@@ -50,15 +50,6 @@
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
 
-/*
- * 本板使用16 MHz外部晶振；PLL配置保持SYSCLK为170 MHz。
- */
-#define SYSTEM_CLOCK_USE_HSE  1U
-
-#if ((SYSTEM_CLOCK_USE_HSE != 0U) && (SYSTEM_CLOCK_USE_HSE != 1U))
-#error "SYSTEM_CLOCK_USE_HSE must be 0U (HSI) or 1U (HSE)"
-#endif
-
 static FOC_Control_t motor_control;
 
 
@@ -358,17 +349,10 @@ void SystemClock_Config(void)
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
-#if SYSTEM_CLOCK_USE_HSE
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
-#else
-  RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI;
-  RCC_OscInitStruct.HSIState = RCC_HSI_ON;
-  RCC_OscInitStruct.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-#endif
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
   RCC_OscInitStruct.PLL.PLLN = 85;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
