@@ -54,23 +54,24 @@ void FOC_Data_Init(void) {
 
   foc.state.omega = 0.0f;
 
+  /* 使用main分支中这台电机已经验证过的参数。 */
   Observer_MotorParam_t motor = {
-      .Rs = 0.5f, 
-      .Ls = 0.000100f, 
-      .flux_linkage = 0.00284f, 
+      .Rs = 2.55f,
+      .Ls = 0.00086f,
+      .flux_linkage = 0.0035f,
       .pole_pairs = 7
     };
 
   Observer_Config_t observer_cfg = {/*
                                      * VESC经验值
                                      */
-                                    .gain =1e8f,
+                                    .gain =1e7f,
                                     .Ts = 0.00004f,  //25kHz
                                     .psi_min = motor.flux_linkage*0.5f,
                                     .psi_max = motor.flux_linkage*3.0f,
                                     .pll_kp = 3000.0f,
                                     .pll_ki = 20000.0f,
-                                    .pll_omega_limit = 20000.0f
+                                    .pll_omega_limit = 5000.0f
                                   };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
