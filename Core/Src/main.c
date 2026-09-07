@@ -111,6 +111,8 @@ static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 /* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
 static volatile uint32_t just_float_on_off = 1U;
 static BoardAdcMeasurements_t board_adc = {0};
+/* 电流零偏校准完成后，由主循环安全地开启功率PWM。 */
+static volatile uint8_t motor_auto_start_ready = 0U;
 
 uint16_t as5600_raw = 0U;
 float as5600_elec_rad = 0.0f;
@@ -317,13 +319,30 @@ int main(void)
     Error_Handler();
   }
 
-  /* 只启动CH4内部采样时基；三相功率输出保持关闭。 */
+  /* 先只启动CH4采样时基，完成静止状态下的电流零偏校准。 */
   TIM1->CCR4 = foc.timer.adc_trigger;
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
     Error_Handler();
   }
 
   while (1) {
+    if (motor_auto_start_ready != 0U) {
+      motor_auto_start_ready = 0U;
+
+      /*
+       * 暂停CH4触发，避免开启六路PWM的过程中插入ADC控制中断。
+       * FOC_PWM_Start最后会重新启动CH4；三相从50%等占空比开始，
+       * 随后进入原工程的开环启动和观测器切换流程。
+       */
+      if (HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+        Error_Handler();
+      }
+
+      FOC_DirectionControl_PrepareOpenLoop(&motor_control);
+      foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+      FOC_PWM_Start();
+    }
+
     (void)BoardAdc_Update();
     /* USER CODE END WHILE */
 
@@ -415,6 +434,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       foc.calibration.ib_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.ic_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.calibrated = 1; // 设置校准完成标志
+      motor_auto_start_ready = 1U;
     }
 
     // 校准完成
