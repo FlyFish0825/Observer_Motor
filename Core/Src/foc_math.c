@@ -20,7 +20,8 @@ static uint32_t foc_current_rebuild_threshold = 0U;
 void FOC_Data_Init(void) {
   foc.timer.pwm_arr = 3399U;
   foc.timer.adc_trigger = 3398U;
-  foc.timer.dead_time = 20U;
+  /* 170 MHz下90个DTG计数约为529 ns，适合作为新功率板的保守起点。 */
+  foc.timer.dead_time = 90U;
   foc.timer.clock_freq = 170000000U;
 
   /*

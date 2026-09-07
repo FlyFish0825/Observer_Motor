@@ -51,12 +51,9 @@
 /* USER CODE BEGIN PD */
 
 /*
- * System clock source selection for PCB bring-up:
- *   1U: external 16 MHz HSE crystal/oscillator
- *   0U: internal 16 MHz HSI RC oscillator
- * Both modes keep SYSCLK at 170 MHz.
+ * 本板使用16 MHz外部晶振；PLL配置保持SYSCLK为170 MHz。
  */
-#define SYSTEM_CLOCK_USE_HSE  0U
+#define SYSTEM_CLOCK_USE_HSE  1U
 
 #if ((SYSTEM_CLOCK_USE_HSE != 0U) && (SYSTEM_CLOCK_USE_HSE != 1U))
 #error "SYSTEM_CLOCK_USE_HSE must be 0U (HSI) or 1U (HSE)"
@@ -69,7 +66,9 @@ static FOC_Control_t motor_control;
 
 
 #define OBSERVER_LOCK_SAMPLE_COUNT      2000U
-#define VBUS_DIVIDER_GAIN               ((100.0f + 4.7f) / 4.7f)
+#define ADC_REFERENCE_VOLTAGE           3.3f
+#define ADC_FULL_SCALE_COUNTS           4096.0f
+#define PCB_VOLTAGE_DIVIDER_GAIN        ((100.0f + 5.1f) / 5.1f)
 /*
  * 角度偏移释放速度(rad/s)
  * 10rad/s × 40us ≈ 0.0004rad/周期
@@ -105,11 +104,22 @@ typedef struct {
   uint32_t tail;
 } JustFloatFrame_t;
 
+typedef struct {
+  uint16_t vbus_raw;
+  uint16_t phase_u_raw;
+  uint16_t phase_v_raw;
+  uint16_t phase_w_raw;
+  float phase_u_voltage;
+  float phase_v_voltage;
+  float phase_w_voltage;
+} BoardAdcMeasurements_t;
+
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 
 /* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
 static volatile uint32_t just_float_on_off = 1U;
+static BoardAdcMeasurements_t board_adc = {0};
 
 uint16_t as5600_raw = 0U;
 float as5600_elec_rad = 0.0f;
@@ -125,6 +135,7 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void);
 void JustFloat_Init(void);
 int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
                       float f5);
+static HAL_StatusTypeDef BoardAdc_Update(void);
 
 
 
@@ -136,6 +147,51 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+
+/**
+ * @brief 读取PCB上的母线电压和三相端电压规则组。
+ * @note  ADC1顺序：PA0 VBUS、PB12 U、PB11 W；ADC2：PA4 V。
+ */
+static HAL_StatusTypeDef BoardAdc_Update(void) {
+  uint16_t adc1_values[3];
+
+  if (HAL_ADC_Start(&hadc1) != HAL_OK) {
+    return HAL_ERROR;
+  }
+
+  for (uint32_t rank = 0U; rank < 3U; rank++) {
+    if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK) {
+      return HAL_TIMEOUT;
+    }
+    adc1_values[rank] = (uint16_t)HAL_ADC_GetValue(&hadc1);
+  }
+
+  if (HAL_ADC_Start(&hadc2) != HAL_OK) {
+    return HAL_ERROR;
+  }
+  if (HAL_ADC_PollForConversion(&hadc2, 10U) != HAL_OK) {
+    return HAL_TIMEOUT;
+  }
+
+  board_adc.vbus_raw = adc1_values[0];
+  board_adc.phase_u_raw = adc1_values[1];
+  board_adc.phase_w_raw = adc1_values[2];
+  board_adc.phase_v_raw = (uint16_t)HAL_ADC_GetValue(&hadc2);
+
+  foc.state.vbus = (float)board_adc.vbus_raw * ADC_REFERENCE_VOLTAGE /
+                   ADC_FULL_SCALE_COUNTS * PCB_VOLTAGE_DIVIDER_GAIN;
+  board_adc.phase_u_voltage =
+      (float)board_adc.phase_u_raw * ADC_REFERENCE_VOLTAGE /
+      ADC_FULL_SCALE_COUNTS * PCB_VOLTAGE_DIVIDER_GAIN;
+  board_adc.phase_v_voltage =
+      (float)board_adc.phase_v_raw * ADC_REFERENCE_VOLTAGE /
+      ADC_FULL_SCALE_COUNTS * PCB_VOLTAGE_DIVIDER_GAIN;
+  board_adc.phase_w_voltage =
+      (float)board_adc.phase_w_raw * ADC_REFERENCE_VOLTAGE /
+      ADC_FULL_SCALE_COUNTS * PCB_VOLTAGE_DIVIDER_GAIN;
+
+  return HAL_OK;
+}
 
 /* USER CODE END 0 */
 
@@ -211,36 +267,6 @@ int main(void)
 
 
 
-  /* 临时CAN FD发波测试：1 Mbps仲裁段，5 Mbps数据段。 */
-  FDCAN_TxHeaderTypeDef can_tx_header = {0};
-  uint8_t can_tx_data[12] = {
-      0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09,0x0A,0x0B,0x0C
-  };
-
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_BRS;
-  hfdcan1.Init.Mode = FDCAN_MODE_EXTERNAL_LOOPBACK;
-  hfdcan1.Init.DataPrescaler = 2U;
-  if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK) {
-    Error_Handler();
-  }
-
-  can_tx_header.Identifier = 0x123U;
-  can_tx_header.IdType = FDCAN_STANDARD_ID;
-  can_tx_header.TxFrameType = FDCAN_DATA_FRAME;
-  can_tx_header.DataLength = FDCAN_DLC_BYTES_12;
-  can_tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  can_tx_header.BitRateSwitch = FDCAN_BRS_ON;
-  can_tx_header.FDFormat = FDCAN_FD_CAN;
-  can_tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
-  can_tx_header.MessageMarker = 0U;
-
-  if (HAL_FDCAN_Start(&hfdcan1) != HAL_OK) {
-    Error_Handler();
-  }
-  uint8_t pData[] = {0x01,0x02,0x03,0x04,0x05,0x06,0x07,0x08,0x09};
-
-  // foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-
   /*
    * Keep the whole three-phase bridge disabled after power-up.
    * CH1/2/3 and CH1N/2N/3N remain at their configured LOW idle state.
@@ -274,6 +300,14 @@ int main(void)
     &motor_control.speed_loop_enable, false);
   DebugConsole_RegisterBool("just_float",
     &just_float_on_off, false);
+  DebugConsole_RegisterF32("vbus", &foc.state.vbus,
+    0.0f, 70.0f, false);
+  DebugConsole_RegisterF32("phase_u", &board_adc.phase_u_voltage,
+    0.0f, 70.0f, false);
+  DebugConsole_RegisterF32("phase_v", &board_adc.phase_v_voltage,
+    0.0f, 70.0f, false);
+  DebugConsole_RegisterF32("phase_w", &board_adc.phase_w_voltage,
+    0.0f, 70.0f, false);
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -292,29 +326,17 @@ int main(void)
     Error_Handler();
   }
 
+  /* 只启动CH4内部采样时基；三相功率输出保持关闭。 */
+  TIM1->CCR4 = foc.timer.adc_trigger;
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    Error_Handler();
+  }
+
   while (1) {
-
-    // ADC1 采样母线电压
-    HAL_ADC_Start(&hadc1);
-
-    if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
-      uint16_t adc_value = (uint16_t)HAL_ADC_GetValue(&hadc1);
-
-      foc.state.vbus =
-          (float)adc_value * VBUS_DIVIDER_GAIN * 3.3f / 4096.0f;
-    }
+    (void)BoardAdc_Update();
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-       if (HAL_FDCAN_GetTxFifoFreeLevel(&hfdcan1) > 0U) {
-      if (HAL_FDCAN_AddMessageToTxFifoQ(
-              &hfdcan1, &can_tx_header, can_tx_data) != HAL_OK) {
-        Error_Handler();
-      }
-    }
-    HAL_UART_Transmit(&huart1, pData, sizeof(pData), HAL_MAX_DELAY);
-    HAL_Delay(10U);
-
     DebugConsole_Process();
   }
   /* USER CODE END 3 */
@@ -722,13 +744,13 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
      */
     if ((just_float_on_off != 0U) &&
         ((USART1->ISR & USART_ISR_TC) != 0U)) {
-      // Fast_Send_6Floats(
-      //     foc.state.i_abc.a,
-      //     foc.observer.state.psi_alpha,
-      //     foc.observer.state.psi_beta,
-      //     foc.observer.state.speed_rpm,
-      //     foc.observer.state.phase_raw * RAD_TO_DEG_F,
-      //     foc.state.vbus);
+      Fast_Send_6Floats(
+          foc.state.i_abc.a,
+          foc.observer.state.psi_alpha,
+          foc.observer.state.psi_beta,
+          foc.observer.state.speed_rpm,
+          foc.observer.state.phase_raw * RAD_TO_DEG_F,
+          foc.state.vbus);
     }
   }
 }
