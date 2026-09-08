@@ -10,9 +10,9 @@
  *
  * PMSM:
  *
- * Rs      定子电阻
- * Ls      定子电感
- * flux    永磁磁链
+ * Rs      定子相电阻，ohm
+ * Ls      定子相电感，H；当前模型使用同一电感处理alpha/beta两轴
+ * flux    永磁磁链幅值，Wb
  * pole_pairs 极对数
  */
 typedef struct {
@@ -40,12 +40,12 @@ typedef struct {
   float gain;
 
   /*
-   * 采样周期
+   * 观测器调用周期，s；与电流中断周期一致
    */
   float Ts;
 
   /*
-   * 磁链幅值限制
+   * PLL接受磁链反馈的幅值范围，Wb；不是磁链状态的硬限幅
    */
   float psi_min;
 
@@ -72,12 +72,21 @@ typedef struct {
   float duty_a;
   float duty_b;
   float duty_c;
+
   /*
-   * 母线电压
+   * PCB三相端电压采样经Clarke变换后的电压。
+   * measured_voltage_weight=1时使用实测值，=0时使用占空比重构值。
+   */
+  float measured_u_alpha;
+  float measured_u_beta;
+  float measured_voltage_weight;
+
+  /*
+   * 直流母线电压，V，用于占空比电压重构
    */
   float vbus;
   /*
-   * Clarke后的电流
+   * Clarke后的静止坐标电流，A
    */
   float i_alpha;
   float i_beta;
@@ -104,14 +113,14 @@ typedef struct {
   float psi_beta;
 
   /*
-   * 电流误差
+   * 磁链幅值平方误差乘以对应轴磁链，供非线性径向校正使用
    */
   float error_alpha;
 
   float error_beta;
 
   /*
-   * 校正量
+   * 总磁链积分方程中的校正项，已乘观测器增益
    */
   float correction_alpha;
 
@@ -124,10 +133,10 @@ typedef struct {
    */
   float phase_raw;
 
-  float pll_phase;
-  float pll_phase_;//角度补偿
-  float pll_omega_e;
-  //机械角速度
+  float pll_phase; /* PLL积分电角度，rad，保持在[-pi,pi]范围 */
+  float pll_phase_;//预留角度补偿字段，当前观测流程未更新
+  float pll_omega_e; /* 最近一次有效磁链更新得到的电角速度，rad/s */
+  //机械角速度，rad/s
   float omega_m;
   //机械转速  单位  rpm
   float speed_rpm;
@@ -166,13 +175,10 @@ typedef struct {
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config);
 
+/* 每拍调用：融合电压、积分磁链、提取原始角度，再更新PLL。 */
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input);
 
+/* 由Observer_Run调用；独立调用时须先准备有效的磁链状态及已初始化句柄。 */
 void Observer_PLL_Run(Observer_Handle_t *obs);
-
-/**
- * @brief 换向重新开环前，只复位PLL动态状态，不清空磁链观测器
- */
-void Observer_PLL_ResetToPhase(Observer_Handle_t *obs, float phase);
 
 #endif

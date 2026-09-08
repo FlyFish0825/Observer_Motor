@@ -1,8 +1,19 @@
+/**
+ * @file observer.c
+ * @brief 非线性磁链观测器与同步旋转坐标系PLL。
+ * 电压/电流在静止alpha-beta坐标系中计算，磁链atan2输出电角度(rad)，
+ * PLL输出电角速度(rad/s)，再换算机械转速(rpm)。输入每控制周期更新一次。
+ */
 #include "observer.h"
 #include "arm_math.h"
 #include "foc_math.h"
 #include <stddef.h>
 
+/**
+ * @brief 复制电机和观测参数，并将初始磁链设置在alpha轴正方向。
+ * 该初值是计算起点，不表示已测得静止转子的真实位置。
+ * 调用方须传入有效指针，并在启用采样控制中断前完成初始化。
+ */
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config) {
 
@@ -46,28 +57,14 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
   obs->state.initialized = 1U;
 }
 
-void Observer_PLL_ResetToPhase(Observer_Handle_t *obs, float phase) {
-  if (obs == NULL) {
-    return;
-  }
-
-  /*
-   * 保留x_alpha/x_beta和psi_alpha/psi_beta，
-   * 只清掉上一旋转方向留下的PLL积分和速度状态。
-   */
-  PI_Controller_Reset(&obs->pll);
-
-  obs->state.pll_phase = FOC_WrapToPiFast(phase);
-  obs->state.pll_omega_e = 0.0f;
-  obs->state.omega_m = 0.0f;
-  obs->state.speed_rpm = 0.0f;
-}
-
 __STATIC_FORCEINLINE void
 Observer_RebuildVoltage(const Observer_Input_t *input,
                         float *u_alpha,
                         float *u_beta)
 {
+  float calculated_u_alpha;
+  float calculated_u_beta;
+  float measured_weight;
   float vbus;
 
   vbus = input->vbus;
@@ -83,13 +80,31 @@ Observer_RebuildVoltage(const Observer_Input_t *input,
    *
    * 数学结果相同，但减少3次减法和多次浮点乘法。
    */
-  *u_alpha =
+  calculated_u_alpha =
       vbus *
       (2.0f * input->duty_a - input->duty_b - input->duty_c) *
       FOC_ONE_THIRD_F;
 
-  *u_beta =
+  calculated_u_beta =
       vbus * (input->duty_b - input->duty_c) * FOC_INV_SQRT3_F;
+
+  /* 应用层决定切换目标与渐变速度；本模块只按给定权重融合两路电压。 */
+  measured_weight = input->measured_voltage_weight;
+  if (!isfinite(measured_weight)) {
+    measured_weight = 0.0f;
+  } else if (measured_weight < 0.0f) {
+    measured_weight = 0.0f;
+  } else if (measured_weight > 1.0f) {
+    measured_weight = 1.0f;
+  }
+
+  /* 线性渐变避免切换电压源时磁链积分器输入发生阶跃。 */
+  *u_alpha = calculated_u_alpha +
+             measured_weight *
+                 (input->measured_u_alpha - calculated_u_alpha);
+  *u_beta = calculated_u_beta +
+            measured_weight *
+                (input->measured_u_beta - calculated_u_beta);
 }
 
 /**
@@ -139,10 +154,7 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
   Ls = obs->motor.Ls;
   Ts = obs->config.Ts;
 
-  /*
-   * 由最终SVPWM占空比和母线电压
-   * 重构实际施加的Ualpha、Ubeta。
-   */
+  /* 按应用层传入的权重混合实测与重构电压，单位均为V。 */
   Observer_RebuildVoltage(input, &u_alpha, &u_beta);
 
   /*
@@ -188,6 +200,8 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
    * 更新定子总磁链状态：
    *
    * x_dot = u - R*i + correction
+   * 使用前向欧拉积分x += Ts*x_dot；电压为V，电阻为ohm，电流为A，
+   * 总磁链x与永磁磁链psi均为Wb。Ts必须与实际调用周期保持一致。
    */
   x_alpha += Ts * (u_alpha - Rs * input->i_alpha + correction_alpha);
 
@@ -222,6 +236,7 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
 
   obs->state.correction_beta = correction_beta;
 
+  /* 当前FOC变换使用phase_raw；PLL另行滤出速度并维护pll_phase。 */
   obs->state.phase_raw = FOC_atan2_Fast(psi_beta, psi_alpha);
   Observer_PLL_Run(obs);
 }
@@ -248,7 +263,8 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
   uint8_t psi_valid;
 
   /*
-   * 判断当前磁链幅值是否可信。
+   * 判断当前磁链幅值是否可信。psi_min/max只用于PLL更新资格判断，
+   * 并不会钳住上面磁链积分器的状态，也不是整机启动完成的判据。
    */
   psi_valid = (obs->state.psi_mag > 1.0e-9f) &&
               ((obs->config.psi_min <= 0.0f) ||
@@ -298,7 +314,9 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
     omega_e = PI_Controller_RunError(&obs->pll, pll_error);
     obs->state.pll_omega_e = omega_e;
 
-    /* 常数乘法替代每拍浮点除法。 */
+    /* 当前换算固定使用7极对：omega_m=omega_e/7，rpm=omega_m*60/(2pi)。
+     * 此处没有读取motor.pole_pairs，更换极对数时需同时核对此换算。
+     */
     obs->state.omega_m = omega_e * (1.0f / 7.0f);
     obs->state.speed_rpm =
         omega_e * (60.0f / (2.0f * FOC_PI * 7.0f));

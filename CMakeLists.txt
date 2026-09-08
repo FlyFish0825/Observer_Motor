@@ -67,6 +67,8 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/board_adc.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_app.c
 )
 
 

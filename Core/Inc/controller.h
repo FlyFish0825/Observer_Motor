@@ -20,7 +20,9 @@ typedef enum {
  * @brief 通用PI控制器数据结构
  */
 typedef struct {
-  /* 可调参数 */
+  /* 可调参数：Kp为输出/输入单位，Ki为输出/(输入*s)，sample_time单位s。
+   * volatile保证运行时重新读取，不保证多个参数能作为一个事务同时更新。
+   */
   volatile float kp;
   volatile float ki;
   volatile float sample_time;
@@ -31,7 +33,7 @@ typedef struct {
   volatile float integral_min;
   volatile float integral_max;
 
-  /* 运行状态 */
+  /* 运行状态：integral保存已乘Ki并积分后的输出贡献，单位与output相同。 */
   float reference;
   float feedback;
   float error;
@@ -46,24 +48,14 @@ typedef struct {
 } PI_Controller_t;
 
 
-/* ======================== 电机开环启动默认参数 ======================== */
-
-
-#define OPEN_LOOP_TARGET_STEP_Q32  0x0098EAD6U
-
-#define OPEN_LOOP_TARGET_OMEGA_E   366.51914f
-
-
-#define OPEN_LOOP_RAMP_INCREMENT_Q32  1000U
-
-
 /* ======================== 电机闭环默认参数 ======================== */
 
 /*
  * 电流环参数保持当前工程中的数值不变。
  * 电流环每次ADC注入转换完成时运行，当前频率25kHz。
+ * 电流PI误差单位A、输出单位V；这里是d/q轴各自限幅，后级SVPWM
+ * 还会按实际母线能力缩放三相电压。
  */
-
 #define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-20.0f)
 #define FOC_ID_PI_OUTPUT_MAX_DEFAULT 20.0f
 #define FOC_ID_PI_KP_DEFAULT 0.2f
@@ -80,68 +72,16 @@ typedef struct {
  *   speed PI输入  = rpm
  *   speed PI输出  = Iq参考值，A
  */
-#define FOC_SPEED_PI_KP_DEFAULT 0.001f
-#define FOC_SPEED_PI_KI_DEFAULT 0.05f
-#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-0.5f)
-#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 0.5f
+#define FOC_SPEED_PI_KP_DEFAULT 0.0007f
+#define FOC_SPEED_PI_KI_DEFAULT 0.015f
+#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-5.0f)
+#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 5.0f
+
+/* 运行中的外部速度阶跃转换成斜坡，默认每秒最多变化20000 rpm。 */
+#define FOC_SPEED_REFERENCE_SLEW_RPM_PER_S_DEFAULT 20000.0f
 
 /* 25kHz电流环 / 25 = 1kHz速度环 */
 #define FOC_SPEED_LOOP_DIVIDER_DEFAULT 25U
-
-
-/* ======================== 电机正反转换向 ======================== */
-
-/*
- * 无感FOC换向时先闭环减速到低速，
- * 再重新反向开环启动，避免观测器直接穿越零速。
- */
-/*
- * 换向时先直接降到同方向500rpm。
- * 这一段继续使用已经跑通的速度闭环，不做慢斜坡。
- */
-#define FOC_REVERSAL_DECEL_TARGET_RPM        500.0f
-#define FOC_REVERSAL_DECEL_REACHED_RPM       550.0f
-
-/*
- * 500rpm以下直接给0rpm主动制动。
- * 实际速度进入80rpm以内并稳定4ms后才退出无感闭环。
- */
-#define FOC_REVERSAL_RESTART_SPEED_RPM       80.0f
-#define FOC_REVERSAL_ZERO_HOLD_COUNT         100U
-
-/*
- * 正常第一次启动仍使用OPEN_LOOP_RAMP_INCREMENT_Q32。
- * 只有换向重新拉起时加快开环速度斜坡。
- */
-#define FOC_REVERSAL_OPEN_LOOP_INCREMENT_Q32 1600U
-
-/* 换向重新锁定连续40ms即可进入TRANSITION。 */
-#define FOC_REVERSAL_LOCK_SAMPLE_COUNT       1000U
-
-/* 换向时加快开环角到PLL角的偏移释放。 */
-#define FOC_REVERSAL_HANDOVER_RATE_RAD_S     30.0f
-
-typedef enum {
-  FOC_REVERSAL_IDLE = 0,
-  FOC_REVERSAL_DECEL,
-  FOC_REVERSAL_BRAKE_ZERO,
-  FOC_REVERSAL_RESTART
-} FOC_ReversalState_t;
-
-typedef struct {
-  /* 用户最终速度命令，speed_ref_rpm仍作为速度PI内部参考 */
-  volatile float speed_command_rpm;
-
-  /* 正数正转，负数反转 */
-  int32_t open_loop_step_q32;
-  int8_t open_loop_direction;
-
-  FOC_ReversalState_t state;
-
-  uint16_t zero_speed_count;
-  uint8_t open_loop_initialized;
-
-} FOC_DirectionControl_t;
 
 
 /**
@@ -159,16 +99,18 @@ typedef struct {
   PI_Controller_t iq_pi;
   PI_Controller_t speed_pi;
 
-  /* 外部命令，可由串口实时修改 */
+  /* 外部命令，可由串口实时修改。
+   * id_ref/iq_ref单位A；speed_command_rpm为控制台目标，应用层复制给
+   * speed_ref_rpm，控制器再生成speed_ref_active_rpm作为实际PI参考。
+   */
   volatile float id_ref;
   volatile float iq_ref;
+  volatile float speed_command_rpm;
   volatile float speed_ref_rpm;
+  volatile float speed_slew_rpm_per_s;
   volatile uint32_t speed_loop_enable;
 
-  /* 正反转换向控制 */
-  FOC_DirectionControl_t direction;
-
-  /* 调度参数和内部状态 */
+  /* 调度参数和内部状态；修改分频时须同步速度PI的sample_time。 */
   uint32_t speed_loop_enable_last;
   uint16_t speed_loop_divider;
   uint16_t speed_loop_counter;
@@ -177,6 +119,9 @@ typedef struct {
   float id_feedback;
   float iq_feedback;
   float speed_feedback_rpm;
+
+  /* 速度斜坡后的内部参考，仅在正常速度闭环中使用 */
+  float speed_ref_active_rpm;
 
   /* 速度环最终产生的有效Iq参考值 */
   float iq_ref_active;
@@ -226,13 +171,6 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time);
 void FOC_Control_Reset(FOC_Control_t *control);
 
 /**
- * @brief 开环切闭环前预装载控制器，减小Ud/Uq突变
- */
-void FOC_Control_PreloadClosedLoop(FOC_Control_t *control, float desired_ud,
-                                   float desired_uq, float id_feedback,
-                                   float iq_feedback, float speed_feedback_rpm);
-
-/**
  * @brief 每个电流环周期调用一次
  *
  * 速度模式下，函数内部自动按speed_loop_divider运行速度PI；
@@ -248,38 +186,6 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
  */
 void FOC_Control_EnableSpeedLoop(FOC_Control_t *control, uint8_t enable);
 
-
-/* ======================== FOC正反转换向接口 ======================== */
-
-/**
- * @brief 初始化换向控制数据
- */
-void FOC_DirectionControl_Init(FOC_DirectionControl_t *direction,
-                               float speed_command_rpm);
-
-/**
- * @brief 每次进入开环时初始化开环方向和步进
- */
-void FOC_DirectionControl_PrepareOpenLoop(FOC_Control_t *control);
-
-/**
- * @brief 更新开环电角速度步进，返回带方向的Q32步进值
- */
-int32_t FOC_DirectionControl_UpdateOpenLoop(FOC_Control_t *control);
-
-/**
- * @brief 闭环阶段处理正反转换向
- * @retval 0：继续闭环；1：已减速到低速，需要重新进入开环
- */
-uint8_t FOC_DirectionControl_RunClosedLoop(FOC_Control_t *control,
-                                           float speed_feedback_rpm,
-                                           float sample_time);
-
-/**
- * @brief OPEN_LOOP -> TRANSITION完成后重新开启速度环
- */
-void FOC_DirectionControl_ClosedLoopEntered(FOC_Control_t *control,
-                                            float speed_feedback_rpm);
 
 #ifdef __cplusplus
 }

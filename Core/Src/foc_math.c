@@ -1,3 +1,9 @@
+/**
+ * @file foc_math.c
+ * @brief FOC板级参数、电流换算、SVPWM和CORDIC辅助接口。
+ * 电流统一使用A，电压使用V，角度使用电角度rad；坐标变换内联实现见头文件。
+ * SVPWM只写计算结果结构体，应用层负责把比较值送入TIM1。
+ */
 #include "foc_math.h"
 #include "adc.h"
 #include "bsp_dwt.h"
@@ -79,6 +85,10 @@ void FOC_Data_Init(void) {
 
 }
 
+/**
+ * @brief 先设置三相相同的50%比较值，再启用主/互补PWM与CH4采样触发。
+ * 相同占空比的理想平均线电压为零，但不代表六个功率开关全部关闭。
+ */
 void FOC_PWM_Start(void) {
 
   uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U;
@@ -98,6 +108,7 @@ void FOC_PWM_Start(void) {
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 }
 
+/* 停止三相PWM及CH4；注入ADC仍可处于等待外部触发状态。 */
 void FOC_PWM_Stop(void) {
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
@@ -113,7 +124,7 @@ void FOC_PWM_Stop(void) {
 
 /**
  * @brief FOC电流采样
- * @param obs  FOC数据结构体指针
+ * @param handle FOC数据结构体指针
  * @param adc1 ADC1采样值  IA
  * @param adc2 ADC2采样值  IB
  * @param adc3 ADC1采样值  IC
@@ -129,6 +140,7 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
     return;
   }
 
+  /* 最大比较值对应最短的低侧导通窗口，优先作为待重构相。 */
   ccr_a = TIM1->CCR1;
   ccr_b = TIM1->CCR2;
   ccr_c = TIM1->CCR3;
@@ -150,6 +162,9 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   handle->current.adc_b = adc2;
   handle->current.adc_c = adc3;
 
+  /* 当前电流方向约定为(offset-raw)*gain；零偏单位为ADC计数，增益为A/计数。
+   * 保留原始计数用于排查，后面重构只覆盖换算后的电流。
+   */
   handle->state.i_abc.a =
       (handle->calibration.ia_offset - (float)adc1) * handle->current.gain_a;
   handle->state.i_abc.b =
@@ -157,7 +172,9 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   handle->state.i_abc.c =
       (handle->calibration.ic_offset - (float)adc3) * handle->current.gain_c;
 
-  /* 使用初始化时算好的整数阈值，避免ISR中每拍做整型转浮点和乘法。 */
+  /* 超过95%时用Ia+Ib+Ic=0重构一相；该方法要求另外两相的采样仍然有效。
+   * 阈值预先换成整数计数，避免中断每拍重复计算。
+   */
   if (ccr_max > foc_current_rebuild_threshold) {
     switch (handle->current.rebuild) {
     case CURRENT_REBUILD_A:
@@ -179,25 +196,10 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
 }
 
 
-void FOC_Open_Loop(float u_d, float u_q, uint32_t theta_step_q32) {
-  foc.state.u_dq.d = u_d;
-  foc.state.u_dq.q = u_q;
-
-  foc.state.theta_q31 += theta_step_q32;
-
-  CORDIC_SinCos_FastF32(foc.state.theta_q31, &foc_sin_cos.sin,
-                        &foc_sin_cos.cos);
-
-  FOC_InvPark(&foc.state.u_dq, &foc_sin_cos, &foc.state.u_alpha_beta);
-
-  FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
-
-  FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
-}
-
-
 /**
  * @brief 读取ADC的常规转换数据。
+ * @note 保留的DMA读取接口；当前MotorApp使用BoardAdc_Update轮询路径。
+ *       两种路径共用ADC规则组，不能同时启动；此函数阻塞等待DMA完成。
  * @return HAL状态。
  */
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
@@ -288,8 +290,8 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
   }
 
   /*
-   * 错误路径才生成安全的50%占空比。
-   * 正常FOC路径不再每拍先写一遍默认值、随后又覆盖。
+   * 参数无效时填充默认结果并报错；无有效定时器时CCR置零。
+   * 下方母线过低分支则生成三相相同的中点CCR，不等同于功率桥关断。
    */
   if ((u_abc == NULL) || (timer == NULL) || (timer->pwm_arr == 0U))
   {
@@ -355,11 +357,13 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
   u_span = u_max - u_min;
   voltage_scale = 1.0f;
 
+  /* 三相最大电压跨度超过母线时等比例缩小，保留电压矢量方向。 */
   if (u_span > vbus)
   {
     voltage_scale = vbus / u_span;
   }
 
+  /* 同时平移三相，使最大值与最小值关于零对称；不改变任意两相线电压。 */
   common_mode = -0.5f * (u_max + u_min);
 
   /*

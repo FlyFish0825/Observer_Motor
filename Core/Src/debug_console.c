@@ -3,7 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#include <math.h>
+#include "arm_math.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>

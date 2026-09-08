@@ -29,7 +29,7 @@
 /* ======================== FOC 结构体变量 ======================== */
 
 /*
- * 三相坐标
+ * 三相坐标，a/b/c对应U/V/W；电流为A，电压为V
  */
 typedef struct {
   float a;
@@ -48,7 +48,7 @@ typedef struct {
 } FOC_AlphaBeta_t;
 
 /*
- * 旋转坐标
+ * 转子同步旋转坐标；d轴沿磁链方向，q轴为转矩电流方向
  */
 typedef struct {
   float d;
@@ -77,8 +77,6 @@ typedef enum {
 typedef enum
 {
     FOC_MOTOR_IDLE = 0,
-    FOC_MOTOR_OPEN_LOOP,
-    FOC_MOTOR_TRANSITION,
     FOC_MOTOR_CLOSED_LOOP,
 
 } FOC_Motor_State_t;
@@ -90,14 +88,16 @@ typedef struct {
   uint16_t adc_b;
   uint16_t adc_c;
 
-  /* 常规组校准使用的DMA缓冲区 */
+  /* 保留的规则组DMA接口缓冲区；当前BoardAdc轮询路径不使用这些数组。 */
   uint16_t adc1_regular_dma_buffer[3] __attribute__((aligned(4)));
   uint16_t adc2_regular_dma_buffer[1] __attribute__((aligned(4)));
 
+  /* 预留零偏字段；当前换算实际使用FOC_Calibration_t的ia/ib/ic_offset。 */
   float offset_a;
   float offset_b;
   float offset_c;
 
+  /* ADC计数到电流的增益，A/计数，需与硬件过采样设置一致。 */
   float gain_a;
   float gain_b;
   float gain_c;
@@ -123,21 +123,28 @@ typedef struct {
   FOC_AlphaBeta_t u_alpha_beta;
   FOC_ABC_t u_abc;
 
+  /* ADC实测端电压，已恢复分压倍率，单位V；a/b/c对应U/V/W对地电压。
+   * 上面的u_abc是控制器电压命令，此处独立保存实际采样值。
+   */
+  FOC_ABC_t u_abc_measured;
+  /* 实测端电压经Clarke变换后的静止坐标电压，供低速观测器使用。 */
+  FOC_AlphaBeta_t u_alpha_beta_measured;
+
   // Q31角度
   uint32_t theta_q31;
 } FOC_State_t;
 
 typedef struct {
 
-  uint32_t clock_freq;
+  uint32_t clock_freq; /* TIM1计数时钟，Hz */
 
-  uint32_t pwm_arr;
+  uint32_t pwm_arr; /* 中心对齐计数器顶部ARR */
 
-  uint32_t adc_trigger;
+  uint32_t adc_trigger; /* CH4比较值，决定注入触发相对于载波的位置 */
 
-  uint32_t dead_time;
+  uint32_t dead_time; /* TIM死区DTG编码；不是以ns表示的时间 */
 
-  float Ts;
+  float Ts; /* FOC算法采用的完整控制周期，s */
 
 } FOC_TimerConfig_t;
 
@@ -145,6 +152,7 @@ typedef struct {
 
   uint8_t calibrated;
 
+  /* 校准阶段先累加ADC计数，完成后除以样本数，保存零电流平均计数。 */
   float ia_offset;
   float ib_offset;
   float ic_offset;
@@ -222,9 +230,6 @@ void FOC_PWM_Stop(void);
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void);
 void FOC_Iabc_Calibration(void);
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
-
-
-void FOC_Open_Loop(float u_d, float u_q,uint32_t theta_step_q32);
 
 
 /* ======================== FOC 计算函数 ======================== */
@@ -428,7 +433,7 @@ __STATIC_FORCEINLINE void FOC_InvPark(const FOC_DQ_t *dq, const FOC_SIN_COS_t *s
 /**
  * @brief 两相静止坐标 alpha-beta -> 三相静止坐标 abc。
  *
- * 该输出可用于调试；后续 SVPWM 实际只需要 alpha、beta。
+ * 当前SVPWM接口使用此三相电压输出，通过公共模注入计算占空比。
  */
 __STATIC_FORCEINLINE void FOC_InvClarke(const FOC_AlphaBeta_t *input,
                                         FOC_ABC_t *output) {
@@ -467,10 +472,10 @@ __STATIC_FORCEINLINE uint32_t FOC_DutyToCCR(float duty, uint32_t arr) {
   duty = FOC_ClampDuty(duty);
 
   /*
-   * ARR=3359时，一个PWM周期共有3360个计数点。
+   * 本函数按ARR+1将归一化占空比换成比较值；当前ARR=3399。
    *
    * duty=0.5：
-   * CCR=0.5*3360=1680
+   * CCR=0.5*3400=1700
    */
   ccr_float = duty * (float)(arr + 1U);
 
@@ -491,6 +496,7 @@ __STATIC_FORCEINLINE uint32_t FOC_DutyToCCR(float duty, uint32_t arr) {
 
 
 
+/* 通用归一化：对有限弧度输入反复加减2pi，范围收敛到[-pi,pi]。 */
 __STATIC_FORCEINLINE float FOC_WrapToPi(float angle)
 {
     while(angle > FOC_PI)
