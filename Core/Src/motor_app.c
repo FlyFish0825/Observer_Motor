@@ -63,6 +63,41 @@ static MotorApp_JustFloatFrame_t just_float_frame
     __attribute__((aligned(4)));
 static volatile uint32_t just_float_enabled = 1U;
 static volatile uint8_t motor_auto_start_ready = 0U;
+static uint8_t motor_idle_reset_done = 0U;
+
+/**
+ * @brief IDLE关闭功率输出，首次进入时清除闭环历史。
+ * 直接关闭MOE立即撤销输出；停止六个功率通道使HAL通道状态回到READY。
+ * 保留CH4及计数器，用于继续产生ADC触发。零偏与外部目标命令保留。
+ */
+static void MotorApp_ResetIdle(void) {
+  CLEAR_BIT(TIM1->BDTR, TIM_BDTR_MOE);
+  if (motor_idle_reset_done != 0U) {
+    return;
+  }
+
+  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
+  HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_3);
+  HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_1);
+  HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_2);
+  HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
+  TIM1->CCR1 = 0U;
+  TIM1->CCR2 = 0U;
+  TIM1->CCR3 = 0U;
+
+  FOC_Control_Reset(&motor_control);
+  foc.state.u_dq = (FOC_DQ_t){0};
+  foc.state.u_alpha_beta = (FOC_AlphaBeta_t){0};
+  foc.state.u_abc = (FOC_ABC_t){0};
+  foc.svpwm = (FOC_SVPWM_Output_t){0};
+  foc.observer.state = (Observer_State_t){0};
+  Observer_Init(&foc.observer, &foc.observer.motor, &foc.observer.config);
+  voltage_source.measured_selected = 1U;
+  voltage_source.measured_weight = 1.0f;
+  motor_auto_start_ready = 0U;
+  motor_idle_reset_done = 1U;
+}
 
 /* 文本控制台的阻塞发送接口，由主循环命令处理调用。 */
 static void MotorApp_DebugConsoleTx(const uint8_t *data, uint16_t length) {
@@ -227,6 +262,7 @@ static void MotorApp_StartClosedLoop(void) {
   voltage_source.measured_weight = 1.0f;
 
   foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
+  motor_idle_reset_done = 0U;
   FOC_PWM_Start();
 }
 
@@ -516,6 +552,14 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
     return;
   }
 
+  /* 状态不是闭环时先关桥，包含零偏校准期间及无效状态值。 */
+  if (foc_motor_state != FOC_MOTOR_CLOSED_LOOP) {
+    foc_motor_state = FOC_MOTOR_IDLE;
+    MotorApp_ResetIdle();
+  } else {
+    motor_idle_reset_done = 0U;
+  }
+
   /* 前1000拍仅累加原始计数，约40ms；桥未驱动且无相电流是零偏校准前提。 */
   if (foc.calibration.calibrated == 0U) {
     calibration_count++;
@@ -553,17 +597,16 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   observer_input.i_alpha = foc.state.i_alpha_beta.alpha;
   observer_input.i_beta = foc.state.i_alpha_beta.beta;
 
+  //选择观测器电压来源
   MotorApp_UpdateObserverVoltage(&observer_input);
-  Observer_Run(&foc.observer, &observer_input);
-
   if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {
+    Observer_Run(&foc.observer, &observer_input);
     MotorApp_RunClosedLoop();
+    /* 只有闭环状态允许写入新的功率PWM比较值。 */
+    TIM1->CCR1 = foc.svpwm.ccr_a;
+    TIM1->CCR2 = foc.svpwm.ccr_b;
+    TIM1->CCR3 = foc.svpwm.ccr_c;
   }
-
-  /* CH1~3的预装载比较值由定时器更新事件装入，CH4采样位置独立保持。 */
-  TIM1->CCR1 = foc.svpwm.ccr_a;
-  TIM1->CCR2 = foc.svpwm.ccr_b;
-  TIM1->CCR3 = foc.svpwm.ccr_c;
 
   /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、电角度(deg)、母线(V)。 */
   if ((just_float_enabled != 0U) &&
