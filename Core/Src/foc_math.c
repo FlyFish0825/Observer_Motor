@@ -41,12 +41,12 @@ void FOC_Data_Init(void) {
 
   /*
    * 新板电流采样：5 mOhm分流电阻、约24倍模拟增益。
-   * ADC注入组4倍过采样且不右移，因此每个累加计数对应：
-   * 3.3 / 4096 / (0.005 * 24) / 4 = 0.001678466796875 A。
+   * ADC注入组使用单次12位采样，因此每个ADC计数对应：
+   * 3.3 / 4096 / (0.005 * 24) = 0.0067138671875 A。
    */
-  foc.current.gain_a = 0.001678466796875f;
-  foc.current.gain_b = 0.001678466796875f;
-  foc.current.gain_c = 0.001678466796875f;
+  foc.current.gain_a = 0.0067138671875f;
+  foc.current.gain_b = 0.0067138671875f;
+  foc.current.gain_c = 0.0067138671875f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;
