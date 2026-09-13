@@ -15,6 +15,7 @@
 - V相端电压：PA4 / ADC2_IN17
 - W相端电压：PB11 / ADC1_IN14
 - 调试串口：USART1，2,000,000 baud
+- Boot通信：FDCAN1，名义速率500 kbit/s、数据速率5 Mbit/s；APP仅轮询接收进入Bootloader命令
 
 端电压采样电路为100 kΩ/5.1 kΩ分压和68 nF滤波。ADC端等效电阻约4.85 kΩ，对应截止频率约482 Hz。
 
@@ -47,6 +48,7 @@ IDLE期间不运行闭环或写回旧PWM，保留零偏、外部命令及电压�
 - `Core/Src/observer.c`：磁链观测器、PLL以及实测/重构电压融合。
 - `Core/Src/foc_math.c`：Clarke/Park变换、SVPWM和电流换算。
 - `Core/Src/debug_console.c`：串口参数读写控制台。
+- `Core/Src/app_boot_control.c`：APP端Boot控制帧校验、节点号读取和软件复位返回Bootloader。
 
 对应公共接口位于 `Core/Inc` 目录。CubeMX生成的外设文件继续保留在 `Core/Src`，应用逻辑应优先放入上述独立模块，避免再次扩大 `main.c`。
 
@@ -76,6 +78,30 @@ ADC1规则组使用间断模式，每次软件触发一个Rank；读完DR后再�
 
 本批明确不包含APP下载、Bootloader、CAN下载协议、Flash偏移或链接脚本调整；这些内容
 需要独立核对地址布局、升级失败恢复方式和CAN兼容性后，再按功能单独提交。
+
+### 第二批：APP端CAN返回Bootloader控制
+
+提交 `260cfdf`，增加APP运行期间返回Bootloader的最小控制路径：
+
+- FDCAN1名义速率改为500 kbit/s，数据阶段保持5 Mbit/s，与现有 `CAN_FD_IAP`
+  Bootloader一致；CubeMX的 `Observer.ioc` 同步保存相同参数。
+- APP只接收标准ID `0x000`，使用掩码 `0x7FF` 精确匹配，其他标准帧、扩展帧和远程帧
+  不进入该接收路径。
+- 主循环轮询FIFO0并严格检查标准数据帧、经典CAN、8字节长度、目标节点、命令和CRC8。
+- 收到合法 `ENTER_BOOT` 后写入 `TAMP->BKP0R` 的 `BOOT` 魔数并执行软件复位；APP不发送
+  应答，重新进入Bootloader本身就是成功结果。
+- APP不启动或喂IWDG，也不复制Bootloader状态机，只保留Trial Jump所需的最小返回能力。
+
+### 第三批：独立版与Boot版双Flash布局
+
+提交 `8ed201f`，同一套源码支持两种互不混淆的固件：
+
+- `Debug`、`Release`：链接到 `0x08000000`，生成 `Observer_standalone.bin`，用于不带
+  Bootloader的SWD直接烧录测试。
+- `Boot-Release`：链接到 `0x08005000`，生成 `Observer_boot.bin`，用于Bootloader升级。
+- Boot版APP区截止到 `0x0801F7FF`，不会覆盖 `0x0801F800~0x0801FFFF` 的2 KiB配置页。
+- `APP_FLASH_START` 同时控制链接地址和 `SCB->VTOR`，避免代码地址与中断向量表地址不一致。
+- `APP_WITH_BOOTLOADER` 只在Boot版启用CAN返回Bootloader逻辑；独立版编译为空入口。
 
 ## 数学计算约定
 
@@ -122,11 +148,50 @@ PWM（比较值与通道使能）和OBSERVER（磁链及电压权重），用于
 
 ## 构建
 
-工程使用CMake预设构建：
+工程使用CMake预设构建。独立烧录调试版：
 
 ```powershell
 cmake --preset Debug
 cmake --build --preset Debug
 ```
 
-生成文件位于 `build/Debug`。修改 `.ioc` 并由CubeMX重新生成后，应检查根目录 `CMakeLists.txt` 中的用户源文件列表是否仍包含 `board_adc.c` 和 `motor_app.c`。
+独立烧录优化版：
+
+```powershell
+cmake --preset Release
+cmake --build --preset Release
+```
+
+由Bootloader加载的偏移版：
+
+```powershell
+cmake --preset Boot-Release
+cmake --build --preset Boot-Release
+```
+
+| 构建预设 | APP起始地址 | 可用Flash | 输出BIN | 用途 |
+| --- | --- | --- | --- | --- |
+| Debug | `0x08000000` | 128 KiB | `build/Debug/Observer_standalone.bin` | SWD独立调试 |
+| Release | `0x08000000` | 128 KiB | `build/Release/Observer_standalone.bin` | SWD独立运行 |
+| Boot-Release | `0x08005000` | 106 KiB | `build/Boot-Release/Observer_boot.bin` | Bootloader升级 |
+
+不能把 `Observer_standalone.bin` 作为升级包写到 `0x08005000`，也不能把
+`Observer_boot.bin` 直接烧到 `0x08000000`。修改 `.ioc` 并由CubeMX重新生成后，应检查
+根目录 `CMakeLists.txt` 中的用户源文件列表仍包含 `board_adc.c`、`motor_app.c` 和
+`app_boot_control.c`。
+
+## APP返回Bootloader协议
+
+该功能只在 `Boot-Release` 构建中启用。控制帧格式如下：
+
+| 字节 | 内容 |
+| --- | --- |
+| Byte0 | 目标节点号 `1~8`，或广播地址 `0xFF` |
+| Byte1 | `ENTER_BOOT = 0x04` |
+| Byte2~6 | 保留协议字段，参与CRC计算 |
+| Byte7 | Byte0~6的CRC8，初值 `0x00`，多项式 `0x07` |
+
+APP从 `0x0801F800` 配置页固定头部读取节点号；仅当魔数 `CFG1`、配置版本、结构长度和
+节点范围均有效时采用该节点号，否则回退到节点1。收到合法命令后APP开放备份域写权限，
+写入与Bootloader一致的 `0x544F4F42` 魔数并立即软件复位。APP不擦写Flash、不修改升级
+元数据，也不负责Trial判定；镜像校验、有效标记和升级恢复仍由Bootloader处理。
