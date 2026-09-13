@@ -57,6 +57,26 @@ ADC1规则组使用间断模式，每次软件触发一个Rank；读完DR后再�
 避免6.5T高速连续扫描时HAL轮询来不及读取导致丢失通道结果。
 保留的ADC_Regular_Read_DMA接口不适用于当前间断配置，应用层使用BoardAdc_Update。
 
+## 分批提交记录
+
+### 第一批：电机驱动、串口启停与ADC规则组修复
+
+提交 `653f0f9`，本批只处理已经上板验证的电机运行链路：
+
+- `Core/Src/motor_app.c`：增加 `run` 启停请求、上电校准后保持IDLE、停止时安全关桥、
+  `status` 分组诊断输出，以及文本回复与VOFA DMA发送互斥。状态切换仍在ADC1注入完成
+  回调的控制节拍内执行，主循环只解析命令和发出请求。
+- `Core/Src/debug_console.c`：允许CR、LF和CRLF三种命令结束方式，避免不同串口工具
+  的换行配置导致命令没有响应。
+- `Core/Src/adc.c`、`Core/Src/board_adc.c`、`Observer.ioc`：ADC1规则组改为间断模式，
+  每次软件触发并读取一个Rank，依次获得母线、U相和W相电压；V相仍由ADC2规则组读取。
+- `Core/Src/main.c`：删除临时的启动前阻塞串口发送，保留简洁的应用初始化、主循环和
+  HAL回调转发结构。
+- `Core/Inc/motor_app.h`：同步更新启动行为和主循环职责说明。
+
+本批明确不包含APP下载、Bootloader、CAN下载协议、Flash偏移或链接脚本调整；这些内容
+需要独立核对地址布局、升级失败恢复方式和CAN兼容性后，再按功能单独提交。
+
 ## 数学计算约定
 
 核心代码统一使用 `arm_math.h`，适合的数学运算优先使用CMSIS-DSP接口。
