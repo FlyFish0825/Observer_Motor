@@ -135,10 +135,10 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (double)motor_control.speed_ref_active_rpm,
       (double)foc.observer.state.speed_rpm,
       (unsigned long)motor_control.speed_loop_enable);
-  DebugConsole_Printf("CURRENT Iq_ref=%.3f Id=%.3f Iq=%.3f Ud=%.3f Uq=%.3f\r\n",
+  DebugConsole_Printf("CURRENT Iq_ref=%.3f Id=%.3f Iq=%.3f Ud=%.3f Uq=%.3f Ulim=%.3f\r\n",
       (double)motor_control.iq_ref_active, (double)foc.state.i_dq.d,
       (double)foc.state.i_dq.q, (double)foc.state.u_dq.d,
-      (double)foc.state.u_dq.q);
+      (double)foc.state.u_dq.q, (double)motor_control.voltage_limit);
   DebugConsole_Printf("PWM CCR=%lu,%lu,%lu CCER=0x%08lX CR1=0x%08lX\r\n",
       (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER,
@@ -402,8 +402,8 @@ static void MotorApp_RunClosedLoop(void) {
   FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
 
   FOC_Control_Run(&motor_control, foc.state.i_dq.d, foc.state.i_dq.q,
-                  foc.observer.state.speed_rpm, &foc.state.u_dq.d,
-                  &foc.state.u_dq.q);
+                  foc.observer.state.speed_rpm, foc.state.vbus,
+                  &foc.state.u_dq.d, &foc.state.u_dq.q);
 
   FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
   FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
@@ -666,7 +666,7 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
       ((USART1->ISR & USART_ISR_TC) != 0U)) {
     (void)MotorApp_SendJustFloat(
         foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c,
-        motor_control.speed_ref_active_rpm,
+        foc.observer.state.speed_rpm,
         foc.observer.state.phase_raw * RAD_TO_DEG_F, foc.state.vbus);
   }
 }

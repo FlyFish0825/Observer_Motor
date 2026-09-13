@@ -60,25 +60,31 @@ void FOC_Data_Init(void) {
 
   foc.state.omega = 0.0f;
 
-  /* 使用main分支中这台电机已经验证过的参数。 */
+  /* 新水下电机参数：相电阻0.5 ohm、相电感100 uH、磁链2.84 mWb、7极对。 */
   Observer_MotorParam_t motor = {
-      .Rs = 2.55f,
-      .Ls = 0.00086f,
-      .flux_linkage = 0.0035f,
+      .Rs = 0.5f,
+      .Ls = 0.000100f,
+      .flux_linkage = 0.00284f,
       .pole_pairs = 7
     };
 
-  Observer_Config_t observer_cfg = {/*
-                                     * VESC经验值
-                                     */
-                                    .gain =1e7f,
-                                    .Ts = 0.00004f,  //25kHz
-                                    .psi_min = motor.flux_linkage*0.5f,
-                                    .psi_max = motor.flux_linkage*3.0f,
-                                    .pll_kp = 3000.0f,
-                                    .pll_ki = 20000.0f,
-                                    .pll_omega_limit = 5000.0f
-                                  };
+  Observer_Config_t observer_cfg = {
+      /* 磁链观测器保持现有增益和25 kHz更新周期。 */
+      .gain = 1e8f,
+      .Ts = 0.00004f,
+      .psi_min = motor.flux_linkage * 0.5f,
+      .psi_max = motor.flux_linkage * 3.0f,
+
+      /*
+       * SRF-PLL按二阶系统配置：wn=sqrt(Ki)=200 rad/s，
+       * 阻尼比zeta=Kp/(2*wn)=1。相比原Kp=3000，显著降低
+       * 磁链角度噪声直接映射到瞬时转速的幅度；提高Ki则保留
+       * 对机械加减速的跟踪能力。
+       */
+      .pll_kp = 400.0f,
+      .pll_ki = 40000.0f,
+      .pll_omega_limit = 50000.0f
+  };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);
 

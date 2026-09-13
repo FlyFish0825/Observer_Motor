@@ -358,25 +358,17 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
   speed_loop_sample_time =
       current_loop_sample_time * (float)control->speed_loop_divider;
 
-  /*
-   * 保留当前已经跑通的Id电流环参数。
-   */
+  /* Id电流环使用新电机分支中已有的默认参数。 */
   PI_Controller_Init(&control->id_pi, FOC_ID_PI_KP_DEFAULT,
-                     FOC_ID_PI_KI_DEFAULT, current_loop_sample_time,
-                     FOC_ID_PI_OUTPUT_MIN_DEFAULT,
-                     FOC_ID_PI_OUTPUT_MAX_DEFAULT);
+                     FOC_ID_PI_KI_DEFAULT, current_loop_sample_time, 0.0f,
+                     0.0f);
 
-  /*
-   * 保留当前已经跑通的Iq电流环参数。
-   */
+  /* Iq电流环与Id环使用相同参数，匹配当前表贴式电机模型。 */
   PI_Controller_Init(&control->iq_pi, FOC_IQ_PI_KP_DEFAULT,
-                     FOC_IQ_PI_KI_DEFAULT, current_loop_sample_time,
-                     FOC_IQ_PI_OUTPUT_MIN_DEFAULT,
-                     FOC_IQ_PI_OUTPUT_MAX_DEFAULT);
+                     FOC_IQ_PI_KI_DEFAULT, current_loop_sample_time, 0.0f,
+                     0.0f);
 
-  /*
-   * 速度环输出为Iq参考值，先使用偏保守的参数和电流限幅。
-   */
+  /* 速度环输出为Iq参考值，使用偏保守参数并保留正负5 A限幅。 */
   PI_Controller_Init(&control->speed_pi, FOC_SPEED_PI_KP_DEFAULT,
                      FOC_SPEED_PI_KI_DEFAULT, speed_loop_sample_time,
                      FOC_SPEED_PI_OUTPUT_MIN_DEFAULT,
@@ -404,6 +396,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
   control->ud_output = 0.0f;
   control->uq_output = 0.0f;
+  control->voltage_limit = 0.0f;
 
 }
 
@@ -429,11 +422,16 @@ void FOC_Control_Reset(FOC_Control_t *control) {
 
   control->ud_output = 0.0f;
   control->uq_output = 0.0f;
+  control->voltage_limit = 0.0f;
 }
 
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,
-                     float *ud_output, float *uq_output) {
+                     float dc_bus_voltage, float *ud_output,
+                     float *uq_output) {
+  float uq_limit_squared;
+  float uq_limit;
+  float voltage_limit;
   uint32_t speed_enabled;
   uint16_t speed_divider;
 
@@ -509,10 +507,35 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
     control->iq_ref_active = control->iq_ref;
   }
 
-  /* Id、Iq电流环每个电流环周期都运行。 */
+  /*
+   * 线性SVPWM的最大dq电压矢量为Vbus/sqrt(3)。保留2%裕量，
+   * 避免死区、母线纹波和ADC刷新延迟使占空比长期贴住0%或100%。
+   */
+  if ((!isfinite(dc_bus_voltage)) || (dc_bus_voltage <= 0.0f)) {
+    voltage_limit = 0.0f;
+  } else {
+    voltage_limit = dc_bus_voltage * FOC_INV_SQRT3_DEFAULT *
+                    FOC_VOLTAGE_UTILIZATION_DEFAULT;
+  }
+  control->voltage_limit = voltage_limit;
+
+  /*
+   * 优先保证d轴电流调节，再把圆形电压矢量中剩余的幅值分配给q轴。
+   * 两个PI直接使用最终可实现的限幅，饱和时条件积分能够及时停止，
+   * 不再依赖SVPWM末端缩放来掩盖固定正负20 V造成的积分饱和。
+   */
+  PI_Controller_SetLimits(&control->id_pi, -voltage_limit, voltage_limit);
   control->ud_output =
       PI_Controller_Run(&control->id_pi, control->id_ref, id_feedback);
 
+  uq_limit_squared = voltage_limit * voltage_limit -
+                     control->ud_output * control->ud_output;
+  if ((uq_limit_squared <= 0.0f) ||
+      (arm_sqrt_f32(uq_limit_squared, &uq_limit) != ARM_MATH_SUCCESS)) {
+    uq_limit = 0.0f;
+  }
+
+  PI_Controller_SetLimits(&control->iq_pi, -uq_limit, uq_limit);
   control->uq_output =
       PI_Controller_Run(&control->iq_pi, control->iq_ref_active, iq_feedback);
 

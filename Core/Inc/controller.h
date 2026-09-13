@@ -51,29 +51,29 @@ typedef struct {
 /* ======================== 电机闭环默认参数 ======================== */
 
 /*
- * 电流环参数保持当前工程中的数值不变。
+ * 电流环参数采用相同0.5 ohm、100 uH电机分支中已使用的保守初值。
  * 电流环每次ADC注入转换完成时运行，当前频率25kHz。
- * 电流PI误差单位A、输出单位V；这里是d/q轴各自限幅，后级SVPWM
- * 还会按实际母线能力缩放三相电压。
+ * 电流PI误差单位A、输出单位V。运行时按实时母线电压建立dq圆形限幅，
+ * 不再使用固定的正负20 V独立轴限幅。
  */
-#define FOC_ID_PI_OUTPUT_MIN_DEFAULT (-20.0f)
-#define FOC_ID_PI_OUTPUT_MAX_DEFAULT 20.0f
-#define FOC_ID_PI_KP_DEFAULT 0.2f
-#define FOC_ID_PI_KI_DEFAULT 100.0f
+#define FOC_ID_PI_KP_DEFAULT 0.220f
+#define FOC_ID_PI_KI_DEFAULT 1257.0f
 
-#define FOC_IQ_PI_KP_DEFAULT 0.5f
-#define FOC_IQ_PI_KI_DEFAULT 300.0f
-#define FOC_IQ_PI_OUTPUT_MIN_DEFAULT (-20.0f)
-#define FOC_IQ_PI_OUTPUT_MAX_DEFAULT 20.0f
+#define FOC_IQ_PI_KP_DEFAULT 0.220f
+#define FOC_IQ_PI_KI_DEFAULT 1257.0f
+
+/* 线性SVPWM最大dq矢量为Vbus/sqrt(3)，保留2%调制和死区裕量。 */
+#define FOC_VOLTAGE_UTILIZATION_DEFAULT 0.98f
+#define FOC_INV_SQRT3_DEFAULT 0.57735026919f
 
 /*
- * 速度环先使用一组偏保守的初值，后续可在线微调。
+ * 速度环降低比例和积分增益，作为新电机首次上板的保守初值。
  * 单位：
  *   speed PI输入  = rpm
  *   speed PI输出  = Iq参考值，A
  */
-#define FOC_SPEED_PI_KP_DEFAULT 0.0007f
-#define FOC_SPEED_PI_KI_DEFAULT 0.015f
+#define FOC_SPEED_PI_KP_DEFAULT 0.0005f
+#define FOC_SPEED_PI_KI_DEFAULT 0.005f
 #define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-5.0f)
 #define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 5.0f
 
@@ -129,6 +129,9 @@ typedef struct {
   /* 电流环输出电压 */
   float ud_output;
   float uq_output;
+
+  /* 根据实时母线电压得到的dq电压矢量上限，单位V。 */
+  float voltage_limit;
 } FOC_Control_t;
 
 /* ======================== 通用PI接口 ======================== */
@@ -175,10 +178,12 @@ void FOC_Control_Reset(FOC_Control_t *control);
  *
  * 速度模式下，函数内部自动按speed_loop_divider运行速度PI；
  * 电流模式下，直接使用id_ref和iq_ref。
+ * dc_bus_voltage用于计算本拍SVPWM可实现的dq电压矢量上限。
  */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,
-                     float *ud_output, float *uq_output);
+                     float dc_bus_voltage, float *ud_output,
+                     float *uq_output);
 
 /**
  * @brief 切换电流模式/速度模式
