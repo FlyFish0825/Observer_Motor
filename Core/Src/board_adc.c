@@ -31,12 +31,17 @@ HAL_StatusTypeDef BoardAdc_Update(void) {
   BoardAdcMeasurements_t next = {0};
   uint16_t adc1_values[3];
 
-  if (HAL_ADC_Start(&hadc1) != HAL_OK) {
-    return HAL_ERROR;
-  }
-
+  /* ADC1规则组间断模式：每次触发只转换一个Rank，读完再推进到下一Rank。
+   * 6.5T下连续扫描快于HAL轮询，不能依赖CPU在两个转换之间抢读DR。
+   */
   for (uint32_t rank = 0U; rank < 3U; rank++) {
+    if (HAL_ADC_Start(&hadc1) != HAL_OK) {
+      (void)HAL_ADCEx_RegularStop(&hadc1);
+      return HAL_ERROR;
+    }
     if (HAL_ADC_PollForConversion(&hadc1, 10U) != HAL_OK) {
+      /* 仅停止规则组并复位序列位置，不能中断电流注入组的硬件触发。 */
+      (void)HAL_ADCEx_RegularStop(&hadc1);
       return HAL_TIMEOUT;
     }
     adc1_values[rank] = (uint16_t)HAL_ADC_GetValue(&hadc1);

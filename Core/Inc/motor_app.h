@@ -16,12 +16,12 @@ void MotorApp_ForcePowerStageSafe(void);
  * @brief 初始化控制器、调试接口、模拟前端和ADC触发
  * @note FOC_Data_Init须在MX_TIM1_Init之前调用，保证定时器参数有效。
  * @note 外设初始化完成后调用一次；成功返回后先执行电流零偏校准，
- *       随后由Process响应校准完成标志并开启PWM。
+ *       校准后保持IDLE，由Process响应串口run启动请求并开启PWM。
  */
 HAL_StatusTypeDef MotorApp_Init(void);
 
 /**
- * @brief 主循环任务：更新规则组ADC并处理自动启动和调试命令
+ * @brief 主循环任务：更新规则组ADC并处理串口启动请求和调试命令
  */
 void MotorApp_Process(void);
 

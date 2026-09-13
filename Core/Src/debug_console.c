@@ -327,17 +327,9 @@ void DebugConsole_Process(void)
     while (DC_RingPop(&data))
     {
         /*
-         * CRLF中的'\r'直接忽略。
+         * CR、LF均可结束一行；CRLF的第二个字符对应空行，不会重复执行。
          */
-        if (data == '\r')
-        {
-            continue;
-        }
-
-        /*
-         * 一行命令结束。
-         */
-        if (data == '\n')
+        if ((data == '\n') || (data == '\r'))
         {
             if (dc_line_overflow)
             {

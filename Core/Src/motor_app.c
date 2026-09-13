@@ -62,8 +62,11 @@ static MotorApp_VoltageSource_t voltage_source = {
 static MotorApp_JustFloatFrame_t just_float_frame
     __attribute__((aligned(4)));
 static volatile uint32_t just_float_enabled = 1U;
-static volatile uint8_t motor_auto_start_ready = 0U;
-static uint8_t motor_idle_reset_done = 0U;
+/* 串口set run 1请求启动，set run 0请求停止；上电默认不运行。 */
+static volatile uint32_t motor_run_requested = 0U;
+static volatile uint8_t motor_idle_reset_done = 0U;
+static volatile uint8_t motor_console_tx_active = 0U;
+static volatile uint32_t motor_adc_irq_count = 0U;
 
 /**
  * @brief IDLE关闭功率输出，首次进入时清除闭环历史。
@@ -95,13 +98,55 @@ static void MotorApp_ResetIdle(void) {
   Observer_Init(&foc.observer, &foc.observer.motor, &foc.observer.config);
   voltage_source.measured_selected = 1U;
   voltage_source.measured_weight = 1.0f;
-  motor_auto_start_ready = 0U;
+  motor_run_requested = 0U;
   motor_idle_reset_done = 1U;
 }
 
 /* 文本控制台的阻塞发送接口，由主循环命令处理调用。 */
 static void MotorApp_DebugConsoleTx(const uint8_t *data, uint16_t length) {
+  /* 先禁止中断发起下一帧，等待当前DMA帧完全发完，再发送文本。 */
+  motor_console_tx_active = 1U;
+  __DMB();
+  uint32_t start = HAL_GetTick();
+  while ((USART1->ISR & USART_ISR_TC) == 0U) {
+    if ((HAL_GetTick() - start) >= 100U) {
+      motor_console_tx_active = 0U;
+      return;
+    }
+  }
   (void)HAL_UART_Transmit(&huart1, (uint8_t *)data, length, 100U);
+  motor_console_tx_active = 0U;
+}
+
+/* 一条纯文本状态回复，用于区分命令接收、校准等待和功率启动。 */
+static void MotorApp_DebugStatus(int argc, char *argv[]) {
+  (void)argc;
+  (void)argv;
+  DebugConsole_Printf(
+      "STATUS run=%lu state=%u cal=%u idle_reset=%u adc_irq=%lu ARR=%lu CCR4=%lu MOE=%u\r\n",
+      (unsigned long)motor_run_requested, (unsigned int)foc_motor_state,
+      (unsigned int)foc.calibration.calibrated,
+      (unsigned int)motor_idle_reset_done, (unsigned long)motor_adc_irq_count,
+      (unsigned long)TIM1->ARR, (unsigned long)TIM1->CCR4,
+      (unsigned int)((TIM1->BDTR & TIM_BDTR_MOE) != 0U));
+  /* 分行输出避免超过控制台192字节缓冲；读数用于诊断，不保证同一拍快照。 */
+  DebugConsole_Printf("DRIVE Vbus=%.3f cmd=%.1f ref=%.1f rpm=%.1f speed_en=%lu\r\n",
+      (double)foc.state.vbus, (double)motor_control.speed_command_rpm,
+      (double)motor_control.speed_ref_active_rpm,
+      (double)foc.observer.state.speed_rpm,
+      (unsigned long)motor_control.speed_loop_enable);
+  DebugConsole_Printf("CURRENT Iq_ref=%.3f Id=%.3f Iq=%.3f Ud=%.3f Uq=%.3f\r\n",
+      (double)motor_control.iq_ref_active, (double)foc.state.i_dq.d,
+      (double)foc.state.i_dq.q, (double)foc.state.u_dq.d,
+      (double)foc.state.u_dq.q);
+  DebugConsole_Printf("PWM CCR=%lu,%lu,%lu CCER=0x%08lX CR1=0x%08lX\r\n",
+      (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
+      (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER,
+      (unsigned long)TIM1->CR1);
+  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f stale=%lu\r\n",
+      (double)foc.observer.state.phase_raw, (double)foc.observer.state.psi_mag,
+      (double)voltage_source.measured_weight,
+      (unsigned long)voltage_source.stale_count);
 }
 
 /**
@@ -130,6 +175,9 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
                                        false);
   success &= DebugConsole_RegisterBool("just_float", &just_float_enabled,
                                        false);
+  success &= DebugConsole_RegisterBool("run", &motor_run_requested, false);
+  success &= DebugConsole_RegisterCommand("status", MotorApp_DebugStatus,
+                                           "status: show motor startup state");
 
   success &= DebugConsole_RegisterF32("vbus", &foc.state.vbus,
                                       0.0f, 70.0f, false);
@@ -242,7 +290,7 @@ static int MotorApp_SendJustFloat(float f0, float f1, float f2,
 }
 
 /**
- * @brief 主循环响应零偏校准完成请求，直接开启观测器闭环。
+ * @brief 主循环响应串口启动请求，零偏校准完成后开启观测器闭环。
  * 启动时将斜坡内部参考同步到目标速度；后续变速才经过斜坡。
  * 当前流程没有定位或开环拖动阶段，静止转子角度依赖观测器初始状态。
  */
@@ -505,6 +553,13 @@ HAL_StatusTypeDef MotorApp_Init(void) {
  * 因此不放入 25 kHz 的电流环控制中断，避免影响 FOC 控制周期。
  */
 void MotorApp_Process(void) {
+  static uint8_t ready_reported = 0U;
+  if (ready_reported == 0U) {
+    ready_reported = 1U;
+    DebugConsole_Printf("READY: set run 1 / set run 0 / status\r\n");
+  }
+  /* 优先解析命令，避免规则组的轮询等待增加启停请求延迟。 */
+  DebugConsole_Process();
   /*
    * 轮询 ADC 规则组，采集母线电压及三相端电压。
    * 采样成功后更新 FOC 使用的母线电压。
@@ -516,24 +571,15 @@ void MotorApp_Process(void) {
     foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
   }
 
-  /*
-   * 检查自动启动标志。
-   *
-   * motor_auto_start_ready 由前面的校准/启动流程置位。
-   * 检测到启动请求后先清除标志，防止主循环重复执行启动，
-   * 然后进入电机闭环运行状态。
+  /* 校准完成且IDLE复位已完成才能启动，重复run 1不会重新初始化运行电机。
+   * 校准期间收到run 1则等待校准结束；run 0可以取消该请求。
    */
-  if (motor_auto_start_ready != 0U) {
-    motor_auto_start_ready = 0U;
+  if ((motor_run_requested != 0U) &&
+      (foc.calibration.calibrated != 0U) &&
+      (motor_idle_reset_done != 0U) &&
+      (foc_motor_state == FOC_MOTOR_IDLE)) {
     MotorApp_StartClosedLoop();
   }
-
-  /*
-   * 处理调试串口接收到的命令和在线参数。
-   * 该过程属于非实时任务，因此放在主循环中执行，
-   * 不占用 25 kHz FOC 控制中断的执行时间。
-   */
-  DebugConsole_Process();
 }
 /**
  * @brief 注入转换完成后的实时入口，只有ADC1回调执行完整控制流程。
@@ -550,6 +596,12 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
 
   if ((hadc == NULL) || (hadc->Instance != ADC1)) {
     return;
+  }
+  motor_adc_irq_count++;
+
+  /* 串口解析完run 0后，下一次采样中断先退出闭环并关断功率输出。 */
+  if (motor_run_requested == 0U) {
+    foc_motor_state = FOC_MOTOR_IDLE;
   }
 
   /* 状态不是闭环时先关桥，包含零偏校准期间及无效状态值。 */
@@ -576,8 +628,7 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
       foc.calibration.ib_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.ic_offset /= (float)CURRENT_OFFSET_SAMPLE_NUM;
       foc.calibration.calibrated = 1U;
-      /* 中断只发出请求，具体PWM启动由主循环处理。 */
-      motor_auto_start_ready = 1U;
+      /* 仅标记校准就绪；保持IDLE，启动由串口run命令决定。 */
     }
     return;
   }
@@ -610,10 +661,12 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
 
   /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、电角度(deg)、母线(V)。 */
   if ((just_float_enabled != 0U) &&
+      (motor_console_tx_active == 0U) &&
+      (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) &&
       ((USART1->ISR & USART_ISR_TC) != 0U)) {
     (void)MotorApp_SendJustFloat(
         foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c,
-        foc.observer.state.speed_rpm,
+        motor_control.speed_ref_active_rpm,
         foc.observer.state.phase_raw * RAD_TO_DEG_F, foc.state.vbus);
   }
 }

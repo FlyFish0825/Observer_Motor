@@ -118,8 +118,7 @@ int main(void)
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-
-  HAL_UART_Transmit(&huart1,(uint8_t *)&foc.timer.adc_trigger,4,HAL_MAX_DELAY);
+  /* 启动统一由串口run请求和校准就绪条件控制。 */
   while (1)
   {
     MotorApp_Process();

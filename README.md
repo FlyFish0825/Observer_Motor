@@ -24,7 +24,7 @@
 2. 校准三个内部运放和ADC。
 3. 仅启动TIM1 CH4触发，采集静止状态下的三相电流零偏。
    `HAL_TIM_PWM_Start`会打开MOE，此时三相功率通道仍未使能。
-4. 零偏校准完成后开启三相PWM，直接进入端电压观测器闭环。
+4. 零偏校准完成后保持IDLE；收到串口 `set run 1` 后开启三相PWM，直接进入端电压观测器闭环。
 5. 低速时观测器使用U/V/W实测端电压：
    - 绝对转速达到1200 rpm后，20 ms内渐变到占空比与母线电压重构值。
    - 绝对转速降到900 rpm以下后，20 ms内渐变回实测值。
@@ -53,6 +53,9 @@ IDLE期间不运行闭环或写回旧PWM，保留零偏、外部命令及电压�
 初始化顺序必须保持：`FOC_Data_Init()` → `MX_TIM1_Init()` → `MotorApp_Init()`。
 TIM1初始化的用户代码会读取FOC中的ARR、触发位置和死区值；过晚初始化会将定时器配置成零值。
 规则组保留逐通道EOC轮询，应用层在启动注入组后单独切换ADC1中断为JEOS。
+ADC1规则组使用间断模式，每次软件触发一个Rank；读完DR后再触发下一Rank，
+避免6.5T高速连续扫描时HAL轮询来不及读取导致丢失通道结果。
+保留的ADC_Regular_Read_DMA接口不适用于当前间断配置，应用层使用BoardAdc_Update。
 
 ## 数学计算约定
 
@@ -62,6 +65,23 @@ TIM1初始化的用户代码会读取FOC中的ARR、触发位置和死区值；�
 当前版本的 `arm_math.h` 内部仍包含 `math.h`，GCC路径下的 `arm_sqrt_f32` 也会使用 `sqrtf`；更换头文件不等于移除全部数学库依赖，也不直接代表性能提升。
 
 ## 在线调试参数
+
+串口波特率2,000,000，命令以换行结束。上电不自动启动：
+
+```text
+set speed 1500
+set run 1
+set run 0
+```
+
+`run 1`启动，`run 0`停止并重置控制历史；校准未完成时启动请求等待校准结束。
+串口支持CR、LF或CRLF结尾。上电主循环输出`READY`，发送`status`可查看运行请求、
+电机状态、校准完成标志、ADC中断次数和TIM1参数。IDLE不发送VOFA波形，便于读取文本；
+`status`还输出DRIVE（母线及转速）、CURRENT（电流参考/反馈与输出电压）、
+PWM（比较值与通道使能）和OBSERVER（磁链及电压权重），用于定位已启动但不转的问题。
+这些诊断数据逐项读取，不是同一个控制周期的同步快照。
+运行时可先发送`set just_float 0`关闭波形。文本回复会等待当前DMA帧结束，避免同时发送。
+运行期间重复发送`run 1`不会重新启动。停止在命令解析后的下一次ADC控制中断执行。
 
 实际端电压统一保存在 `foc.state.u_abc_measured`（a/b/c对应U/V/W，单位V），
 其Clarke变换结果保存在 `foc.state.u_alpha_beta_measured`，母线电压仍为 `foc.state.vbus`。
@@ -73,6 +93,7 @@ TIM1初始化的用户代码会读取FOC中的ARR、触发位置和死区值；�
 - `speed_kp`、`speed_ki`：速度PI参数
 - `speed_slew`：运行调速斜率，rpm/s
 - `speed_en`：速度环使能
+- `run`：电机运行请求，0停止，1启动；与速度环使能独立
 - `just_float`：VOFA JustFloat发送使能
 - `vbus`：母线电压
 - `phase_u`、`phase_v`、`phase_w`：三相端电压
