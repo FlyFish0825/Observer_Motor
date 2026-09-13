@@ -29,6 +29,8 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "app_boot_control.h"
+#include "app_memory.h"
 #include "debug_console.h"
 #include "motor_app.h"
 #include <stddef.h>
@@ -75,6 +77,11 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  /* 中断向量必须与当前链接布局一致，Boot 构建时为 0x08005000。 */
+  SCB->VTOR = APP_FLASH_START;
+  __DSB();
+  __ISB();
+
   MotorApp_ForcePowerStageSafe();
   /* USER CODE END 1 */
 
@@ -111,6 +118,11 @@ int main(void)
   MX_FDCAN1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
+  /* 先让 CAN 能接收 ENTER_BOOT，再进入电机业务初始化。 */
+  if (AppBootControl_Init(&hfdcan1) != HAL_OK) {
+    Error_Handler();
+  }
+
   if (MotorApp_Init() != HAL_OK) {
     Error_Handler();
   }
@@ -121,6 +133,7 @@ int main(void)
   /* 启动统一由串口run请求和校准就绪条件控制。 */
   while (1)
   {
+    AppBootControl_Process();
     MotorApp_Process();
     /* USER CODE END WHILE */
 

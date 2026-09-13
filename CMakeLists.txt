@@ -91,4 +91,5 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
     stm32cubemx
 
     # Add user defined libraries
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/app_boot_control.c
 )
