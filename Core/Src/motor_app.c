@@ -159,8 +159,9 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
 
   success &= DebugConsole_RegisterF32("id", &motor_control.id_ref,
                                       -8.0f, 8.0f, false);
+  /* 直接Iq模式同步放宽到10 A，保持与速度环输出范围一致，便于调试两种模式。 */
   success &= DebugConsole_RegisterF32("iq", &motor_control.iq_ref,
-                                      -8.0f, 8.0f, false);
+                                      -10.0f, 10.0f, false);
   success &= DebugConsole_RegisterF32("speed", &motor_control.speed_command_rpm,
                                       -15000.0f, 15000.0f, false);
   success &= DebugConsole_RegisterF32("speed_kp", &motor_control.speed_pi.kp,

@@ -67,15 +67,18 @@ typedef struct {
 #define FOC_INV_SQRT3_DEFAULT 0.57735026919f
 
 /*
- * 速度环降低比例和积分增益，作为新电机首次上板的保守初值。
- * 单位：
- *   speed PI输入  = rpm
- *   speed PI输出  = Iq参考值，A
+ * 速度环输出单位为Iq参考值(A)。
+ * 当前硬件电流采样：5 mOhm分流电阻、24倍模拟增益、1.65 V中点偏置、3.3 V ADC。
+ * 理论双向量程约为 +/-13.75 A；10 A相电流峰值时ADC输入约为0.45~2.85 V，
+ * 两端仍各保留约0.45 V裕量，可覆盖正常纹波和小幅瞬态。
+ *
+ * 注意：这里的+/-10 A只是速度环允许请求的Iq软件上限，不等同于硬件过流保护值。
+ * 提升该上限的目的是避免水下大负载时原5 A限幅过早限制可用电磁转矩。
  */
 #define FOC_SPEED_PI_KP_DEFAULT 0.0005f
 #define FOC_SPEED_PI_KI_DEFAULT 0.005f
-#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-5.0f)
-#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 5.0f
+#define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-10.0f)
+#define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 10.0f
 
 /* 运行中的外部速度阶跃转换成斜坡，默认每秒最多变化20000 rpm。 */
 #define FOC_SPEED_REFERENCE_SLEW_RPM_PER_S_DEFAULT 20000.0f
