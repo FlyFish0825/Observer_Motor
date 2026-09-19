@@ -109,6 +109,8 @@ typedef struct {
 
   // 输入
   float vbus;
+  /* MCU内部温度传感器换算结果，单位：摄氏度。 */
+  float temperature_c;
   float theta;
   float omega;
 

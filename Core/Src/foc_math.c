@@ -51,6 +51,7 @@ void FOC_Data_Init(void) {
   foc_sin_cos.cos = 1.0f;
 
   foc.state.omega = 0.0f;
+  foc.state.temperature_c = 0.0f;
 
   Observer_MotorParam_t motor = {
       .Rs = 2.55f, 
@@ -76,6 +77,9 @@ void FOC_Data_Init(void) {
 
 }
 
+/**
+ * @brief 启动TIM1三相PWM及ADC触发输出，使功率级获得驱动波形。
+ */
 void FOC_PWM_Start(void) {
 
   uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U;
@@ -95,6 +99,9 @@ void FOC_PWM_Start(void) {
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
 }
 
+/**
+ * @brief 关闭PWM输出并清除比较值，保证停机时功率管不保持上一次状态。
+ */
 void FOC_PWM_Stop(void) {
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
@@ -175,6 +182,9 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
   }
 }
 
+/**
+ * @brief 根据给定的d/q轴电压执行开环电压输出，主要用于启动和调试。
+ */
 void FOC_Open_Loop(float u_d, float u_q) {
 
   foc.state.u_dq.d = u_d;
@@ -396,6 +406,9 @@ void CORDIC_SinCos_RegisterConfig(void) {
                 CORDIC_INSIZE_32BITS | CORDIC_OUTSIZE_32BITS;
 }
 
+/**
+ * @brief 把弧度角映射到CORDIC使用的Q31角度格式。
+ */
 int32_t CORDIC_RadToQ31(float angle_rad) {
   while (angle_rad >= CORDIC_PI_F) {
     angle_rad -= CORDIC_TWO_PI_F;
@@ -418,6 +431,9 @@ int32_t CORDIC_RadToQ31(float angle_rad) {
   return (int32_t)(normalized_angle * CORDIC_Q31_SCALE_F);
 }
 
+/**
+ * @brief 使用CORDIC硬件计算浮点角度的正弦和余弦值。
+ */
 HAL_StatusTypeDef CORDIC_SinCos_F32(float angle_rad, float *sin_value,
                                     float *cos_value) {
   int32_t input_q31;
@@ -452,6 +468,9 @@ HAL_StatusTypeDef CORDIC_SinCos_F32(float angle_rad, float *sin_value,
   return HAL_OK;
 }
 
+/**
+ * @brief 直接使用已配置的CORDIC硬件计算Q31角度的正余弦，供高速控制环调用。
+ */
 void CORDIC_SinCos_Q31_Fast(int32_t angle_q31, int32_t *sin_q31,
                             int32_t *cos_q31) {
   /*
