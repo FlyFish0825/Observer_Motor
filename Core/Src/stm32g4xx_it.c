@@ -63,6 +63,7 @@ extern ADC_HandleTypeDef hadc2;
 extern CORDIC_HandleTypeDef hcordic;
 extern FDCAN_HandleTypeDef hfdcan1;
 extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim6;
 extern DMA_HandleTypeDef hdma_usart2_tx;
 extern DMA_HandleTypeDef hdma_usart2_rx;
 extern UART_HandleTypeDef huart2;
@@ -319,6 +320,14 @@ void TIM1_UP_TIM16_IRQHandler(void)
   /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 1 */
 
   /* USER CODE END TIM1_UP_TIM16_IRQn 1 */
+}
+
+/**
+  * @brief This function handles TIM6 global interrupt.
+  */
+void TIM6_DAC_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim6);
 }
 
 /**

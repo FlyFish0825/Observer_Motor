@@ -44,15 +44,15 @@ void MX_FDCAN1_Init(void)
   hfdcan1.Init.AutoRetransmission = ENABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  hfdcan1.Init.NominalPrescaler = 6;
+  hfdcan1.Init.NominalPrescaler = 3;
   hfdcan1.Init.NominalSyncJumpWidth = 4;
   hfdcan1.Init.NominalTimeSeg1 = 48;
   hfdcan1.Init.NominalTimeSeg2 = 7;
   hfdcan1.Init.DataPrescaler = 1;
   hfdcan1.Init.DataSyncJumpWidth = 4;
-  hfdcan1.Init.DataTimeSeg1 = 26;
-  hfdcan1.Init.DataTimeSeg2 = 7;
-  hfdcan1.Init.StdFiltersNbr = 1;
+  hfdcan1.Init.DataTimeSeg1 = 16;
+  hfdcan1.Init.DataTimeSeg2 = 4;
+  hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -101,9 +101,10 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     /* FDCAN1 interrupt Init */
-    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 0, 0);
+    /* 电流采样中断优先级为0；CAN置为2，避免协议接收打断FOC关键路径。 */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
-    HAL_NVIC_SetPriority(FDCAN1_IT1_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(FDCAN1_IT1_IRQn, 2, 0);
     HAL_NVIC_EnableIRQ(FDCAN1_IT1_IRQn);
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 

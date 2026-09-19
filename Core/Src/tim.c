@@ -25,6 +25,7 @@
 /* USER CODE END 0 */
 
 TIM_HandleTypeDef htim1;
+TIM_HandleTypeDef htim6;
 
 /* TIM1 init function */
 void MX_TIM1_Init(void)
@@ -135,6 +136,20 @@ void MX_TIM1_Init(void)
 
 }
 
+/* TIM6：CAN反馈时隙调度定时器，计数频率1 MHz，更新周期100 us。 */
+void MX_TIM6_Init(void)
+{
+  htim6.Instance = TIM6;
+  htim6.Init.Prescaler = 167U;
+  htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim6.Init.Period = 99U;
+  htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+}
+
 void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
 {
 
@@ -152,6 +167,12 @@ void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* tim_baseHandle)
   /* USER CODE BEGIN TIM1_MspInit 1 */
 
   /* USER CODE END TIM1_MspInit 1 */
+  }
+  else if(tim_baseHandle->Instance==TIM6)
+  {
+    __HAL_RCC_TIM6_CLK_ENABLE();
+    HAL_NVIC_SetPriority(TIM6_DAC_IRQn, 3, 0);
+    HAL_NVIC_EnableIRQ(TIM6_DAC_IRQn);
   }
 }
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef* timHandle)
@@ -218,6 +239,11 @@ void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* tim_baseHandle)
   /* USER CODE BEGIN TIM1_MspDeInit 1 */
 
   /* USER CODE END TIM1_MspDeInit 1 */
+  }
+  else if(tim_baseHandle->Instance==TIM6)
+  {
+    __HAL_RCC_TIM6_CLK_DISABLE();
+    HAL_NVIC_DisableIRQ(TIM6_DAC_IRQn);
   }
 }
 

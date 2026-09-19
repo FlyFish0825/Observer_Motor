@@ -81,8 +81,7 @@ target_link_options(${CMAKE_PROJECT_NAME} PRIVATE
     "-T${APP_LINKER_SCRIPT}"
 )
 
-# app_memory.h 使用这两个宏设置 VTOR，并允许以后只在 boot 模式编译
-# ENTER_BOOT、备份寄存器请求等 Bootloader 相关代码。
+# app_memory.h 使用这两个宏设置VTOR；仅Boot布局启用ENTER_BOOT。
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     APP_FLASH_START=${APP_FLASH_START}
     APP_WITH_BOOTLOADER=${APP_WITH_BOOTLOADER}
@@ -119,9 +118,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bsp_dwt.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/foc_math.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/AS5600.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_protocol.c
 )
 
 

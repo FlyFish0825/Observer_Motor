@@ -22,7 +22,6 @@
 #include "cordic.h"
 #include "dma.h"
 #include "fdcan.h"
-#include "i2c.h"
 #include "opamp.h"
 #include "tim.h"
 #include "usart.h"
@@ -30,7 +29,7 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "AS5600.h"
+#include "board_config.h"
 #include "arm_math.h"
 #include "bsp_dwt.h"
 #include "foc_math.h"
@@ -41,6 +40,7 @@
 #include "controller.h"
 
 #include "app_memory.h"
+#include "motor_protocol.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -67,6 +67,10 @@ static FOC_Control_t motor_control;
 /* USER CODE BEGIN PM */
 
 
+/**
+ * @brief 通过调试串口发送控制台格式化后的数据。
+ * @note 该回调由调试控制台调用，统一使用USART2阻塞发送，避免业务模块直接依赖串口句柄。
+ */
 static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 {
     HAL_UART_Transmit(
@@ -92,9 +96,6 @@ static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 
 /* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
 static volatile uint32_t just_float_on_off = 1U;
-
-uint16_t as5600_raw = 0U;
-float as5600_elec_rad = 0.0f;
 
 /* USER CODE END PV */
 
@@ -125,6 +126,10 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   * @brief  The application entry point.
   * @retval int
   */
+/**
+ * @brief 应用程序入口，完成硬件初始化、FOC启动和后台协议处理。
+ * @note CubeMX生成的外设初始化保持原样，项目业务逻辑集中在初始化后的主循环中。
+ */
 int main(void)
 {
 
@@ -160,8 +165,8 @@ int main(void)
   MX_DMA_Init();
   MX_USART2_UART_Init();
   MX_TIM1_Init();
+  MX_TIM6_Init();
   MX_ADC1_Init();
-  MX_I2C1_Init();
   MX_ADC2_Init();
   MX_OPAMP1_Init();
   MX_OPAMP2_Init();
@@ -172,8 +177,6 @@ int main(void)
   DWT_Delay_Init();
   CORDIC_SinCos_RegisterConfig();
   JustFloat_Init();
-  AS5600_init();
-
   /*
    * 初始化电流环和速度环。
    * 电流环参数仍为当前已经跑通的参数：
@@ -181,8 +184,6 @@ int main(void)
    * Iq: Kp=0.5, Ki=300, 输出-8~8V
    */
   FOC_Control_Init(&motor_control, foc.timer.Ts);
-
-
 
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
     Error_Handler();
@@ -222,37 +223,46 @@ int main(void)
     Error_Handler();
   }
 
-  uint8_t buf[2];
+  /*
+   * ADC/运放校准完成后再启动CAN反馈定时器，避免100 us协议中断干扰校准。
+   * 电机运行、转速设定、反馈和ENTER_BOOT共用一套CAN协议。
+   */
+  if (MotorProtocol_Init(&hfdcan1, &motor_control) != HAL_OK) {
+    Error_Handler();
+  }
+
+  uint32_t slow_task_tick = HAL_GetTick();
   while (1) {
-    HAL_I2C_Mem_Read(&hi2c1, (0x36U << 1), 0x0CU, I2C_MEMADD_SIZE_8BIT, buf, 2U,
-                     10U);
+    MotorProtocol_Process();
+    DebugConsole_Process();
 
-    as5600_raw = ((uint16_t)(buf[0] & 0x0FU) << 8) | (uint16_t)buf[1];
-    int32_t delta_raw = (int32_t)as5600_raw - 1017;
+    /* 母线电压和指示灯保持500ms周期，但不阻塞CAN协议处理。 */
+    if ((HAL_GetTick() - slow_task_tick) >= 500U) {
+      slow_task_tick = HAL_GetTick();
 
-    as5600_elec_rad = (float)delta_raw * 7.0f * (2.0f * FOC_PI / 4096.0f);
+      /* ADC1规则组依次采集母线电压和MCU内部温度传感器。 */
+      if (HAL_ADC_Start(&hadc1) == HAL_OK) {
+        if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
+          uint16_t adc_vbus = (uint16_t)HAL_ADC_GetValue(&hadc1);
+          foc.state.vbus = (float)adc_vbus * 26.0f * 3.3f / 4096.0f;
+        }
 
-    as5600_elec_rad = FOC_WrapToPi(-as5600_elec_rad);
+        if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
+          uint16_t adc_temperature = (uint16_t)HAL_ADC_GetValue(&hadc1);
+          int32_t temperature_c = __HAL_ADC_CALC_TEMPERATURE(
+              3300U, adc_temperature, ADC_RESOLUTION_12B);
+          foc.state.temperature_c = (float)temperature_c;
+        }
+        HAL_ADC_Stop(&hadc1);
+      }
 
-    // ADC1 采样母线电压
-    HAL_ADC_Start(&hadc1);
-
-    if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
-      uint16_t adc_value = (uint16_t)HAL_ADC_GetValue(&hadc1);
-
-      foc.state.vbus = (float)adc_value * 26.0f * 3.3f / 4096.0f;
+      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_4);
+      HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
     }
-
-     HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_4);
-     HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-    HAL_Delay(500U);
 
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-
-
-    DebugConsole_Process();
   }
   /* USER CODE END 3 */
 }
@@ -277,8 +287,19 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  /*
+   * 24 MHz 与 16 MHz 晶振都生成精确的 168 MHz SYSCLK/FDCAN 时钟：
+   * 24 / 2 * 28 / 2 = 168 MHz；16 / 2 * 42 / 2 = 168 MHz。
+   * BOARD_HSE_HZ 在 Core/Inc/board_config.h 中配置，防止刷入不匹配晶振的固件。
+   */
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV2;
+#if BOARD_HSE_HZ == 24000000UL
   RCC_OscInitStruct.PLL.PLLN = 28;
+#elif BOARD_HSE_HZ == 16000000UL
+  RCC_OscInitStruct.PLL.PLLN = 42;
+#else
+#error "Unsupported BOARD_HSE_HZ: use 24000000 or 16000000"
+#endif
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
   RCC_OscInitStruct.PLL.PLLR = RCC_PLLR_DIV2;
