@@ -30,6 +30,9 @@ static void PI_NormalizeLimits(float *minimum, float *maximum) {
   }
 }
 
+/**
+ * @brief 初始化PI控制器的增益、采样周期、输出限幅和积分限幅，并清零运行状态。
+ */
 void PI_Controller_Init(PI_Controller_t *pi, float kp, float ki,
                         float sample_time, float output_min, float output_max) {
   if (pi == NULL) {
@@ -58,6 +61,9 @@ void PI_Controller_Init(PI_Controller_t *pi, float kp, float ki,
   PI_Controller_Reset(pi);
 }
 
+/**
+ * @brief 清除PI控制器的历史误差、积分项、输出和饱和状态，恢复到安全初始状态。
+ */
 void PI_Controller_Reset(PI_Controller_t *pi) {
   if (pi == NULL) {
     return;
@@ -76,6 +82,9 @@ void PI_Controller_Reset(PI_Controller_t *pi) {
   pi->saturation = PI_SATURATION_NONE;
 }
 
+/**
+ * @brief 根据给定参考值和反馈值计算误差，并运行一次PI控制器。
+ */
 float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback) {
   if (pi == NULL) {
     return 0.0f;
@@ -87,6 +96,9 @@ float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback) {
   return PI_Controller_RunError(pi, reference - feedback);
 }
 
+/**
+ * @brief 使用已计算的误差运行PI控制器，执行比例、条件积分抗饱和及输出限幅。
+ */
 float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   float kp;
   float ki;
@@ -173,6 +185,9 @@ float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   return output;
 }
 
+/**
+ * @brief 在线更新PI控制器的比例增益和积分增益。
+ */
 void PI_Controller_SetGains(PI_Controller_t *pi, float kp, float ki) {
   if (pi == NULL) {
     return;
@@ -182,6 +197,9 @@ void PI_Controller_SetGains(PI_Controller_t *pi, float kp, float ki) {
   pi->ki = ki;
 }
 
+/**
+ * @brief 在线更新PI控制器采样周期，负值会被钳位为零。
+ */
 void PI_Controller_SetSampleTime(PI_Controller_t *pi, float sample_time) {
   if (pi == NULL) {
     return;
@@ -194,6 +212,9 @@ void PI_Controller_SetSampleTime(PI_Controller_t *pi, float sample_time) {
   pi->sample_time = sample_time;
 }
 
+/**
+ * @brief 同时设置输出和积分限幅，并将现有积分、输出裁剪到新范围。
+ */
 void PI_Controller_SetLimits(PI_Controller_t *pi, float minimum,
                              float maximum) {
   if (pi == NULL) {
@@ -213,6 +234,9 @@ void PI_Controller_SetLimits(PI_Controller_t *pi, float minimum,
   pi->output = PI_Clamp(pi->output, minimum, maximum);
 }
 
+/**
+ * @brief 只更新输出限幅，不改变积分限幅配置。
+ */
 void PI_Controller_SetOutputLimits(PI_Controller_t *pi, float minimum,
                                    float maximum) {
   if (pi == NULL) {
@@ -227,6 +251,9 @@ void PI_Controller_SetOutputLimits(PI_Controller_t *pi, float minimum,
   pi->output = PI_Clamp(pi->output, minimum, maximum);
 }
 
+/**
+ * @brief 只更新积分限幅，并立即修正当前积分值。
+ */
 void PI_Controller_SetIntegralLimits(PI_Controller_t *pi, float minimum,
                                      float maximum) {
   if (pi == NULL) {
@@ -241,6 +268,9 @@ void PI_Controller_SetIntegralLimits(PI_Controller_t *pi, float minimum,
   pi->integral = PI_Clamp(pi->integral, minimum, maximum);
 }
 
+/**
+ * @brief 预装PI内部积分状态，使闭环切换时输出平滑且避免突变。
+ */
 void PI_Controller_PreloadOutput(PI_Controller_t *pi, float desired_output,
                                  float reference, float feedback) {
   float output_min;
@@ -345,6 +375,9 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
   control->uq_output = 0.0f;
 }
 
+/**
+ * @brief 复位FOC控制器的三个PI环及运行时状态，供停机或重新启动时使用。
+ */
 void FOC_Control_Reset(FOC_Control_t *control) {
   if (control == NULL) {
     return;
@@ -368,6 +401,9 @@ void FOC_Control_Reset(FOC_Control_t *control) {
   control->uq_output = 0.0f;
 }
 
+/**
+ * @brief 在进入闭环前预装电流环和速度环状态，实现无扰切换。
+ */
 void FOC_Control_PreloadClosedLoop(FOC_Control_t *control, float desired_ud,
                                    float desired_uq, float id_feedback,
                                    float iq_feedback,
@@ -407,6 +443,9 @@ void FOC_Control_PreloadClosedLoop(FOC_Control_t *control, float desired_ud,
       (control->speed_loop_enable != 0U) ? 1U : 0U;
 }
 
+/**
+ * @brief 执行一次FOC控制计算；速度环按分频运行，Id/Iq电流环每个PWM周期运行。
+ */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,
                      float *ud_output, float *uq_output) {
@@ -491,6 +530,9 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
   }
 }
 
+/**
+ * @brief 启用或关闭速度环，实际切换由下一次控制周期完成。
+ */
 void FOC_Control_EnableSpeedLoop(FOC_Control_t *control, uint8_t enable) {
   if (control == NULL) {
     return;

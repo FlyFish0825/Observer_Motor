@@ -18,6 +18,9 @@ static uint32_t DWT_MsToCycle(uint32_t ms)
     return (uint32_t)(((uint64_t)dwt_cpu_freq_hz * ms) / 1000ULL);
 }
 
+/**
+ * @brief 初始化DWT周期计数器并使能CYCCNT，返回硬件是否成功启动。
+ */
 uint8_t DWT_Delay_Init(void)
 {
     dwt_cpu_freq_hz = HAL_RCC_GetHCLKFreq();
@@ -51,11 +54,17 @@ uint8_t DWT_Delay_Init(void)
     }
 }
 
+/**
+ * @brief 读取当前DWT CYCCNT值，作为高精度时间戳或延时起点。
+ */
 uint32_t DWT_GetCycle(void)
 {
     return DWT->CYCCNT;
 }
 
+/**
+ * @brief 计算从指定起点到当前时刻经过的CPU周期数，利用无符号减法兼容计数器回绕。
+ */
 uint32_t DWT_ElapsedCycle(uint32_t start_cycle)
 {
     /*
@@ -65,6 +74,9 @@ uint32_t DWT_ElapsedCycle(uint32_t start_cycle)
     return DWT->CYCCNT - start_cycle;
 }
 
+/**
+ * @brief 将指定起点以来经过的CPU周期数转换为微秒。
+ */
 uint32_t DWT_ElapsedUs(uint32_t start_cycle)
 {
     uint32_t elapsed_cycle = DWT_ElapsedCycle(start_cycle);
@@ -72,6 +84,9 @@ uint32_t DWT_ElapsedUs(uint32_t start_cycle)
     return (uint32_t)(((uint64_t)elapsed_cycle * 1000000ULL) / dwt_cpu_freq_hz);
 }
 
+/**
+ * @brief 将指定起点以来经过的CPU周期数转换为毫秒。
+ */
 uint32_t DWT_ElapsedMs(uint32_t start_cycle)
 {
     uint32_t elapsed_cycle = DWT_ElapsedCycle(start_cycle);
@@ -79,6 +94,9 @@ uint32_t DWT_ElapsedMs(uint32_t start_cycle)
     return (uint32_t)(((uint64_t)elapsed_cycle * 1000ULL) / dwt_cpu_freq_hz);
 }
 
+/**
+ * @brief 按照CPU周期执行忙等待延时，适用于短时间、对时序要求高的代码。
+ */
 void DWT_Delay_Cycle(uint32_t cycles)
 {
     uint32_t start_cycle = DWT_GetCycle();
@@ -89,6 +107,9 @@ void DWT_Delay_Cycle(uint32_t cycles)
     }
 }
 
+/**
+ * @brief 按照微秒执行忙等待延时，内部将时间换算为DWT周期。
+ */
 void DWT_Delay_Us(uint32_t us)
 {
     uint32_t cycles = DWT_UsToCycle(us);
@@ -96,6 +117,9 @@ void DWT_Delay_Us(uint32_t us)
     DWT_Delay_Cycle(cycles);
 }
 
+/**
+ * @brief 按照毫秒执行忙等待延时，通过多个1毫秒延时避免长周期换算溢出。
+ */
 void DWT_Delay_Ms(uint32_t ms)
 {
     /*
@@ -107,6 +131,9 @@ void DWT_Delay_Ms(uint32_t ms)
     }
 }
 
+/**
+ * @brief 判断从起点开始是否已经达到指定的微秒超时时间。
+ */
 uint8_t DWT_IsTimeoutUs(uint32_t start_cycle, uint32_t timeout_us)
 {
     uint32_t timeout_cycle = DWT_UsToCycle(timeout_us);
@@ -121,6 +148,9 @@ uint8_t DWT_IsTimeoutUs(uint32_t start_cycle, uint32_t timeout_us)
     }
 }
 
+/**
+ * @brief 判断从起点开始是否已经达到指定的毫秒超时时间。
+ */
 uint8_t DWT_IsTimeoutMs(uint32_t start_cycle, uint32_t timeout_ms)
 {
     uint32_t timeout_cycle = DWT_MsToCycle(timeout_ms);

@@ -3,6 +3,9 @@
 #include "foc_math.h"
 #include <stddef.h>
 
+/**
+ * @brief 初始化滑模磁链观测器、PLL参数和磁链状态，建立电机模型初值。
+ */
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config) {
 
@@ -47,6 +50,9 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
 }
 
 __STATIC_FORCEINLINE void
+/**
+ * @brief 根据三相占空比和真实母线电压重构静止坐标系下的α/β电压。
+ */
 Observer_RebuildVoltage(const Observer_Input_t *input,
                         float *u_alpha,
                         float *u_beta)

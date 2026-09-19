@@ -166,6 +166,9 @@ HAL_StatusTypeDef DebugConsole_Init(
     return DC_StartReceive();
 }
 
+/**
+ * @brief 启动一次串口DMA空闲接收，供后续持续接收命令行数据。
+ */
 static HAL_StatusTypeDef DC_StartReceive(void)
 {
     HAL_StatusTypeDef status;
@@ -233,6 +236,9 @@ void DebugConsole_OnRxEvent(
     }
 }
 
+/**
+ * @brief 处理串口接收错误并重新启动DMA接收，避免一次错误导致控制台永久停止。
+ */
 void DebugConsole_OnError(
     UART_HandleTypeDef *huart)
 {
@@ -278,6 +284,9 @@ static void DC_RingPushFromISR(uint8_t data)
     dc_ring_head = next;
 }
 
+/**
+ * @brief 从调试串口环形缓冲区取出一个字节，返回当前是否成功取到数据。
+ */
 static bool DC_RingPop(uint8_t *data)
 {
     uint16_t tail;
@@ -459,6 +468,9 @@ static void DC_ParseLine(char *line)
         argv[0]);
 }
 
+/**
+ * @brief 按空白和注释规则切分命令行，生成参数数组并返回参数个数。
+ */
 static int DC_Tokenize(
     char *line,
     char *argv[],
@@ -551,6 +563,9 @@ static void DC_CommandHelp(void)
     }
 }
 
+/**
+ * @brief 输出当前所有可读写变量及其属性。
+ */
 static void DC_CommandList(void)
 {
     uint16_t index;
@@ -567,6 +582,9 @@ static void DC_CommandList(void)
     }
 }
 
+/**
+ * @brief 解析get命令并读取指定变量的当前值。
+ */
 static void DC_CommandGet(
     int argc,
     char *argv[])
@@ -593,6 +611,9 @@ static void DC_CommandGet(
     DC_PrintVariable(variable);
 }
 
+/**
+ * @brief 解析set命令，校验范围后写入指定变量或布尔开关。
+ */
 static void DC_CommandSet(
     int argc,
     char *argv[])
@@ -814,6 +835,9 @@ static bool DC_ParseF32(
     return true;
 }
 
+/**
+ * @brief 把文本解析为有符号32位整数并检查转换错误。
+ */
 static bool DC_ParseI32(
     const char *text,
     int32_t *result)
@@ -852,6 +876,9 @@ static bool DC_ParseI32(
     return true;
 }
 
+/**
+ * @brief 把文本解析为无符号32位整数并检查转换错误。
+ */
 static bool DC_ParseU32(
     const char *text,
     uint32_t *result)
@@ -888,6 +915,9 @@ static bool DC_ParseU32(
     return true;
 }
 
+/**
+ * @brief 把on/off、true/false或0/1等文本转换为布尔值。
+ */
 static bool DC_ParseBool(
     const char *text,
     uint32_t *result)
@@ -944,6 +974,9 @@ static bool DC_CanRegisterVariable(
     return true;
 }
 
+/**
+ * @brief 注册一个浮点变量，并保存其上下限和只读属性。
+ */
 bool DebugConsole_RegisterF32(
     const char *name,
     volatile float *value,
@@ -980,6 +1013,9 @@ bool DebugConsole_RegisterF32(
     return true;
 }
 
+/**
+ * @brief 注册一个有符号32位变量，并保存其上下限和只读属性。
+ */
 bool DebugConsole_RegisterI32(
     const char *name,
     volatile int32_t *value,
@@ -1014,6 +1050,9 @@ bool DebugConsole_RegisterI32(
     return true;
 }
 
+/**
+ * @brief 注册一个无符号32位变量，并保存其上下限和只读属性。
+ */
 bool DebugConsole_RegisterU32(
     const char *name,
     volatile uint32_t *value,
@@ -1048,6 +1087,9 @@ bool DebugConsole_RegisterU32(
     return true;
 }
 
+/**
+ * @brief 注册一个布尔变量，供命令行读取或修改。
+ */
 bool DebugConsole_RegisterBool(
     const char *name,
     volatile uint32_t *value,
@@ -1155,6 +1197,9 @@ static DC_Variable_t *DC_FindVariable(
     return NULL;
 }
 
+/**
+ * @brief 按名称查找已注册命令，找不到时返回空指针。
+ */
 static DC_Command_t *DC_FindCommand(
     const char *name)
 {
@@ -1250,6 +1295,9 @@ void DebugConsole_Printf(
         (uint16_t)length);
 }
 
+/**
+ * @brief 返回串口接收环形缓冲区溢出计数，便于定位通信丢字节问题。
+ */
 uint32_t DebugConsole_GetOverflowCount(void)
 {
     return dc_overflow_count;
