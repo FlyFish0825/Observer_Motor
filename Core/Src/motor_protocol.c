@@ -13,8 +13,10 @@
 #define MOTOR_PROTOCOL_DEBUG_DIVIDER    2U
 #define MOTOR_PROTOCOL_BOOT_ACK_TIMEOUT_MS 20U
 #define MOTOR_PROTOCOL_HELLO_TX_TIMEOUT_MS  10U
-/* 临时排查CAN FD数据段错误：0=停发TIM6调度的普通/调试周期反馈。 */
-#define MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED 0U
+/* 基础运行反馈：每个节点由TIM6错开发送普通反馈，当前目标为100 Hz。 */
+#define MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED 1U
+/* 每秒发送一次Classic CAN心跳，便于上位机判断节点在线。 */
+#define MOTOR_PROTOCOL_HEARTBEAT_ENABLED 1U
 
 typedef struct {
   FDCAN_RxHeaderTypeDef header;
@@ -148,7 +150,8 @@ static HAL_StatusTypeDef MotorProtocol_Send(uint32_t identifier,
   header.TxFrameType = FDCAN_DATA_FRAME;
   header.DataLength = data_length;
   header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
-  header.BitRateSwitch = (fd_format == FDCAN_FD_CAN)
+  header.BitRateSwitch = ((fd_format == FDCAN_FD_CAN) &&
+                          (MOTOR_PROTOCOL_CANFD_BRS_ENABLED != 0U))
                              ? FDCAN_BRS_ON
                              : FDCAN_BRS_OFF;
   header.FDFormat = fd_format;
@@ -589,10 +592,6 @@ HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
     return HAL_ERROR;
   }
   MotorProtocol_SendPowerOnHello();
-  /* 诊断期间不启动周期反馈定时器；主循环中的经典CAN心跳照常发送。 */
-  if (MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED == 0U) {
-    return HAL_OK;
-  }
   return HAL_TIM_Base_Start_IT(&htim6);
 }
 
@@ -606,9 +605,7 @@ void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim)
   if ((htim != &htim6) || (motor_protocol.fdcan == NULL)) {
     return;
   }
-  if (MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED == 0U) {
-    return;
-  }
+  if (MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED == 0U) return;
 
   current_slot = motor_protocol.timer_slot;
   motor_protocol.timer_slot =
@@ -642,7 +639,7 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 /**
  * @brief 在主循环中消费接收环形缓冲区并执行控制命令。
  */
-                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         void MotorProtocol_Process(void)
+void MotorProtocol_Process(void)
 {
   MotorProtocol_RxItem_t item;
   uint32_t now;
@@ -659,9 +656,12 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
     MotorProtocol_HandleRx(&item);
   }
 
-  now = HAL_GetTick();
-  if ((int32_t)(now - motor_protocol.heartbeat_next_tick) >= 0) {
-    motor_protocol.heartbeat_next_tick += 1000U;
-    MotorProtocol_SendHeartbeat();
-  }
+  #if MOTOR_PROTOCOL_HEARTBEAT_ENABLED
+    now = HAL_GetTick();
+
+    if ((int32_t)(now - motor_protocol.heartbeat_next_tick) >= 0) {
+        motor_protocol.heartbeat_next_tick += 1000U;
+        MotorProtocol_SendHeartbeat();
+    }
+  #endif
 }

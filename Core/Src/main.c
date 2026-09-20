@@ -115,7 +115,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 
 
 
-
+static HAL_StatusTypeDef CANFD_SendSingleTestFrame(void);
 
 /* ======================== 电流零偏校准 ======================== */
 
@@ -123,6 +123,72 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/**
+ * @brief  单次发送一帧 CAN FD + BRS 测试帧
+ * @note
+ *  - 标准 ID = 0x555
+ *  - 数据长度 = 8 Byte
+ *  - CAN FD
+ *  - BRS 开启
+ *  - Nominal/Data 波特率由 MX_FDCAN1_Init() 决定
+ *  - 本函数每调用一次只向 TX FIFO 加入一帧
+ */
+static HAL_StatusTypeDef CANFD_SendSingleTestFrame(void)
+{
+    FDCAN_TxHeaderTypeDef tx_header = {0};
+
+    uint8_t tx_data[8] =
+    {
+        0x11,
+        0x22,
+        0x33,
+        0x44,
+        0x55,
+        0x66,
+        0x77,
+        0x88
+    };
+
+    tx_header.Identifier = 0x555U;
+
+    /* 标准 11-bit ID */
+    tx_header.IdType = FDCAN_STANDARD_ID;
+
+    /* 数据帧 */
+    tx_header.TxFrameType = FDCAN_DATA_FRAME;
+
+    /* 8 字节 */
+    tx_header.DataLength = FDCAN_DLC_BYTES_8;
+
+    /* ESI：主动错误状态 */
+    tx_header.ErrorStateIndicator = FDCAN_ESI_ACTIVE;
+
+    /*
+     * 关键：
+     * 测试阶段关闭 BRS，数据段同样为 1 Mbps。
+     *
+     * 如果当前配置是 Nominal = 1 Mbps，
+     * Data = 1 Mbps，
+     * 那么：
+     *
+     * 仲裁阶段 = 1 Mbps
+     * 数据阶段 = 1 Mbps
+     */
+     tx_header.BitRateSwitch = FDCAN_BRS_OFF;
+
+    /* CAN FD 帧，而不是 Classic CAN */
+    tx_header.FDFormat = FDCAN_FD_CAN;
+
+    /* 本次测试不需要 Tx Event FIFO */
+    tx_header.TxEventFifoControl = FDCAN_NO_TX_EVENTS;
+
+    tx_header.MessageMarker = 0U;
+
+    return HAL_FDCAN_AddMessageToTxFifoQ(
+        &hfdcan1,
+        &tx_header,
+        tx_data);
+}
 
 /* USER CODE END 0 */
 
@@ -228,6 +294,37 @@ int main(void)
     Error_Handler();
   }
 
+
+
+
+
+
+  /* 仅BRS高速数据段需要TDC；当前1M无BRS测试不启用。 */
+#if MOTOR_PROTOCOL_CANFD_BRS_ENABLED
+if (HAL_FDCAN_ConfigTxDelayCompensation(
+        &hfdcan1,
+        hfdcan1.Init.DataPrescaler *
+        hfdcan1.Init.DataTimeSeg1,
+        0U) != HAL_OK)
+{
+    Error_Handler();
+}
+
+ if (HAL_FDCAN_EnableTxDelayCompensation(&hfdcan1) != HAL_OK)
+{
+    Error_Handler();
+}
+#endif
+
+
+
+
+
+
+
+
+
+
   /*
    * ADC/运放校准完成后再启动CAN反馈定时器，避免100 us协议中断干扰校准。
    * 电机运行、转速设定、反馈和ENTER_BOOT共用一套CAN协议。
@@ -235,6 +332,34 @@ int main(void)
   if (MotorProtocol_Init(&hfdcan1, &motor_control) != HAL_OK) {
     Error_Handler();
   }
+
+
+
+
+
+
+  /*
+ * ================= CAN FD 单帧测试 =================
+ *
+ * 当前周期 CAN FD 反馈保持关闭。
+ *
+ * 等待 1 秒，让上电 HELLO / CAN 初始化稳定后，
+ * 单独发送一帧 CAN FD + BRS 测试帧。
+ */
+HAL_Delay(1000U);
+
+if (CANFD_SendSingleTestFrame() != HAL_OK) {
+    /*
+     * 不进入 Error_Handler()。
+     *
+     * 测试目的就是观察发送失败后的 FDCAN 状态，
+     * 如果这里死循环反而不方便继续调试。
+     */
+}
+
+
+
+
 
   uint32_t slow_task_tick = HAL_GetTick();
   while (1) {
