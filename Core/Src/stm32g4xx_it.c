@@ -77,6 +77,7 @@ extern UART_HandleTypeDef huart2;
 /**
   * @brief This function handles Non maskable interrupt.
   */
+/** @brief 不可屏蔽中断（NMI）处理函数。 */
 void NMI_Handler(void)
 {
   /* USER CODE BEGIN NonMaskableInt_IRQn 0 */
@@ -92,6 +93,7 @@ void NMI_Handler(void)
 /**
   * @brief This function handles Hard fault interrupt.
   */
+/** @brief 硬件故障（HardFault）中断处理函数，进入死循环以便调试器捕获。 */
 void HardFault_Handler(void)
 {
   /* USER CODE BEGIN HardFault_IRQn 0 */
@@ -107,6 +109,7 @@ void HardFault_Handler(void)
 /**
   * @brief This function handles Memory management fault.
   */
+/** @brief 内存管理故障中断处理函数，进入死循环以便调试器捕获。 */
 void MemManage_Handler(void)
 {
   /* USER CODE BEGIN MemoryManagement_IRQn 0 */
@@ -122,6 +125,7 @@ void MemManage_Handler(void)
 /**
   * @brief This function handles Prefetch fault, memory access fault.
   */
+/** @brief 总线故障（BusFault）中断处理函数，进入死循环以便调试器捕获。 */
 void BusFault_Handler(void)
 {
   /* USER CODE BEGIN BusFault_IRQn 0 */
@@ -137,6 +141,7 @@ void BusFault_Handler(void)
 /**
   * @brief This function handles Undefined instruction or illegal state.
   */
+/** @brief 使用故障（UsageFault）中断处理函数，进入死循环以便调试器捕获。 */
 void UsageFault_Handler(void)
 {
   /* USER CODE BEGIN UsageFault_IRQn 0 */
@@ -152,6 +157,7 @@ void UsageFault_Handler(void)
 /**
   * @brief This function handles System service call via SWI instruction.
   */
+/** @brief 系统服务调用（SVC）中断处理函数。 */
 void SVC_Handler(void)
 {
   /* USER CODE BEGIN SVCall_IRQn 0 */
@@ -165,6 +171,7 @@ void SVC_Handler(void)
 /**
   * @brief This function handles Debug monitor.
   */
+/** @brief 调试监视（DebugMonitor）中断处理函数。 */
 void DebugMon_Handler(void)
 {
   /* USER CODE BEGIN DebugMonitor_IRQn 0 */
@@ -178,6 +185,7 @@ void DebugMon_Handler(void)
 /**
   * @brief This function handles Pendable request for system service.
   */
+/** @brief 可挂起系统服务（PendSV）中断处理函数，用于操作系统上下文切换。 */
 void PendSV_Handler(void)
 {
   /* USER CODE BEGIN PendSV_IRQn 0 */
@@ -191,6 +199,7 @@ void PendSV_Handler(void)
 /**
   * @brief This function handles System tick timer.
   */
+/** @brief SysTick定时器中断处理函数，调用HAL_IncTick更新系统节拍。 */
 void SysTick_Handler(void)
 {
   /* USER CODE BEGIN SysTick_IRQn 0 */
@@ -212,6 +221,7 @@ void SysTick_Handler(void)
 /**
   * @brief This function handles DMA1 channel1 global interrupt.
   */
+/** @brief DMA1通道1中断处理函数，处理USART2发送DMA完成事件。 */
 void DMA1_Channel1_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel1_IRQn 0 */
@@ -226,6 +236,7 @@ void DMA1_Channel1_IRQHandler(void)
 /**
   * @brief This function handles DMA1 channel2 global interrupt.
   */
+/** @brief DMA1通道2中断处理函数，处理USART2接收DMA完成事件。 */
 void DMA1_Channel2_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel2_IRQn 0 */
@@ -240,6 +251,7 @@ void DMA1_Channel2_IRQHandler(void)
 /**
   * @brief This function handles DMA1 channel3 global interrupt.
   */
+/** @brief DMA1通道3中断处理函数，处理ADC1的DMA传输完成事件。 */
 void DMA1_Channel3_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel3_IRQn 0 */
@@ -254,6 +266,7 @@ void DMA1_Channel3_IRQHandler(void)
 /**
   * @brief This function handles DMA1 channel4 global interrupt.
   */
+/** @brief DMA1通道4中断处理函数，处理ADC2的DMA传输完成事件。 */
 void DMA1_Channel4_IRQHandler(void)
 {
   /* USER CODE BEGIN DMA1_Channel4_IRQn 0 */
@@ -268,6 +281,7 @@ void DMA1_Channel4_IRQHandler(void)
 /**
   * @brief This function handles ADC1 and ADC2 global interrupt.
   */
+/** @brief ADC1/ADC2全局中断处理函数，转发到HAL层处理注入/规则组转换完成。 */
 void ADC1_2_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC1_2_IRQn 0 */
@@ -283,6 +297,7 @@ void ADC1_2_IRQHandler(void)
 /**
   * @brief This function handles FDCAN1 interrupt 0.
   */
+/** @brief FDCAN1中断0处理函数，处理接收FIFO0新消息等CAN事件。 */
 void FDCAN1_IT0_IRQHandler(void)
 {
   /* USER CODE BEGIN FDCAN1_IT0_IRQn 0 */
@@ -297,6 +312,7 @@ void FDCAN1_IT0_IRQHandler(void)
 /**
   * @brief This function handles FDCAN1 interrupt 1.
   */
+/** @brief FDCAN1中断1处理函数，处理发送FIFO请求等CAN事件。 */
 void FDCAN1_IT1_IRQHandler(void)
 {
   /* USER CODE BEGIN FDCAN1_IT1_IRQn 0 */
@@ -311,6 +327,7 @@ void FDCAN1_IT1_IRQHandler(void)
 /**
   * @brief This function handles TIM1 update interrupt and TIM16 global interrupt.
   */
+/** @brief TIM1更新中断处理函数，FOC控制环每个PWM周期在此触发。 */
 void TIM1_UP_TIM16_IRQHandler(void)
 {
   /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 0 */
@@ -325,6 +342,7 @@ void TIM1_UP_TIM16_IRQHandler(void)
 /**
   * @brief This function handles TIM6 global interrupt.
   */
+/** @brief TIM6中断处理函数，电机协议按100us时隙调度周期反馈发送。 */
 void TIM6_DAC_IRQHandler(void)
 {
   HAL_TIM_IRQHandler(&htim6);
@@ -333,6 +351,7 @@ void TIM6_DAC_IRQHandler(void)
 /**
   * @brief This function handles USART2 global interrupt / USART2 wake-up interrupt through EXTI line 26.
   */
+/** @brief USART2全局中断处理函数，处理调试串口的空闲/错误事件。 */
 void USART2_IRQHandler(void)
 {
   /* USER CODE BEGIN USART2_IRQn 0 */
@@ -347,6 +366,7 @@ void USART2_IRQHandler(void)
 /**
   * @brief This function handles EXTI line[15:10] interrupts.
   */
+/** @brief 外部中断线[15:10]处理函数，处理PC10/PC11按键（启动/停止电机）。 */
 void EXTI15_10_IRQHandler(void)
 {
   /* USER CODE BEGIN EXTI15_10_IRQn 0 */
@@ -363,6 +383,7 @@ void EXTI15_10_IRQHandler(void)
 /**
   * @brief This function handles CORDIC interrupt.
   */
+/** @brief CORDIC硬件协处理器中断处理函数。 */
 void CORDIC_IRQHandler(void)
 {
   /* USER CODE BEGIN CORDIC_IRQn 0 */
@@ -375,6 +396,7 @@ void CORDIC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/** @brief GPIO外部中断回调：PC10按下启动开环，PC11按下停止并复位FOC状态机。 */
 void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   switch (GPIO_Pin) {

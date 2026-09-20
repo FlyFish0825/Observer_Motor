@@ -41,15 +41,18 @@ char **environ = __env;
 
 
 /* Functions */
+/** @brief 初始化监控句柄（空实现，兼容Newlib/Picolibc要求）。 */
 void initialise_monitor_handles()
 {
 }
 
+/** @brief 返回当前进程ID，嵌入式环境下固定返回1。 */
 int _getpid(void)
 {
   return 1;
 }
 
+/** @brief 终止进程的系统调用桩，不支持，返回EINVAL。 */
 int _kill(int pid, int sig)
 {
   (void)pid;
@@ -58,12 +61,14 @@ int _kill(int pid, int sig)
   return -1;
 }
 
+/** @brief 退出系统调用桩，调用_kill后进入死循环使系统挂起。 */
 void _exit (int status)
 {
   _kill(status, -1);
   while (1) {}    /* Make sure we hang here */
 }
 
+/** @brief 读取系统调用桩，通过__io_getchar逐字符读取。 */
 __attribute__((weak)) int _read(int file, char *ptr, int len)
 {
   (void)file;
@@ -77,6 +82,7 @@ __attribute__((weak)) int _read(int file, char *ptr, int len)
   return len;
 }
 
+/** @brief 写入系统调用桩，通过__io_putchar逐字符写出，printf底层依赖此函数。 */
 __attribute__((weak)) int _write(int file, char *ptr, int len)
 {
   (void)file;
@@ -89,6 +95,7 @@ __attribute__((weak)) int _write(int file, char *ptr, int len)
   return len;
 }
 
+/** @brief 关闭文件描述符的桩，嵌入式无文件系统，返回-1。 */
 int _close(int file)
 {
   (void)file;
@@ -96,6 +103,7 @@ int _close(int file)
 }
 
 
+/** @brief 获取文件状态的桩，标记为字符设备。 */
 int _fstat(int file, struct stat *st)
 {
   (void)file;
@@ -103,12 +111,14 @@ int _fstat(int file, struct stat *st)
   return 0;
 }
 
+/** @brief 判断是否为终端设备的桩，固定返回1（是终端）。 */
 int _isatty(int file)
 {
   (void)file;
   return 1;
 }
 
+/** @brief 文件定位的桩，不支持，返回0。 */
 int _lseek(int file, int ptr, int dir)
 {
   (void)file;
@@ -117,6 +127,7 @@ int _lseek(int file, int ptr, int dir)
   return 0;
 }
 
+/** @brief 打开文件的桩，嵌入式无文件系统，固定失败返回-1。 */
 int _open(char *path, int flags, ...)
 {
   (void)path;
@@ -125,6 +136,7 @@ int _open(char *path, int flags, ...)
   return -1;
 }
 
+/** @brief 等待子进程的桩，无子进程，返回ECHILD。 */
 int _wait(int *status)
 {
   (void)status;
@@ -132,6 +144,7 @@ int _wait(int *status)
   return -1;
 }
 
+/** @brief 删除文件的桩，无文件系统，返回ENOENT。 */
 int _unlink(char *name)
 {
   (void)name;
@@ -139,12 +152,14 @@ int _unlink(char *name)
   return -1;
 }
 
+/** @brief 获取进程时间的桩，不支持，返回-1。 */
 clock_t _times(struct tms *buf)
 {
   (void)buf;
   return -1;
 }
 
+/** @brief 获取文件状态的桩，标记为字符设备。 */
 int _stat(const char *file, struct stat *st)
 {
   (void)file;
@@ -152,6 +167,7 @@ int _stat(const char *file, struct stat *st)
   return 0;
 }
 
+/** @brief 创建硬链接的桩，不支持，返回EMLINK。 */
 int _link(char *old, char *new)
 {
   (void)old;
@@ -160,12 +176,14 @@ int _link(char *old, char *new)
   return -1;
 }
 
+/** @brief 创建子进程的桩，不支持，返回EAGAIN。 */
 int _fork(void)
 {
   errno = EAGAIN;
   return -1;
 }
 
+/** @brief 执行程序的桩，不支持，返回ENOMEM。 */
 int _execve(char *name, char **argv, char **env)
 {
   (void)name;

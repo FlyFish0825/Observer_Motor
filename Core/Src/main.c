@@ -100,12 +100,16 @@ static volatile uint32_t just_float_on_off = 1U;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
+/** @brief 配置系统时钟：HSE晶振经PLL倍频输出168MHz SYSCLK/FDCAN时钟。 */
 void SystemClock_Config(void);
 /* USER CODE BEGIN PFP */
 
+/** @brief 启动运放自校准和ADC自校准，完成后等待运放稳定。 */
 void FOC_ADC_AND_OPAMP_Calibration_Start(void);
 
+/** @brief 初始化VOFA+ JustFloat帧发送：配置USART2发送DMA通道指向帧缓冲区。 */
 void JustFloat_Init(void);
+/** @brief 非阻塞发送6个float的JustFloat帧，UART忙时立即返回-1避免中断内阻塞。 */
 int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
                       float f5);
 
@@ -130,6 +134,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
  * @brief 应用程序入口，完成硬件初始化、FOC启动和后台协议处理。
  * @note CubeMX生成的外设初始化保持原样，项目业务逻辑集中在初始化后的主循环中。
  */
+/** @brief 应用程序入口，完成向量表重定位、外设初始化、FOC控制环启动和主循环调度。 */
 int main(void)
 {
 
@@ -325,6 +330,7 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+/** @brief ADC注入组转换完成回调（每个PWM周期触发）：校准阶段累加零偏，运行阶段执行FOC电流环闭环控制。 */
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
   static uint16_t calibration_count = 0;
@@ -532,6 +538,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
   }
 }
 
+/** @brief printf底层输出重定向：通过USART2阻塞发送，供调试输出使用。 */
 int _write(int file, char *ptr, int len) {
   (void)file;
 
@@ -691,6 +698,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 
 
 
+/** @brief 串口DMA空闲接收完成回调，将数据交给调试控制台处理。 */
 void HAL_UARTEx_RxEventCallback(
     UART_HandleTypeDef *huart,
     uint16_t Size)
@@ -698,6 +706,7 @@ void HAL_UARTEx_RxEventCallback(
     DebugConsole_OnRxEvent(huart, Size);
 }
 
+/** @brief 串口错误回调，通知调试控制台标记重启接收。 */
 void HAL_UART_ErrorCallback(
     UART_HandleTypeDef *huart)
 {
@@ -710,6 +719,7 @@ void HAL_UART_ErrorCallback(
   * @brief  This function is executed in case of error occurrence.
   * @retval None
   */
+/** @brief HAL错误处理入口：关闭中断后进入死循环，便于调试器定位故障。 */
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
@@ -728,6 +738,7 @@ void Error_Handler(void)
   * @param  line: assert_param error line source number
   * @retval None
   */
+/** @brief assert_param断言失败回调（仅USE_FULL_ASSERT启用时编译）。 */
 void assert_failed(uint8_t *file, uint32_t line)
 {
   /* USER CODE BEGIN 6 */

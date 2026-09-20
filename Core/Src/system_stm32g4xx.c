@@ -177,6 +177,7 @@
   * @retval None
   */
 
+/** @brief MCU系统初始化，在复位后、进入main前由启动文件调用，配置FPU访问权限和向量表位置。 */
 void SystemInit(void)
 {
   /* FPU settings ------------------------------------------------------------*/
@@ -226,6 +227,7 @@ void SystemInit(void)
   * @param  None
   * @retval None
   */
+/** @brief 根据时钟寄存器值更新SystemCoreClock全局变量，核心时钟变化后必须调用。 */
 void SystemCoreClockUpdate(void)
 {
   uint32_t tmp, pllvco, pllr, pllsource, pllm;
