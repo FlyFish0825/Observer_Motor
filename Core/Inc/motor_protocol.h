@@ -24,6 +24,9 @@ extern "C" {
 #define MOTOR_PROTOCOL_FEEDBACK_DLC         FDCAN_DLC_BYTES_12
 #define MOTOR_PROTOCOL_DEBUG_DLC            FDCAN_DLC_BYTES_64
 
+/* 当前测试总线数据段也是1 Mbit/s，FD帧关闭BRS；切换8M时改为1。 */
+#define MOTOR_PROTOCOL_CANFD_BRS_ENABLED    0U
+
 /* 0x100广播控制帧命令。 */
 #define MOTOR_PROTOCOL_CMD_SPEED_VECTOR     0x10U
 #define MOTOR_PROTOCOL_CMD_RUN_VECTOR       0x11U

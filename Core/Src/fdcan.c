@@ -39,19 +39,21 @@ void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_BRS;
+  /* 测试板仅支持1M：FD帧关闭BRS；切换8M数据段时改为FD_BRS。 */
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
-  hfdcan1.Init.AutoRetransmission = ENABLE;
+  hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
   hfdcan1.Init.NominalPrescaler = 3;
   hfdcan1.Init.NominalSyncJumpWidth = 4;
   hfdcan1.Init.NominalTimeSeg1 = 48;
   hfdcan1.Init.NominalTimeSeg2 = 7;
-  hfdcan1.Init.DataPrescaler = 1;
+  /* 168 MHz / (3 * (1 + 48 + 7)) = 1 Mbit/s；8M时改回1/16/4。 */
+  hfdcan1.Init.DataPrescaler = 3;
   hfdcan1.Init.DataSyncJumpWidth = 4;
-  hfdcan1.Init.DataTimeSeg1 = 16;
-  hfdcan1.Init.DataTimeSeg2 = 4;
+  hfdcan1.Init.DataTimeSeg1 = 48;
+  hfdcan1.Init.DataTimeSeg2 = 7;
   hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
@@ -96,7 +98,7 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
     GPIO_InitStruct.Alternate = GPIO_AF9_FDCAN1;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 

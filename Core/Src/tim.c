@@ -136,13 +136,14 @@ void MX_TIM1_Init(void)
 
 }
 
-/* TIM6：CAN反馈时隙调度定时器，计数频率1 MHz，更新周期100 us。 */
+/* TIM6：CAN反馈时隙调度定时器，计数频率1 MHz，更新周期1 ms。
+ * 10个节点时隙对应每节点约100 Hz普通反馈。 */
 void MX_TIM6_Init(void)
 {
   htim6.Instance = TIM6;
   htim6.Init.Prescaler = 167U;
   htim6.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim6.Init.Period = 99U;
+  htim6.Init.Period = 999U;
   htim6.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
   if (HAL_TIM_Base_Init(&htim6) != HAL_OK)
   {
