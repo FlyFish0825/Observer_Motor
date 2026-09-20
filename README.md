@@ -1,8 +1,8 @@
 # Observer_Motor
 
-STM32G431CBT6 无位置传感器 FOC 电机控制工程。CAN FD 使用 1 Mbit/s 仲裁段、8 Mbit/s 数据段，节点号固定为 1～8。
+STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试使用 1 Mbit/s 仲裁段、1 Mbit/s 数据段并关闭 BRS，节点号固定为 1～8。
 
-当前为 CAN 诊断版本：周期 CAN FD 反馈暂时关闭，保留经典 CAN 上电 HELLO、每秒心跳和进入 Bootloader 命令。恢复周期反馈前需排查 8 Mbit/s 数据段 Bus-Off 原因；具体开关见协议文档。
+当前为 CAN 链路测试版本：普通 CAN FD 基础反馈约 100 Hz，保留经典 CAN 上电 HELLO、每秒心跳和进入 Bootloader 命令。切换到8 Mbit/s前需同步打开BRS并修改数据段时序。
 
 完整的上位机接口定义见：
 
