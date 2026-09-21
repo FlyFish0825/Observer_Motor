@@ -68,6 +68,16 @@ static volatile uint8_t motor_idle_reset_done = 0U;
 static volatile uint8_t motor_console_tx_active = 0U;
 static volatile uint32_t motor_adc_irq_count = 0U;
 
+/** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
+FOC_Control_t *MotorApp_GetControl(void) {
+  return &motor_control;
+}
+
+/** @brief 写入运行请求，实际启停仍由现有MotorApp控制节拍执行。 */
+void MotorApp_RequestRun(uint8_t run) {
+  motor_run_requested = (run != 0U) ? 1U : 0U;
+}
+
 /**
  * @brief IDLE关闭功率输出，首次进入时清除闭环历史。
  * 直接关闭MOE立即撤销输出；停止六个功率通道使HAL通道状态回到READY。

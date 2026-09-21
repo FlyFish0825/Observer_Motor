@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include "stm32g4xx_hal.h"
+#include "controller.h"
 
 /**
  * @brief HAL初始化前将六路栅极驱动输出置于安全低电平
@@ -30,6 +31,16 @@ void MotorApp_Process(void);
  * @param hadc HAL回调传入的ADC句柄；只处理ADC1，忽略ADC2和空指针。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc);
+
+/**
+ * @brief 获取应用层正在使用的FOC控制器，供CAN协议层更新目标参数。
+ */
+FOC_Control_t *MotorApp_GetControl(void);
+
+/**
+ * @brief 设置运行请求；真正的启动/停机仍由MotorApp_Process和ADC控制节拍执行。
+ */
+void MotorApp_RequestRun(uint8_t run);
 
 #ifdef __cplusplus
 }

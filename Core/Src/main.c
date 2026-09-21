@@ -29,10 +29,10 @@
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "app_boot_control.h"
 #include "app_memory.h"
 #include "debug_console.h"
 #include "motor_app.h"
+#include "motor_protocol.h"
 #include <stddef.h>
 #include "foc_math.h"
 /* USER CODE END Includes */
@@ -118,12 +118,10 @@ int main(void)
   MX_FDCAN1_Init();
   MX_USART1_UART_Init();
   /* USER CODE BEGIN 2 */
-  /* 先让 CAN 能接收 ENTER_BOOT，再进入电机业务初始化。 */
-  if (AppBootControl_Init(&hfdcan1) != HAL_OK) {
+  if (MotorApp_Init() != HAL_OK) {
     Error_Handler();
   }
-
-  if (MotorApp_Init() != HAL_OK) {
+  if (MotorProtocol_Init(&hfdcan1, MotorApp_GetControl()) != HAL_OK) {
     Error_Handler();
   }
   /* USER CODE END 2 */
@@ -133,7 +131,7 @@ int main(void)
   /* 启动统一由串口run请求和校准就绪条件控制。 */
   while (1)
   {
-    AppBootControl_Process();
+    MotorProtocol_Process();
     MotorApp_Process();
     /* USER CODE END WHILE */
 
