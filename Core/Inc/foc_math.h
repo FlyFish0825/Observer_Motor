@@ -25,6 +25,7 @@
 #define FOC_SQRT3_BY_2_F  0.86602540378443864676f
 #define FOC_PI            3.14159265358979323846f
 #define CURRENT_OFFSET_SAMPLE_NUM 1000 // 校准采样次数
+#define ADC_REGULAR_SAMPLE_PERIOD_MS 10U
 
 /* ======================== FOC 结构体变量 ======================== */
 
@@ -89,9 +90,9 @@ typedef struct {
   uint16_t adc_b;
   uint16_t adc_c;
 
-  /* 常规组校准使用的DMA缓冲区 */
-  uint16_t adc1_regular_dma_buffer[3] __attribute__((aligned(4)));
-  uint16_t adc2_regular_dma_buffer[1] __attribute__((aligned(4)));
+  /* 规则组DMA采样缓冲区。 */
+  /* ADC1规则组：Rank1=母线电压，Rank2=MCU温度。 */
+  uint16_t adc1_regular_dma_buffer[2] __attribute__((aligned(4)));
 
   float offset_a;
   float offset_b;
@@ -220,7 +221,7 @@ void FOC_Data_Init(void);
 void FOC_PWM_Start(void);
 void FOC_PWM_Stop(void);
 
-HAL_StatusTypeDef ADC_Regular_Read_DMA(void);
+void ADC_Regular_Service(uint32_t now_ms);
 void FOC_Iabc_Calibration(void);
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
 

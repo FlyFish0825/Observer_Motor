@@ -269,31 +269,14 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
 
 
 
-  uint32_t slow_task_tick = HAL_GetTick();
+  uint32_t led_task_tick = HAL_GetTick();
   while (1) {
+    ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
 
-    /* 母线电压和指示灯保持500ms周期，但不阻塞CAN协议处理。 */
-    if ((HAL_GetTick() - slow_task_tick) >= 500U) {
-      slow_task_tick = HAL_GetTick();
-
-      /* ADC1规则组依次采集母线电压和MCU内部温度传感器。 */
-      if (HAL_ADC_Start(&hadc1) == HAL_OK) {
-        if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
-          uint16_t adc_vbus = (uint16_t)HAL_ADC_GetValue(&hadc1);
-          foc.state.vbus = (float)adc_vbus * 26.0f * 3.3f / 4096.0f;
-        }
-
-        if (HAL_ADC_PollForConversion(&hadc1, 10U) == HAL_OK) {
-          uint16_t adc_temperature = (uint16_t)HAL_ADC_GetValue(&hadc1);
-          int32_t temperature_c = __HAL_ADC_CALC_TEMPERATURE(
-              3300U, adc_temperature, ADC_RESOLUTION_12B);
-          foc.state.temperature_c = (float)temperature_c;
-        }
-        HAL_ADC_Stop(&hadc1);
-      }
-
+    if ((HAL_GetTick() - led_task_tick) >= 500U) {
+      led_task_tick = HAL_GetTick();
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_4);
       HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
     }

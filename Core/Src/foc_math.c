@@ -200,49 +200,59 @@ void FOC_Open_Loop(float u_d, float u_q) {
   FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
 }
 
+static volatile uint8_t adc_regular_dma_busy = 0U;
+static uint8_t adc_regular_schedule_initialized = 0U;
+static uint32_t adc_regular_last_start_ms = 0U;
+
 /**
- * @brief 读取ADC的常规转换数据。
- * @return HAL状态。
+ * @brief 按10 ms周期非阻塞启动ADC1规则组DMA。
+ * @note DMA一次搬运Rank1母线电压和Rank2温度；注入组继续由TIM1以25 kHz触发。
  */
-HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
-  uint32_t start_tick;
-
-  /*
-   * 先启动ADC2，再启动ADC1。
-   */
-  if (HAL_ADC_Start_DMA(&hadc2, (uint32_t *)foc.current.adc2_regular_dma_buffer,
-                        1U) != HAL_OK) {
-    return HAL_ERROR;
+void ADC_Regular_Service(uint32_t now_ms) {
+  if (adc_regular_dma_busy != 0U) {
+    return;
   }
 
-  if (HAL_ADC_Start_DMA(&hadc1, (uint32_t *)foc.current.adc1_regular_dma_buffer,
-                        3U) != HAL_OK) {
-    HAL_ADC_Stop_DMA(&hadc2);
-    return HAL_ERROR;
+  if ((adc_regular_schedule_initialized != 0U) &&
+      ((now_ms - adc_regular_last_start_ms) < ADC_REGULAR_SAMPLE_PERIOD_MS)) {
+    return;
   }
 
-  /*
-   * 等待两个DMA都完成。
-   *
-   * 不使用HAL_DMA_PollForTransfer，
-   * 避免DMA中断先完成后HAL状态发生竞争。
-   */
-  start_tick = HAL_GetTick();
+  adc_regular_schedule_initialized = 1U;
+  adc_regular_last_start_ms = now_ms;
+  adc_regular_dma_busy = 1U;
 
-  while ((__HAL_DMA_GET_COUNTER(&hdma_adc1) != 0U) ||
-         (__HAL_DMA_GET_COUNTER(&hdma_adc2) != 0U)) {
-    if ((HAL_GetTick() - start_tick) > 10U) {
-      HAL_ADC_Stop_DMA(&hadc1);
-      HAL_ADC_Stop_DMA(&hadc2);
+  if (HAL_ADC_Start_DMA(&hadc1,
+                        (uint32_t *)foc.current.adc1_regular_dma_buffer,
+                        2U) != HAL_OK) {
+    adc_regular_dma_busy = 0U;
+  }
+}
 
-      return HAL_TIMEOUT;
-    }
+/** @brief ADC1规则组DMA完成后更新母线电压和MCU温度快照。 */
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
+  uint16_t adc_vbus;
+  uint16_t adc_temperature;
+
+  if ((hadc == NULL) || (hadc->Instance != ADC1)) {
+    return;
   }
 
-  HAL_ADC_Stop_DMA(&hadc1);
-  HAL_ADC_Stop_DMA(&hadc2);
+  adc_vbus = foc.current.adc1_regular_dma_buffer[0];
+  adc_temperature = foc.current.adc1_regular_dma_buffer[1];
 
-  return HAL_OK;
+  foc.state.vbus = (float)adc_vbus * 26.0f * 3.3f / 4096.0f;
+  foc.state.temperature_c = (float)__HAL_ADC_CALC_TEMPERATURE(
+      3300U, adc_temperature, ADC_RESOLUTION_12B);
+
+  adc_regular_dma_busy = 0U;
+}
+
+/** @brief ADC1规则组DMA异常后释放忙标志，允许下一周期自动重试。 */
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc) {
+  if ((hadc != NULL) && (hadc->Instance == ADC1)) {
+    adc_regular_dma_busy = 0U;
+  }
 }
 
 
