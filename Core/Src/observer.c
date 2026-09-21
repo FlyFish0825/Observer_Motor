@@ -17,6 +17,8 @@
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config) {
 
+  /* obs保存观测器运行时状态；motor和config提供本次电机的标定参数。 */
+
   obs->motor.Rs = motor->Rs;
   obs->motor.Ls = motor->Ls;
   obs->motor.flux_linkage = motor->flux_linkage;
@@ -62,9 +64,13 @@ Observer_RebuildVoltage(const Observer_Input_t *input,
                         float *u_alpha,
                         float *u_beta)
 {
+  /* 该内联函数只在控制周期内调用，输出静止坐标系的两相电压。 */
+  /* calculated_u_alpha/beta保存由PWM占空比重构的理论电压。 */
   float calculated_u_alpha;
   float calculated_u_beta;
+  /* measured_weight是实测端电压在两路电压之间的融合比例。 */
   float measured_weight;
+  /* vbus是本次采样对应的直流母线电压，单位为V。 */
   float vbus;
 
   vbus = input->vbus;
@@ -122,22 +128,28 @@ Observer_RebuildVoltage(const Observer_Input_t *input,
  *
  */
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
+  /* Rs/Ls/Ts分别为定子电阻、电感和控制采样周期。 */
   float Rs;
   float Ls;
   float Ts;
 
+  /* u_alpha/beta是融合后的定子电压输入。 */
   float u_alpha;
   float u_beta;
 
+  /* x_alpha/beta是积分器保存的定子总磁链。 */
   float x_alpha;
   float x_beta;
 
+  /* psi_alpha/beta是扣除电感磁链后的永磁磁链。 */
   float psi_alpha;
   float psi_beta;
 
+  /* psi_mag_sq用于避免中间步骤反复开方；error是幅值平方误差。 */
   float psi_mag_sq;
   float error;
 
+  /* 径向非线性校正项用于约束磁链幅值。 */
   float correction_alpha;
   float correction_beta;
 
@@ -251,15 +263,20 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
  *   保持上一拍速度继续推算角度
  */
 void Observer_PLL_Run(Observer_Handle_t *obs) {
+  /* psi_alpha_n/beta_n为归一化磁链分量，供PLL鉴相器使用。 */
   float psi_alpha_n;
   float psi_beta_n;
 
+  /* inv_psi_mag避免两次除法；pll_error是SRF鉴相误差。 */
   float inv_psi_mag;
   float pll_error;
+  /* omega_e为PLL输出的电角速度，单位为rad/s。 */
   float omega_e;
 
+  /* CORDIC使用Q31格式的估计角度。 */
   int32_t pll_phase_q31;
 
+  /* 当前磁链幅值是否落在PLL允许的有效区间。 */
   uint8_t psi_valid;
 
   /*
