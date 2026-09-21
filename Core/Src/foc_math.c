@@ -12,17 +12,24 @@
 #include "tim.h"
 #include <stdint.h>
 
-FOC_Handle_t foc = {0};
-FOC_SIN_COS_t foc_sin_cos = {0};
-FOC_SIN_COS_t observer_sin_cos = {0};
-FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE;
+/*
+ * 本文件保存 FOC 的板级采样参数、电流换算、SVPWM 数学计算及 CORDIC
+ * 辅助接口。算法只产生数据和比较值，PWM 外设的具体初始化仍由 CubeMX
+ * 文件负责，避免用户代码被重新生成时覆盖。
+ */
+
+FOC_Handle_t foc = {0}; /* 全局 FOC 运行状态、采样值和观测器实例。 */
+FOC_SIN_COS_t foc_sin_cos = {0}; /* FOC 角度对应的正余弦缓存。 */
+FOC_SIN_COS_t observer_sin_cos = {0}; /* 观测器角度对应的正余弦缓存。 */
+FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE; /* 电机当前运行状态。 */
 
 /* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */
-static uint32_t foc_current_rebuild_threshold = 0U;
+static uint32_t foc_current_rebuild_threshold = 0U; /* 触发三相电流重构的 PWM 阈值。 */
 
 /**
  * @brief FOC 数据初始化。
  */
+/* 初始化 PWM 定时参数、采样增益、校准状态和观测器参数。 */
 void FOC_Data_Init(void) {
   foc.timer.pwm_arr = 3399U;
   foc.timer.adc_trigger = 3398U;
@@ -61,14 +68,14 @@ void FOC_Data_Init(void) {
   foc.state.omega = 0.0f;
 
   /* 新水下电机参数：相电阻0.5 ohm、相电感100 uH、磁链2.84 mWb、7极对。 */
-  Observer_MotorParam_t motor = {
+  Observer_MotorParam_t motor = { /* 当前电机的电阻、电感、磁链和极对数。 */
       .Rs = 0.5f,
       .Ls = 0.000100f,
       .flux_linkage = 0.00284f,
       .pole_pairs = 7
     };
 
-  Observer_Config_t observer_cfg = {
+  Observer_Config_t observer_cfg = { /* 磁链观测器与 SRF-PLL 的运行参数。 */
       /* 磁链观测器保持现有增益和25 kHz更新周期。 */
       .gain = 5e7f,
       .Ts = 0.00004f,
@@ -95,9 +102,10 @@ void FOC_Data_Init(void) {
  * @brief 先设置三相相同的50%比较值，再启用主/互补PWM与CH4采样触发。
  * 相同占空比的理想平均线电压为零，但不代表六个功率开关全部关闭。
  */
+/* 将三相 PWM 和 ADC 触发通道置于安全中点后启动互补输出。 */
 void FOC_PWM_Start(void) {
 
-  uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U;
+  uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U; /* 三相初始 50% 比较值。 */
   TIM1->CCR1 = init_ccr;
   TIM1->CCR2 = init_ccr;
   TIM1->CCR3 = init_ccr;
@@ -115,6 +123,7 @@ void FOC_PWM_Start(void) {
 }
 
 /* 停止三相PWM及CH4；注入ADC仍可处于等待外部触发状态。 */
+/* 停止三相主输出、互补输出以及 ADC 触发 PWM 通道。 */
 void FOC_PWM_Stop(void) {
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
@@ -137,10 +146,10 @@ void FOC_PWM_Stop(void) {
  */
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
                   uint16_t adc3) {
-  uint32_t ccr_a;
-  uint32_t ccr_b;
-  uint32_t ccr_c;
-  uint32_t ccr_max;
+  uint32_t ccr_a;   /* A 相 PWM 比较值。 */
+  uint32_t ccr_b;   /* B 相 PWM 比较值。 */
+  uint32_t ccr_c;   /* C 相 PWM 比较值。 */
+  uint32_t ccr_max; /* 三相中最大的比较值。 */
 
   if (handle == NULL) {
     return;
@@ -208,8 +217,9 @@ void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
  *       两种路径共用ADC规则组，不能同时启动；此函数阻塞等待DMA完成。
  * @return HAL状态。
  */
+/* 使用 DMA 阻塞读取常规 ADC 结果，并在超时后停止两个 DMA 通道。 */
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
-  uint32_t start_tick;
+  uint32_t start_tick; /* 启动 DMA 后的系统 tick，用于超时判断。 */
 
   /*
    * 先启动ADC2，再启动ADC1。
@@ -271,24 +281,24 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
                                 const FOC_TimerConfig_t *timer,
                                 FOC_SVPWM_Output_t *output)
 {
-  float ua;
-  float ub;
-  float uc;
+  float ua; /* A 相参考电压。 */
+  float ub; /* B 相参考电压。 */
+  float uc; /* C 相参考电压。 */
 
-  float u_max;
-  float u_min;
-  float u_span;
+  float u_max; /* 三相参考电压最大值。 */
+  float u_min; /* 三相参考电压最小值。 */
+  float u_span; /* 三相参考电压跨度。 */
 
-  float common_mode;
-  float voltage_scale;
-  float inv_vbus;
+  float common_mode; /* 注入三相的公共模式电压。 */
+  float voltage_scale; /* 母线不足时的比例缩放因子。 */
+  float inv_vbus; /* 母线电压倒数，避免重复除法。 */
 
-  float duty_a;
-  float duty_b;
-  float duty_c;
+  float duty_a; /* A 相限幅后的占空比。 */
+  float duty_b; /* B 相限幅后的占空比。 */
+  float duty_c; /* C 相限幅后的占空比。 */
 
-  uint32_t arr;
-  uint32_t middle_ccr;
+  uint32_t arr; /* PWM 自动重装值。 */
+  uint32_t middle_ccr; /* 母线无效时使用的中点比较值。 */
 
   if (output == NULL)
   {
@@ -406,12 +416,14 @@ HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc, float vbus,
  *
  * 运行期间使用寄存器直接写入和读取，因此这里只配置一次。
  */
+/* 配置 CORDIC 为一次写入、两次读取的余弦/正弦计算模式。 */
 void CORDIC_SinCos_RegisterConfig(void) {
   CORDIC->CSR = CORDIC_FUNCTION_COSINE | CORDIC_PRECISION_6CYCLES |
                 CORDIC_SCALE_0 | CORDIC_NBWRITE_1 | CORDIC_NBREAD_2 |
                 CORDIC_INSIZE_32BITS | CORDIC_OUTSIZE_32BITS;
 }
 
+/* 将弧度角归一化到 [-pi, pi) 并转换为 CORDIC 的 Q1.31 格式。 */
 int32_t CORDIC_RadToQ31(float angle_rad) {
   while (angle_rad >= CORDIC_PI_F) {
     angle_rad -= CORDIC_TWO_PI_F;
@@ -421,7 +433,7 @@ int32_t CORDIC_RadToQ31(float angle_rad) {
     angle_rad += CORDIC_TWO_PI_F;
   }
 
-  float normalized_angle = angle_rad * CORDIC_INV_PI_F;
+  float normalized_angle = angle_rad * CORDIC_INV_PI_F; /* 归一化到 [-1, 1)。 */
 
   /*
    * Q1.31 无法表示正的 +1.0，
@@ -436,10 +448,10 @@ int32_t CORDIC_RadToQ31(float angle_rad) {
 
 HAL_StatusTypeDef CORDIC_SinCos_F32(float angle_rad, float *sin_value,
                                     float *cos_value) {
-  int32_t input_q31;
-  int32_t output_q31[2];
+  int32_t input_q31; /* CORDIC 输入角度的 Q1.31 编码。 */
+  int32_t output_q31[2]; /* CORDIC 输出的余弦和正弦 Q1.31 值。 */
 
-  HAL_StatusTypeDef status;
+  HAL_StatusTypeDef status; /* HAL CORDIC 计算结果状态。 */
 
   if ((sin_value == NULL) || (cos_value == NULL)) {
     return HAL_ERROR;
@@ -468,6 +480,7 @@ HAL_StatusTypeDef CORDIC_SinCos_F32(float angle_rad, float *sin_value,
   return HAL_OK;
 }
 
+/* 直接访问 CORDIC 寄存器，快速输出 Q1.31 正弦和余弦结果。 */
 void CORDIC_SinCos_Q31_Fast(int32_t angle_q31, int32_t *sin_q31,
                             int32_t *cos_q31) {
   /*

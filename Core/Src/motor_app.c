@@ -35,6 +35,8 @@
 /* 25kHz控制周期下250次为10ms，超时后不再使用陈旧端电压。 */
 #define MOTOR_APP_PHASE_VOLTAGE_STALE_COUNT       250U
 
+/* 上述阈值采用迟滞和渐变，防止速度在切换边界附近抖动电压来源。 */
+
 typedef struct {
   /* 实测电压保存在foc.state中；此处仅记录新数据序号与切换状态。 */
   uint32_t sequence;
@@ -51,6 +53,7 @@ typedef struct {
   uint32_t tail;
 } MotorApp_JustFloatFrame_t;
 
+/* 应用层唯一的FOC控制器实例；调试控制台和CAN协议均通过它修改目标。 */
 static FOC_Control_t motor_control;
 
 static MotorApp_VoltageSource_t voltage_source = {
@@ -59,13 +62,18 @@ static MotorApp_VoltageSource_t voltage_source = {
     .measured_weight = 1.0f,
 };
 
+/* DMA直接读取的波形帧，必须保持4字节对齐以满足外设访问要求。 */
 static MotorApp_JustFloatFrame_t just_float_frame
     __attribute__((aligned(4)));
+/* JustFloat波形开关：非零时允许控制中断尝试提交诊断帧。 */
 static volatile uint32_t just_float_enabled = 1U;
 /* 串口set run 1请求启动，set run 0请求停止；上电默认不运行。 */
 static volatile uint32_t motor_run_requested = 0U;
+/* 标记IDLE复位是否已经执行，避免每个控制周期重复停止HAL通道。 */
 static volatile uint8_t motor_idle_reset_done = 0U;
+/* 标记文本串口发送占用期，防止DMA波形与命令回复同时改写USART。 */
 static volatile uint8_t motor_console_tx_active = 0U;
+/* ADC注入中断累计次数，仅用于状态诊断和校准进度观察。 */
 static volatile uint32_t motor_adc_irq_count = 0U;
 
 /** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
@@ -117,6 +125,7 @@ static void MotorApp_DebugConsoleTx(const uint8_t *data, uint16_t length) {
   /* 先禁止中断发起下一帧，等待当前DMA帧完全发完，再发送文本。 */
   motor_console_tx_active = 1U;
   __DMB();
+  /* start记录等待发送器空闲的时间戳，用于限制阻塞时长。 */
   uint32_t start = HAL_GetTick();
   while ((USART1->ISR & USART_ISR_TC) == 0U) {
     if ((HAL_GetTick() - start) >= 100U) {
@@ -165,6 +174,7 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
  * 不等同于控制器输出限幅。例如速度PI的Iq限幅仍由controller.h定义。
  */
 static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
+  /* success累积每个注册调用的结果，任意一项失败都会报告初始化失败。 */
   uint8_t success = 1U;
 
   success &= DebugConsole_RegisterF32("id", &motor_control.id_ref,
@@ -274,6 +284,7 @@ static void MotorApp_JustFloatInit(void) {
  */
 static int MotorApp_SendJustFloat(float f0, float f1, float f2,
                                   float f3, float f4, float f5) {
+  /* f0至f5依次对应电流、转速、角度和母线等诊断通道。 */
   if ((USART1->ISR & USART_ISR_TC) == 0U) {
     return -1;
   }
@@ -332,10 +343,15 @@ static void MotorApp_StartClosedLoop(void) {
  * 包括超时切换在内，实际权重都按20ms渐变，不会立即跳到目标值。
  */
 static void MotorApp_UpdateObserverVoltage(Observer_Input_t *input) {
+  /* snapshot是规则组ADC的完整快照，避免逐通道读取造成撕裂。 */
   BoardAdcMeasurements_t snapshot;
+  /* blend_step为本控制周期的权重增量。 */
   float blend_step;
+  /* speed_abs_rpm用于按转速迟滞选择电压源，正反转共用阈值。 */
   float speed_abs_rpm;
+  /* sequence用于判断快照是否比上次控制周期更新。 */
   uint32_t sequence;
+  /* snapshot_valid表示本次或缓存快照是否仍在允许的有效时间内。 */
   uint8_t snapshot_valid;
 
   snapshot_valid = BoardAdc_GetSnapshot(&snapshot, &sequence);
@@ -398,7 +414,9 @@ static void MotorApp_UpdateObserverVoltage(Observer_Input_t *input) {
  * 这里生成下一次PWM比较值，实际寄存器写入在注入中断尾部统一执行。
  */
 static void MotorApp_RunClosedLoop(void) {
+  /* phase_control是用于本次Park/逆Park变换的电角度。 */
   float phase_control;
+  /* CORDIC输入的Q31角度表示。 */
   uint32_t phase_q31;
 
   /* 外部阶跃先由控制器内部转换为20000rpm/s速度斜坡。 */
@@ -443,6 +461,7 @@ static void MotorApp_RunClosedLoop(void) {
  *  后续由 CubeMX 生成的 GPIO/TIM 初始化代码重新配置为 TIM1 复用功能。
  */
 void MotorApp_ForcePowerStageSafe(void) {
+  /* gpio复用同一结构体依次配置高低桥臂引脚。 */
   GPIO_InitTypeDef gpio = {0};
 
   __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -564,6 +583,7 @@ HAL_StatusTypeDef MotorApp_Init(void) {
  * 因此不放入 25 kHz 的电流环控制中断，避免影响 FOC 控制周期。
  */
 void MotorApp_Process(void) {
+  /* 只发送一次READY，避免主循环高速运行时重复占用串口。 */
   static uint8_t ready_reported = 0U;
   if (ready_reported == 0U) {
     ready_reported = 1U;
@@ -599,8 +619,11 @@ void MotorApp_Process(void) {
  * 注入序列结束JEOS产生，因此读到JDR2时本拍的两个Rank都已完成。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
+  /* 校准计数器只在ADC注入中断上下文中递增，达到样本数后锁定零偏。 */
   static uint16_t calibration_count = 0U;
+  /* observer_input收集本拍电流、母线、占空比和端电压输入。 */
   Observer_Input_t observer_input = {0};
+  /* 三个ADC原始码分别对应U、V、W相电流采样通道。 */
   uint16_t adc_a;
   uint16_t adc_b;
   uint16_t adc_c;

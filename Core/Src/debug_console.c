@@ -1,3 +1,11 @@
+/*
+ * @file debug_console.c
+ * @brief 基于 UART DMA 接收和环形缓冲区的文本调试控制台实现。
+ *
+ * UART/DMA 回调只负责搬运字节，命令解析、变量访问和用户命令执行均在
+ * 主循环 DebugConsole_Process() 中完成，避免在中断上下文执行耗时操作。
+ * 本文件属于用户应用代码，不放置在 CubeMX 生成区内。
+ */
 #include "debug_console.h"
 
 #include <ctype.h>
@@ -10,28 +18,28 @@
 #include <string.h>
 
 /* DMA一次接收的临时缓冲区 */
-#define DC_DMA_RX_SIZE       64U
+#define DC_DMA_RX_SIZE       64U /* 单次 UART DMA 接收缓冲区大小（字节）。 */
 
 /*
  * 中断与主循环之间的环形缓冲区。
  * 必须是2的整数次幂。
  */
-#define DC_RING_SIZE         256U
+#define DC_RING_SIZE         256U /* ISR 与主循环之间共享的环形缓冲区容量。 */
 
 /* 单条文本命令最大长度，包含结尾'\0' */
-#define DC_LINE_SIZE         128U
+#define DC_LINE_SIZE         128U /* 一行命令缓冲区大小，包含结尾空字符。 */
 
 /* 一条命令最多允许的参数数量 */
-#define DC_MAX_ARGS          10
+#define DC_MAX_ARGS          10 /* 单条命令最多解析的参数个数。 */
 
 /* 最大可注册变量数量 */
-#define DC_MAX_VARIABLES     32U
+#define DC_MAX_VARIABLES     32U /* 可通过 get/set 访问的变量表容量。 */
 
 /* 最大可注册自定义命令数量 */
-#define DC_MAX_COMMANDS      16U
+#define DC_MAX_COMMANDS      16U /* 用户自定义命令表容量。 */
 
 /* printf临时输出缓冲区 */
-#define DC_TX_BUFFER_SIZE    192U
+#define DC_TX_BUFFER_SIZE    192U /* printf 格式化时使用的临时发送缓冲区。 */
 
 #if ((DC_RING_SIZE & (DC_RING_SIZE - 1U)) != 0U)
 #error "DC_RING_SIZE must be a power of two"
@@ -39,68 +47,68 @@
 
 typedef enum
 {
-    DC_VAR_F32 = 0,
-    DC_VAR_I32,
-    DC_VAR_U32,
-    DC_VAR_BOOL
+    DC_VAR_F32 = 0, /* 单精度浮点变量。 */
+    DC_VAR_I32,     /* 有符号 32 位整数变量。 */
+    DC_VAR_U32,     /* 无符号 32 位整数变量。 */
+    DC_VAR_BOOL     /* 用 0/1 表示的布尔变量。 */
 } DC_VariableType_t;
 
 typedef union
 {
-    float f32;
-    int32_t i32;
-    uint32_t u32;
+    float f32;      /* 浮点上下限。 */
+    int32_t i32;    /* 有符号整数上下限。 */
+    uint32_t u32;   /* 无符号整数或布尔上下限。 */
 } DC_Value_t;
 
 typedef struct
 {
-    const char *name;
-    volatile void *address;
+    const char *name;          /* 命令行中使用的变量名，指向静态字符串。 */
+    volatile void *address;    /* 被访问的实际变量地址。 */
 
-    DC_VariableType_t type;
-    bool read_only;
+    DC_VariableType_t type;    /* 变量数据类型，决定解析和打印方式。 */
+    bool read_only;            /* 为 true 时只允许读取，禁止 set。 */
 
-    DC_Value_t minimum;
-    DC_Value_t maximum;
+    DC_Value_t minimum;        /* 可写变量允许的最小值。 */
+    DC_Value_t maximum;        /* 可写变量允许的最大值。 */
 } DC_Variable_t;
 
 typedef struct
 {
-    const char *name;
-    DebugConsole_CommandFn_t handler;
-    const char *help;
+    const char *name;                 /* 用户命令名称。 */
+    DebugConsole_CommandFn_t handler; /* 收到命令后的回调函数。 */
+    const char *help;                 /* help 命令显示的说明文本。 */
 } DC_Command_t;
 
 /* ======================== 串口与DMA ======================== */
 
-static UART_HandleTypeDef *dc_uart = NULL;
-static DebugConsole_TxFn_t dc_tx_function = NULL;
+static UART_HandleTypeDef *dc_uart = NULL; /* 当前控制台绑定的 UART。 */
+static DebugConsole_TxFn_t dc_tx_function = NULL; /* 字节发送回调。 */
 
-static uint8_t dc_dma_rx_buffer[DC_DMA_RX_SIZE];
+static uint8_t dc_dma_rx_buffer[DC_DMA_RX_SIZE]; /* DMA 直接写入的接收缓存。 */
 
 /* ======================== 环形缓冲区 ======================== */
 
-static uint8_t dc_ring_buffer[DC_RING_SIZE];
+static uint8_t dc_ring_buffer[DC_RING_SIZE]; /* ISR 到主循环的字节队列。 */
 
-static volatile uint16_t dc_ring_head = 0U;
-static volatile uint16_t dc_ring_tail = 0U;
+static volatile uint16_t dc_ring_head = 0U; /* 下一个写入位置。 */
+static volatile uint16_t dc_ring_tail = 0U; /* 下一个读取位置。 */
 
-static volatile uint32_t dc_overflow_count = 0U;
-static volatile bool dc_rx_restart_pending = false;
+static volatile uint32_t dc_overflow_count = 0U; /* 环形缓冲区溢出累计次数。 */
+static volatile bool dc_rx_restart_pending = false; /* 请求主循环重启 DMA。 */
 
 /* ======================== 行缓冲区 ======================== */
 
-static char dc_line_buffer[DC_LINE_SIZE];
-static uint16_t dc_line_length = 0U;
-static bool dc_line_overflow = false;
+static char dc_line_buffer[DC_LINE_SIZE]; /* 当前正在接收的文本行。 */
+static uint16_t dc_line_length = 0U; /* 当前行已写入的字符数。 */
+static bool dc_line_overflow = false; /* 当前行是否超过缓冲区容量。 */
 
 /* ======================== 变量和命令表 ======================== */
 
-static DC_Variable_t dc_variables[DC_MAX_VARIABLES];
-static uint16_t dc_variable_count = 0U;
+static DC_Variable_t dc_variables[DC_MAX_VARIABLES]; /* 注册变量表。 */
+static uint16_t dc_variable_count = 0U; /* 已注册变量数量。 */
 
-static DC_Command_t dc_commands[DC_MAX_COMMANDS];
-static uint16_t dc_command_count = 0U;
+static DC_Command_t dc_commands[DC_MAX_COMMANDS]; /* 用户自定义命令表。 */
+static uint16_t dc_command_count = 0U; /* 已注册自定义命令数量。 */
 
 /* ======================== 内部函数声明 ======================== */
 
@@ -136,6 +144,7 @@ static void DC_CommandSet(int argc, char *argv[]);
 
 /* ======================== 初始化 ======================== */
 
+/* 绑定 UART 和发送回调，清空控制台状态并启动 DMA 空闲接收。 */
 HAL_StatusTypeDef DebugConsole_Init(
     UART_HandleTypeDef *huart,
     DebugConsole_TxFn_t tx_fn)
@@ -166,9 +175,10 @@ HAL_StatusTypeDef DebugConsole_Init(
     return DC_StartReceive();
 }
 
+/* 启动一次 UART 接收至空闲事件的 DMA 操作，并关闭半传输中断。 */
 static HAL_StatusTypeDef DC_StartReceive(void)
 {
-    HAL_StatusTypeDef status;
+    HAL_StatusTypeDef status; /* DMA 启动操作返回的 HAL 状态。 */
 
     if ((dc_uart == NULL) || (dc_uart->hdmarx == NULL))
     {
@@ -199,11 +209,12 @@ static HAL_StatusTypeDef DC_StartReceive(void)
 
 /* ======================== HAL回调入口 ======================== */
 
+/* HAL UART 接收事件回调：只把 DMA 收到的字节压入环形缓冲区。 */
 void DebugConsole_OnRxEvent(
     UART_HandleTypeDef *huart,
     uint16_t size)
 {
-    uint16_t index;
+    uint16_t index; /* 遍历 DMA 缓冲区的字节下标。 */
 
     if ((dc_uart == NULL) || (huart != dc_uart))
     {
@@ -233,6 +244,7 @@ void DebugConsole_OnRxEvent(
     }
 }
 
+/* HAL UART 错误回调：标记接收需要在主循环中恢复。 */
 void DebugConsole_OnError(
     UART_HandleTypeDef *huart)
 {
@@ -250,10 +262,11 @@ void DebugConsole_OnError(
 
 /* ======================== 环形缓冲区 ======================== */
 
+/* 在中断上下文写入一个字节；队列满时丢弃当前字节并计数。 */
 static void DC_RingPushFromISR(uint8_t data)
 {
-    uint16_t head;
-    uint16_t next;
+    uint16_t head; /* 当前环形缓冲区写指针快照。 */
+    uint16_t next; /* 写入当前字节后将使用的下一个位置。 */
 
     head = dc_ring_head;
 
@@ -278,9 +291,10 @@ static void DC_RingPushFromISR(uint8_t data)
     dc_ring_head = next;
 }
 
+/* 在主循环上下文取出一个字节，返回 false 表示队列为空。 */
 static bool DC_RingPop(uint8_t *data)
 {
-    uint16_t tail;
+    uint16_t tail; /* 当前环形缓冲区读指针快照。 */
 
     if (data == NULL)
     {
@@ -305,9 +319,10 @@ static bool DC_RingPop(uint8_t *data)
 
 /* ======================== 主循环处理 ======================== */
 
+/* 主循环服务函数：恢复 DMA、组装文本行并派发命令。 */
 void DebugConsole_Process(void)
 {
-    uint8_t data;
+    uint8_t data; /* 从环形缓冲区取出的一个输入字节。 */
 
     /*
      * UART出错或DMA重新启动失败时，在主循环恢复。
@@ -395,12 +410,13 @@ void DebugConsole_Process(void)
 
 /* ======================== 命令解析 ======================== */
 
+/* 将一行文本切分为参数并执行内置或用户注册命令。 */
 static void DC_ParseLine(char *line)
 {
-    char *argv[DC_MAX_ARGS];
-    int argc;
+    char *argv[DC_MAX_ARGS]; /* 指向本行各参数起始位置的指针数组。 */
+    int argc;                 /* 本行实际解析出的参数数量。 */
 
-    DC_Command_t *command;
+    DC_Command_t *command;    /* 匹配到的用户自定义命令表项。 */
 
     argc = DC_Tokenize(
         line,
@@ -451,13 +467,14 @@ static void DC_ParseLine(char *line)
         argv[0]);
 }
 
+/* 按空白字符切分命令行；井号及其后的内容作为注释忽略。 */
 static int DC_Tokenize(
     char *line,
     char *argv[],
     int maximum_arguments)
 {
-    char *position;
-    int argc = 0;
+    char *position; /* 当前扫描位置。 */
+    int argc = 0;   /* 已解析参数数量。 */
 
     if ((line == NULL) ||
         (argv == NULL) ||
@@ -519,9 +536,10 @@ static int DC_Tokenize(
 
 /* ======================== 内置命令 ======================== */
 
+/* 输出内置命令和已注册用户命令的帮助信息。 */
 static void DC_CommandHelp(void)
 {
-    uint16_t index;
+    uint16_t index; /* 命令表遍历下标。 */
 
     DebugConsole_Printf(
         "Commands:\r\n"
@@ -543,9 +561,10 @@ static void DC_CommandHelp(void)
     }
 }
 
+/* 输出当前已注册变量及其实时值。 */
 static void DC_CommandList(void)
 {
-    uint16_t index;
+    uint16_t index; /* 变量表遍历下标。 */
 
     DebugConsole_Printf(
         "Variables: %u\r\n",
@@ -559,11 +578,12 @@ static void DC_CommandList(void)
     }
 }
 
+/* 处理 get 命令并打印指定变量。 */
 static void DC_CommandGet(
     int argc,
     char *argv[])
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 根据命令参数查找到的变量表项。 */
 
     if (argc != 2)
     {
@@ -585,15 +605,16 @@ static void DC_CommandGet(
     DC_PrintVariable(variable);
 }
 
+/* 处理 set 命令，完成类型解析、范围检查和变量写入。 */
 static void DC_CommandSet(
     int argc,
     char *argv[])
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 待写入的变量表项。 */
 
-    float value_f32;
-    int32_t value_i32;
-    uint32_t value_u32;
+    float value_f32;   /* 解析出的浮点写入值。 */
+    int32_t value_i32; /* 解析出的有符号整数写入值。 */
+    uint32_t value_u32; /* 解析出的无符号整数或布尔写入值。 */
 
     if (argc != 3)
     {
@@ -717,6 +738,7 @@ static void DC_CommandSet(
 
 /* ======================== 变量输出 ======================== */
 
+/* 按变量类型格式化输出一个变量当前值。 */
 static void DC_PrintVariable(
     const DC_Variable_t *variable)
 {
@@ -775,12 +797,13 @@ static void DC_PrintVariable(
 
 /* ======================== 数值解析 ======================== */
 
+/* 将完整文本转换为有限的单精度浮点数。 */
 static bool DC_ParseF32(
     const char *text,
     float *result)
 {
-    char *end;
-    float value;
+    char *end;   /* strtof 停止解析的位置。 */
+    float value; /* strtof 解析出的浮点值。 */
 
     if ((text == NULL) || (result == NULL))
     {
@@ -806,12 +829,13 @@ static bool DC_ParseF32(
     return true;
 }
 
+/* 将完整文本转换为范围内的有符号 32 位整数。 */
 static bool DC_ParseI32(
     const char *text,
     int32_t *result)
 {
-    char *end;
-    long value;
+    char *end;   /* strtol 停止解析的位置。 */
+    long value;  /* strtol 返回的中间整数值。 */
 
     if ((text == NULL) || (result == NULL))
     {
@@ -844,12 +868,13 @@ static bool DC_ParseI32(
     return true;
 }
 
+/* 将完整文本转换为范围内的无符号 32 位整数。 */
 static bool DC_ParseU32(
     const char *text,
     uint32_t *result)
 {
-    char *end;
-    unsigned long value;
+    char *end;           /* strtoul 停止解析的位置。 */
+    unsigned long value; /* strtoul 返回的中间整数值。 */
 
     if ((text == NULL) || (result == NULL))
     {
@@ -880,6 +905,7 @@ static bool DC_ParseU32(
     return true;
 }
 
+/* 解析 0/1、on/off、true/false、yes/no 等布尔拼写。 */
 static bool DC_ParseBool(
     const char *text,
     uint32_t *result)
@@ -912,6 +938,7 @@ static bool DC_ParseBool(
 
 /* ======================== 注册变量 ======================== */
 
+/* 检查变量名、地址、容量和重名条件是否允许注册。 */
 static bool DC_CanRegisterVariable(
     const char *name,
     const volatile void *address)
@@ -936,6 +963,7 @@ static bool DC_CanRegisterVariable(
     return true;
 }
 
+/* 注册可读写或只读的浮点变量及其合法范围。 */
 bool DebugConsole_RegisterF32(
     const char *name,
     volatile float *value,
@@ -943,7 +971,7 @@ bool DebugConsole_RegisterF32(
     float maximum,
     bool read_only)
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 新变量在注册表中的目标槽位。 */
 
     if (!DC_CanRegisterVariable(name, value))
     {
@@ -972,6 +1000,7 @@ bool DebugConsole_RegisterF32(
     return true;
 }
 
+/* 注册可读写或只读的有符号整数变量及其合法范围。 */
 bool DebugConsole_RegisterI32(
     const char *name,
     volatile int32_t *value,
@@ -979,7 +1008,7 @@ bool DebugConsole_RegisterI32(
     int32_t maximum,
     bool read_only)
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 新变量在注册表中的目标槽位。 */
 
     if (!DC_CanRegisterVariable(name, value))
     {
@@ -1006,6 +1035,7 @@ bool DebugConsole_RegisterI32(
     return true;
 }
 
+/* 注册可读写或只读的无符号整数变量及其合法范围。 */
 bool DebugConsole_RegisterU32(
     const char *name,
     volatile uint32_t *value,
@@ -1013,7 +1043,7 @@ bool DebugConsole_RegisterU32(
     uint32_t maximum,
     bool read_only)
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 新变量在注册表中的目标槽位。 */
 
     if (!DC_CanRegisterVariable(name, value))
     {
@@ -1040,12 +1070,13 @@ bool DebugConsole_RegisterU32(
     return true;
 }
 
+/* 注册以 0/1 存储的布尔变量。 */
 bool DebugConsole_RegisterBool(
     const char *name,
     volatile uint32_t *value,
     bool read_only)
 {
-    DC_Variable_t *variable;
+    DC_Variable_t *variable; /* 新变量在注册表中的目标槽位。 */
 
     if (!DC_CanRegisterVariable(name, value))
     {
@@ -1069,12 +1100,13 @@ bool DebugConsole_RegisterBool(
 
 /* ======================== 注册自定义命令 ======================== */
 
+/* 注册一个用户命令，并拒绝覆盖内置命令或已有同名命令。 */
 bool DebugConsole_RegisterCommand(
     const char *name,
     DebugConsole_CommandFn_t handler,
     const char *help)
 {
-    uint16_t index;
+    uint16_t index; /* 用于检测自定义命令重名的遍历下标。 */
 
     if ((name == NULL) ||
         (name[0] == '\0') ||
@@ -1122,10 +1154,11 @@ bool DebugConsole_RegisterCommand(
 
 /* ======================== 查找 ======================== */
 
+/* 按不区分大小写的名称查找变量表项。 */
 static DC_Variable_t *DC_FindVariable(
     const char *name)
 {
-    uint16_t index;
+    uint16_t index; /* 变量表遍历下标。 */
 
     if (name == NULL)
     {
@@ -1147,10 +1180,11 @@ static DC_Variable_t *DC_FindVariable(
     return NULL;
 }
 
+/* 按不区分大小写的名称查找自定义命令表项。 */
 static DC_Command_t *DC_FindCommand(
     const char *name)
 {
-    uint16_t index;
+    uint16_t index; /* 命令表遍历下标。 */
 
     if (name == NULL)
     {
@@ -1174,6 +1208,7 @@ static DC_Command_t *DC_FindCommand(
 
 /* ======================== 字符串比较 ======================== */
 
+/* 比较两个以空字符结尾的字符串，忽略 ASCII 字母大小写。 */
 static bool DC_StringEqualIgnoreCase(
     const char *left,
     const char *right)
@@ -1202,14 +1237,15 @@ static bool DC_StringEqualIgnoreCase(
 
 /* ======================== 文本发送 ======================== */
 
+/* 使用已注册发送回调输出格式化文本；过长内容会被截断。 */
 void DebugConsole_Printf(
     const char *format,
     ...)
 {
-    static char tx_buffer[DC_TX_BUFFER_SIZE];
+    static char tx_buffer[DC_TX_BUFFER_SIZE]; /* 格式化文本的发送缓存。 */
 
-    va_list arguments;
-    int length;
+    va_list arguments; /* 可变参数遍历状态。 */
+    int length;        /* vsnprintf 生成的字符数量。 */
 
     if ((dc_tx_function == NULL) ||
         (format == NULL))
@@ -1242,6 +1278,7 @@ void DebugConsole_Printf(
         (uint16_t)length);
 }
 
+/* 返回环形接收缓冲区累计丢弃的字节数。 */
 uint32_t DebugConsole_GetOverflowCount(void)
 {
     return dc_overflow_count;

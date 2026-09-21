@@ -11,15 +11,22 @@
 #include <stddef.h>
 
 /* ADC参考电压与PCB分压参数：100kΩ / 5.1kΩ。 */
+/* ADC 模拟参考电压，决定原始计数对应的引脚电压。 */
 #define BOARD_ADC_REFERENCE_VOLTAGE    3.3f
+/* 12位 ADC 的满量程计数数目，采用2^12而非最大码值4095进行换算。 */
 #define BOARD_ADC_FULL_SCALE_COUNTS    4096.0f
+/* PCB 电阻分压网络的输入侧/下臂比例，用于恢复被测端电压。 */
 #define BOARD_ADC_VOLTAGE_DIVIDER_GAIN ((100.0f + 5.1f) / 5.1f)
+/* 将 ADC 计数直接换算为分压器输入侧电压的组合比例系数。 */
 #define BOARD_ADC_COUNT_TO_VOLTAGE                                      \
   (BOARD_ADC_REFERENCE_VOLTAGE / BOARD_ADC_FULL_SCALE_COUNTS *          \
    BOARD_ADC_VOLTAGE_DIVIDER_GAIN)
 
+/* 已完成发布的最近一组母线和三相端电压测量快照。 */
 static BoardAdcMeasurements_t board_adc_measurements = {0};
+/* seqlock 序号：奇数表示主循环正在写入，偶数表示快照可读取。 */
 static volatile uint32_t board_adc_sequence = 0U;
+/* 快照有效标志，避免系统启动时读到尚未采样的零值。 */
 static volatile uint8_t board_adc_valid = 0U;
 
 /**
@@ -28,13 +35,16 @@ static volatile uint8_t board_adc_valid = 0U;
  * 每次轮询最多等待10ms；只允许主循环调用，避免阻塞电流控制中断。
  */
 HAL_StatusTypeDef BoardAdc_Update(void) {
+  /* 暂存本轮完整结果；只有所有 ADC 转换成功才会发布到共享对象。 */
   BoardAdcMeasurements_t next = {0};
+  /* ADC1 三个规则组 Rank 的原始计数：母线、U 相、W 相。 */
   uint16_t adc1_values[3];
 
   /* ADC1规则组间断模式：每次触发只转换一个Rank，读完再推进到下一Rank。
    * 6.5T下连续扫描快于HAL轮询，不能依赖CPU在两个转换之间抢读DR。
    */
   for (uint32_t rank = 0U; rank < 3U; rank++) {
+    /* rank 是当前要触发并读取的 ADC1 规则组序号。 */
     if (HAL_ADC_Start(&hadc1) != HAL_OK) {
       (void)HAL_ADCEx_RegularStop(&hadc1);
       return HAL_ERROR;
@@ -88,8 +98,11 @@ HAL_StatusTypeDef BoardAdc_Update(void) {
  */
 uint8_t BoardAdc_GetSnapshot(BoardAdcMeasurements_t *snapshot,
                              uint32_t *sequence) {
+  /* 先复制到局部，避免直接修改调用者输出。 */
   BoardAdcMeasurements_t local;
+  /* 复制前读取的 seqlock 序号。 */
   uint32_t sequence_before;
+  /* 复制后读取的 seqlock 序号。 */
   uint32_t sequence_after;
 
   if ((snapshot == NULL) || (sequence == NULL) || (board_adc_valid == 0U)) {
@@ -122,5 +135,6 @@ uint8_t BoardAdc_GetSnapshot(BoardAdcMeasurements_t *snapshot,
 }
 
 BoardAdcMeasurements_t *BoardAdc_GetMeasurements(void) {
+  /* 返回共享快照地址，调用者应结合有效标志/序号保证读取一致性。 */
   return &board_adc_measurements;
 }

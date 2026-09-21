@@ -40,6 +40,7 @@
 
 /** @brief 把当前PCB的本地电机状态映射为协议状态码。 */
 static uint8_t MotorProtocol_StateCode(void) {
+  /* 将本地状态压缩为上位机协议规定的有限状态集合。 */
   return (foc_motor_state == FOC_MOTOR_CLOSED_LOOP)
              ? MOTOR_PROTOCOL_STATE_CLOSED_LOOP
              : MOTOR_PROTOCOL_STATE_IDLE;
@@ -108,6 +109,7 @@ static uint8_t MotorProtocol_CRC8(const uint8_t *data, uint8_t len) {
 
 /** @brief 将浮点量按比例量化为有符号 16 位值并饱和。 */
 static int16_t MotorProtocol_S16(float value, float scale) {
+  /* scaled保存量化后的中间值，先饱和再转换以避免窄类型溢出。 */
   float scaled = value * scale;
   if (scaled > 32767.0f) return 32767;
   if (scaled < -32768.0f) return -32768;
@@ -116,6 +118,7 @@ static int16_t MotorProtocol_S16(float value, float scale) {
 
 /** @brief 将浮点量按比例量化为无符号 16 位值并饱和。 */
 static uint16_t MotorProtocol_U16(float value, float scale) {
+  /* 无符号字段的负值统一钳到零，防止转换产生大正数。 */
   float scaled = value * scale;
   if (scaled < 0.0f) return 0U;
   if (scaled > 65535.0f) return 65535U;
@@ -124,6 +127,7 @@ static uint16_t MotorProtocol_U16(float value, float scale) {
 
 /** @brief 将浮点量量化为有符号 8 位值并饱和。 */
 static int8_t MotorProtocol_S8(float value) {
+  /* 8位状态或保留量使用有符号范围进行饱和。 */
   if (value > 127.0f) return 127;
   if (value < -128.0f) return -128;
   return (int8_t)value;
@@ -147,6 +151,7 @@ static HAL_StatusTypeDef MotorProtocol_Send(uint32_t identifier,
                                             uint32_t data_length,
                                             uint32_t fd_format,
                                             uint8_t *data) {
+  /* header描述本次发送的标准ID、帧格式、DLC和位速率切换。 */
   FDCAN_TxHeaderTypeDef header = {0}; /* HAL 发送头，固定为标准数据帧。 */
 
   if ((motor_protocol.fdcan == NULL) ||
@@ -204,7 +209,9 @@ static void MotorProtocol_SetRun(uint8_t run) {
  * @note 数据布局由上位机协议固定；未使用的温度字段保持为零。
  */
 static void MotorProtocol_SendNormalFeedback(void) {
+  /* data按协议固定偏移打包，数组清零同时保证保留字段为零。 */
   uint8_t data[12] = {0}; /* 反馈帧缓冲区。 */
+  /* flags逐位报告校准、速度环和SVPWM限幅状态。 */
   uint8_t flags = 0U;    /* 校准、速度环、SVPWM 限幅状态位。 */
 
   MotorProtocol_PutS16(&data[0],
@@ -227,6 +234,7 @@ static void MotorProtocol_SendNormalFeedback(void) {
 
 /** @brief 发送包含电流、dq 量、相位和状态的调试反馈帧。 */
 static void MotorProtocol_SendDebugFeedback(void) {
+  /* 调试帧容量按CAN FD最大长度分配，实际发送长度由协议常量决定。 */
   uint8_t data[64] = {0}; /* CAN FD 调试帧，未使用的尾部保持为零。 */
 
   MotorProtocol_PutS16(&data[0],
@@ -259,6 +267,7 @@ static void MotorProtocol_SendDebugFeedback(void) {
 
 /** @brief 发送 Classic CAN 心跳帧，供网关监测节点在线状态。 */
 static void MotorProtocol_SendHeartbeat(void) {
+  /* 心跳载荷包括节点状态、调试状态、限幅状态和序号。 */
   uint8_t data[8] = {0}; /* 7 字节状态数据 + 1 字节 CRC。 */
   data[0] = motor_protocol.node_id;
   data[1] = MotorProtocol_StateCode();
@@ -283,8 +292,11 @@ static void MotorProtocol_HandleBoot(const uint8_t data[8]) {
   }
 
 #if APP_WITH_BOOTLOADER
+  /* ack是进入Boot前发送给上位机的确认帧。 */
   uint8_t ack[8] = {0};
+  /* request保存HAL发送队列中该确认帧对应的完成位。 */
   uint32_t request;
+  /* start用于限制等待发送完成的阻塞时间。 */
   uint32_t start;
 
   MotorApp_RequestRun(0U);
@@ -329,12 +341,16 @@ static void MotorProtocol_HandleBoot(const uint8_t data[8]) {
 
 /** @brief 解析固定24字节多节点控制帧并更新本节点目标。 */
 static void MotorProtocol_HandleVector(const uint8_t data[24]) {
+  /* index指向本节点在速度数组和运行位图中的零基索引。 */
   uint8_t index;
+  /* mask是控制帧携带的目标节点位图。 */
   uint8_t mask;
 
   if (data[0] != 1U) return;
   if (data[1] == MOTOR_PROTOCOL_CMD_DEBUG_SELECT) {
+    /* debug_mask描述独占调试节点；valid用于拒绝多节点或空位图。 */
     uint8_t debug_mask = data[2];
+    /* valid为1表示调试选择帧格式正确且只选择了一个节点。 */
     uint8_t valid = ((debug_mask != 0U) &&
                      ((debug_mask & (uint8_t)(debug_mask - 1U)) == 0U) &&
                      (data[3] != 0U)) ? 1U : 0U;
@@ -358,6 +374,7 @@ static void MotorProtocol_HandleVector(const uint8_t data[24]) {
   if ((data[1] == MOTOR_PROTOCOL_CMD_SPEED_VECTOR) ||
       (data[1] == MOTOR_PROTOCOL_CMD_RUN_VECTOR)) {
     if (data[1] == MOTOR_PROTOCOL_CMD_SPEED_VECTOR) {
+      /* speed_rpm是本节点在向量帧中对应的有符号转速目标。 */
       int16_t speed_rpm;
       memcpy(&speed_rpm, &data[8U + (2U * index)], sizeof(speed_rpm));
       if ((speed_rpm < -10000) || (speed_rpm > 10000)) return;
@@ -385,6 +402,7 @@ static void MotorProtocol_HandleLegacy(const uint8_t data[8]) {
   if (data[1] == 0x01U) {
     MotorProtocol_SetRun(data[3]);
   } else if (data[1] == 0x02U) {
+    /* 旧版帧直接携带IEEE754 float速度，兼容历史上位机。 */
     float speed_rpm;
     memcpy(&speed_rpm, &data[3], sizeof(speed_rpm));
     if ((speed_rpm == speed_rpm) && speed_rpm >= -10000.0f &&
@@ -398,6 +416,7 @@ static void MotorProtocol_HandleLegacy(const uint8_t data[8]) {
 
 /** @brief 按标准ID、帧格式和长度分派一项接收帧。 */
 static void MotorProtocol_HandleRx(const MotorProtocol_RxItem_t *item) {
+  /* header只读引用接收项中的HAL元数据，避免复制大结构体。 */
   const FDCAN_RxHeaderTypeDef *header = &item->header;
   if ((header->IdType != FDCAN_STANDARD_ID) ||
       (header->RxFrameType != FDCAN_DATA_FRAME)) {
@@ -422,8 +441,10 @@ static void MotorProtocol_HandleRx(const MotorProtocol_RxItem_t *item) {
 static void MotorProtocol_PollRx(void) {
   while (HAL_FDCAN_GetRxFifoFillLevel(motor_protocol.fdcan,
                                       FDCAN_RX_FIFO0) > 0U) {
+    /* next为写入一帧后的候选位置；等于tail时保留一格表示队列满。 */
     uint8_t next = (uint8_t)((motor_protocol.rx_head + 1U) %
                              MOTOR_PROTOCOL_RX_RING_SIZE);
+    /* item指向当前写入槽，HAL直接填充其头和数据区。 */
     MotorProtocol_RxItem_t *item = &motor_protocol.rx_ring[motor_protocol.rx_head];
     if (HAL_FDCAN_GetRxMessage(motor_protocol.fdcan, FDCAN_RX_FIFO0,
                                &item->header, item->data) != HAL_OK) {
@@ -437,11 +458,13 @@ static void MotorProtocol_PollRx(void) {
 
 /** @brief 使用HAL tick执行1ms时隙反馈调度，不引入新的底层定时器。 */
 static void MotorProtocol_RunScheduler(uint32_t now) {
+  /* elapsed是自上次调度以来经过的毫秒数，过大时限制补偿步数。 */
   uint32_t elapsed = now - motor_protocol.last_tick;
   if (elapsed > 20U) elapsed = 20U;
   while (elapsed-- != 0U) {
     motor_protocol.last_tick++;
     if (MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED != 0U) {
+      /* slot是当前毫秒在节点轮询时隙中的位置。 */
       uint8_t slot = motor_protocol.timer_slot++;
       if (motor_protocol.timer_slot >= MOTOR_PROTOCOL_SLOT_COUNT) {
         motor_protocol.timer_slot = 0U;
@@ -463,7 +486,9 @@ static void MotorProtocol_RunScheduler(uint32_t now) {
 /** @brief 配置协议过滤器、启动FDCAN并发送上电HELLO。 */
 HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
                                      FOC_Control_t *control) {
+  /* filter描述当前PCB唯一的标准ID掩码过滤器。 */
   FDCAN_FilterTypeDef filter = {0};
+  /* node_id保存从Flash读取并经过范围校验后的节点地址。 */
   uint8_t node_id;
   if ((hfdcan == NULL) || (control == NULL)) return HAL_ERROR;
 
@@ -512,7 +537,9 @@ void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim) {
 
 /** @brief 在主循环轮询接收队列并运行反馈、心跳调度。 */
 void MotorProtocol_Process(void) {
+  /* item是从应用层接收环形队列取出的临时帧副本。 */
   MotorProtocol_RxItem_t item;
+  /* now用于驱动周期反馈和1秒心跳调度。 */
   uint32_t now;
   if ((motor_protocol.fdcan == NULL) || (motor_protocol.control == NULL)) return;
 

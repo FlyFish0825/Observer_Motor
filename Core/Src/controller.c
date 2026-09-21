@@ -9,6 +9,12 @@
 #include "arm_math.h"
 #include <stddef.h>
 
+/*
+ * 本文件实现电流环、速度环 PI 控制器以及两环之间的调度。
+ * 这里仅保存控制算法状态和计算结果；外设寄存器的读写由应用层完成，
+ * 因此 CubeMX 重新生成初始化文件时不会覆盖本文件中的控制逻辑。
+ */
+
 /**
  * @brief 浮点限幅
  */
@@ -30,8 +36,8 @@ static inline float PI_Clamp(float value, float minimum, float maximum) {
 static float FOC_SlewSpeedReference(float current, float target,
                                     float slew_rpm_per_s,
                                     float sample_time) {
-  float maximum_step;
-  float delta;
+  float maximum_step; /* 当前采样周期内允许的最大转速变化量。 */
+  float delta;        /* 目标转速与当前平滑转速之间的差值。 */
 
   if ((!isfinite(current)) || (!isfinite(target))) {
     return 0.0f;
@@ -62,7 +68,7 @@ static float FOC_SlewSpeedReference(float current, float target,
  * @brief 修正限幅参数顺序
  */
 static void PI_NormalizeLimits(float *minimum, float *maximum) {
-  float temporary;
+  float temporary; /* 交换上下限时使用的临时变量。 */
 
   if ((*minimum) > (*maximum)) {
     temporary = *minimum;
@@ -77,6 +83,7 @@ static void PI_NormalizeLimits(float *minimum, float *maximum) {
  */
 void PI_Controller_Init(PI_Controller_t *pi, float kp, float ki,
                         float sample_time, float output_min, float output_max) {
+  /* 初始化增益、采样周期、输出上下限，并清零历史积分状态。 */
   if (pi == NULL) {
     return;
   }
@@ -104,6 +111,7 @@ void PI_Controller_Init(PI_Controller_t *pi, float kp, float ki,
 }
 
 /* 仅清除误差、积分和输出历史，保留增益、周期与限幅参数。 */
+/* 清除误差、积分和输出历史，但保留控制器的增益与限幅配置。 */
 void PI_Controller_Reset(PI_Controller_t *pi) {
   if (pi == NULL) {
     return;
@@ -122,6 +130,7 @@ void PI_Controller_Reset(PI_Controller_t *pi) {
   pi->saturation = PI_SATURATION_NONE;
 }
 
+/* 根据给定参考值和反馈值计算一次闭环 PI 输出。 */
 float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback) {
   if (pi == NULL) {
     return 0.0f;
@@ -140,21 +149,21 @@ float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback) {
  * 允许积分退出饱和。此函数不改reference/feedback，由普通Run接口填写。
  */
 float PI_Controller_RunError(PI_Controller_t *pi, float error) {
-  float kp;
-  float ki;
-  float sample_time;
+  float kp;          /* 本次计算使用的比例增益快照。 */
+  float ki;          /* 本次计算使用的积分增益快照。 */
+  float sample_time; /* 积分离散化所用的采样周期。 */
 
-  float output_min;
-  float output_max;
+  float output_min; /* PI 输出下限。 */
+  float output_max; /* PI 输出上限。 */
 
-  float integral_min;
-  float integral_max;
+  float integral_min; /* 积分项下限。 */
+  float integral_max; /* 积分项上限。 */
 
-  float integral_old;
-  float integral_candidate;
+  float integral_old;       /* 上一次保存的积分项。 */
+  float integral_candidate; /* 当前误差积分后的候选值。 */
 
-  float output_unsaturated;
-  float output;
+  float output_unsaturated; /* 尚未经过输出限幅的 PI 结果。 */
+  float output;             /* 限幅后的最终输出。 */
 
   if (pi == NULL) {
     return 0.0f;
@@ -225,6 +234,7 @@ float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   return output;
 }
 
+/* 运行时更新比例和积分增益，不改变积分历史。 */
 void PI_Controller_SetGains(PI_Controller_t *pi, float kp, float ki) {
   if (pi == NULL) {
     return;
@@ -234,6 +244,7 @@ void PI_Controller_SetGains(PI_Controller_t *pi, float kp, float ki) {
   pi->ki = ki;
 }
 
+/* 运行时更新离散积分使用的采样周期。 */
 void PI_Controller_SetSampleTime(PI_Controller_t *pi, float sample_time) {
   if (pi == NULL) {
     return;
@@ -246,6 +257,7 @@ void PI_Controller_SetSampleTime(PI_Controller_t *pi, float sample_time) {
   pi->sample_time = sample_time;
 }
 
+/* 同时设置输出和积分限幅，并立即修正已有状态。 */
 void PI_Controller_SetLimits(PI_Controller_t *pi, float minimum,
                              float maximum) {
   if (pi == NULL) {
@@ -265,6 +277,7 @@ void PI_Controller_SetLimits(PI_Controller_t *pi, float minimum,
   pi->output = PI_Clamp(pi->output, minimum, maximum);
 }
 
+/* 仅设置 PI 输出限幅；积分限幅保持不变。 */
 void PI_Controller_SetOutputLimits(PI_Controller_t *pi, float minimum,
                                    float maximum) {
   if (pi == NULL) {
@@ -279,6 +292,7 @@ void PI_Controller_SetOutputLimits(PI_Controller_t *pi, float minimum,
   pi->output = PI_Clamp(pi->output, minimum, maximum);
 }
 
+/* 仅设置积分项限幅，并将当前积分值夹到新范围内。 */
 void PI_Controller_SetIntegralLimits(PI_Controller_t *pi, float minimum,
                                      float maximum) {
   if (pi == NULL) {
@@ -299,8 +313,8 @@ void PI_Controller_SetIntegralLimits(PI_Controller_t *pi, float minimum,
  */
 void PI_Controller_PreloadOutput(PI_Controller_t *pi, float desired_output,
                                  float reference, float feedback) {
-  float output_min;
-  float output_max;
+  float output_min; /* 预加载时采用的输出下限。 */
+  float output_max; /* 预加载时采用的输出上限。 */
 
   if (pi == NULL) {
     return;
@@ -342,8 +356,9 @@ void PI_Controller_PreloadOutput(PI_Controller_t *pi, float desired_output,
 
 /* ======================== FOC电流环/速度环 ======================== */
 
+/* 初始化电流环、速度环及其调度状态，建立启动时的默认参考值。 */
 void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
-  float speed_loop_sample_time;
+  float speed_loop_sample_time; /* 速度环分频后对应的离散采样周期。 */
 
   if (control == NULL) {
     return;
@@ -400,6 +415,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
 }
 
+/* 复位两个 PI 的历史状态和 FOC 运行时反馈，不改变参考值配置。 */
 void FOC_Control_Reset(FOC_Control_t *control) {
   if (control == NULL) {
     return;
@@ -425,15 +441,16 @@ void FOC_Control_Reset(FOC_Control_t *control) {
   control->voltage_limit = 0.0f;
 }
 
+/* 执行一次电流环控制，并按分频条件更新速度环输出。 */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,
                      float dc_bus_voltage, float *ud_output,
                      float *uq_output) {
-  float uq_limit_squared;
-  float uq_limit;
-  float voltage_limit;
-  uint32_t speed_enabled;
-  uint16_t speed_divider;
+  float uq_limit_squared; /* 扣除 d 轴电压后的 q 轴电压平方余量。 */
+  float uq_limit;         /* q 轴 PI 的动态输出限幅。 */
+  float voltage_limit;    /* 当前母线电压下允许的电压矢量幅值。 */
+  uint32_t speed_enabled; /* 规范化后的速度环使能状态。 */
+  uint16_t speed_divider; /* 速度环相对电流环的执行分频。 */
 
   if (control == NULL) {
     if (ud_output != NULL) {
@@ -548,6 +565,7 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
   }
 }
 
+/* 设置速度环使能请求；模式切换和 PI 预加载在下一次控制周期处理。 */
 void FOC_Control_EnableSpeedLoop(FOC_Control_t *control, uint8_t enable) {
   if (control == NULL) {
     return;
