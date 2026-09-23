@@ -67,10 +67,14 @@ void DebugConsole_OnRxEvent(
 void DebugConsole_OnError(
     UART_HandleTypeDef *huart);
 
-/*
- * 注册可调变量。
- *
- * name字符串必须一直有效，建议直接传字符串常量。
+/**
+ * @brief 注册一个可读写或只读的浮点变量及其合法范围。
+ * @param name     命令行中使用的变量名，字符串必须全程有效（建议传字符串常量）。
+ * @param value    被访问的浮点变量地址。
+ * @param minimum  允许写入的最小值。
+ * @param maximum  允许写入的最大值。
+ * @param read_only true时只允许get，禁止set。
+ * @return true注册成功；false名称重复、容量满或参数无效。
  */
 bool DebugConsole_RegisterF32(
     const char *name,
@@ -79,6 +83,15 @@ bool DebugConsole_RegisterF32(
     float maximum,
     bool read_only);
 
+/**
+ * @brief 注册一个可读写或只读的有符号32位整数变量。
+ * @param name     变量名，必须全程有效。
+ * @param value    被访问的int32变量地址。
+ * @param minimum  允许写入的最小值。
+ * @param maximum  允许写入的最大值。
+ * @param read_only true时只允许get，禁止set。
+ * @return true注册成功；false名称重复、容量满或参数无效。
+ */
 bool DebugConsole_RegisterI32(
     const char *name,
     volatile int32_t *value,
@@ -86,6 +99,15 @@ bool DebugConsole_RegisterI32(
     int32_t maximum,
     bool read_only);
 
+/**
+ * @brief 注册一个可读写或只读的无符号32位整数变量。
+ * @param name     变量名，必须全程有效。
+ * @param value    被访问的uint32变量地址。
+ * @param minimum  允许写入的最小值。
+ * @param maximum  允许写入的最大值。
+ * @param read_only true时只允许get，禁止set。
+ * @return true注册成功；false名称重复、容量满或参数无效。
+ */
 bool DebugConsole_RegisterU32(
     const char *name,
     volatile uint32_t *value,
@@ -93,11 +115,12 @@ bool DebugConsole_RegisterU32(
     uint32_t maximum,
     bool read_only);
 
-/*
- * BOOL使用uint32_t存储：
- *
- * 0 = false
- * 1 = true
+/**
+ * @brief 注册一个以0/1存储的布尔变量。
+ * @param name      变量名，必须全程有效。
+ * @param value     被访问的uint32变量地址（0=false, 1=true）。
+ * @param read_only true时只允许get，禁止set。
+ * @return true注册成功；false名称重复或容量满。
  */
 bool DebugConsole_RegisterBool(
     const char *name,
@@ -105,7 +128,11 @@ bool DebugConsole_RegisterBool(
     bool read_only);
 
 /**
- * @brief 注册自定义命令
+ * @brief 注册自定义命令。
+ * @param name    命令名称，字符串必须全程有效；不能与内置命令（help/list/get/set）重名。
+ * @param handler 收到命令后的回调函数，接收argc和argv。
+ * @param help    help命令显示的说明文本，可为NULL。
+ * @return true注册成功；false名称冲突、容量满或参数无效。
  */
 bool DebugConsole_RegisterCommand(
     const char *name,
@@ -113,14 +140,17 @@ bool DebugConsole_RegisterCommand(
     const char *help);
 
 /**
- * @brief 由自定义命令输出文本
+ * @brief 格式化输出文本到串口（通过注册的发送回调）。
+ * @param format printf风格的格式字符串，后跟对应参数。
+ * @note 输出超过192字节会被截断；在中断中调用时须确保发送回调安全。
  */
 void DebugConsole_Printf(
     const char *format,
     ...);
 
 /**
- * @brief 获取接收环形缓冲区溢出次数
+ * @brief 获取接收环形缓冲区累计溢出（丢弃）的字节数。
+ * @return 溢出字节总数，可用于诊断串口接收是否过快。
  */
 uint32_t DebugConsole_GetOverflowCount(void);
 

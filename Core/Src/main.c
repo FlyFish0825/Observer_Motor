@@ -141,8 +141,9 @@ int main(void)
 }
 
 /**
-  * @brief System Clock Configuration
-  * @retval None
+  * @brief 系统时钟配置：HSE 8MHz → PLL(M=4, N=85, P=2) → 170MHz SYSCLK。
+  * @retval None（失败进入Error_Handler死循环）。
+  * @note Flash等待周期设为4WS，对应170MHz @ 1.7V BOOST模式。
   */
 void SystemClock_Config(void)
 {
@@ -186,21 +187,42 @@ void SystemClock_Config(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+/**
+ * @brief ADC注入转换完成回调（HAL层）。
+ * @param hadc 完成转换的ADC句柄；仅ADC1触发控制流程，ADC2在此被忽略。
+ */
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc)
 {
   MotorApp_OnInjectedConversion(hadc);
 }
 
+/**
+ * @brief UART接收事件回调：DMA空闲或传输完成时由HAL调用。
+ * @param huart 产生事件的UART句柄。
+ * @param size  本次事件收到的字节数。
+ */
 void HAL_UARTEx_RxEventCallback(UART_HandleTypeDef *huart, uint16_t size)
 {
   DebugConsole_OnRxEvent(huart, size);
 }
 
+/**
+ * @brief UART错误回调：帧错误、噪声、溢出等。
+ * @param huart 产生错误的UART句柄。
+ */
 void HAL_UART_ErrorCallback(UART_HandleTypeDef *huart)
 {
   DebugConsole_OnError(huart);
 }
 
+/**
+ * @brief 重定向printf/标准输出到USART1（半主机模式）。
+ * @param file   文件描述符（未使用）。
+ * @param data   待发送的文本数据。
+ * @param length 待发送的字节数。
+ * @return 实际发送的字节数；失败返回-1。
+ */
 int _write(int file, char *data, int length)
 {
   (void)file;

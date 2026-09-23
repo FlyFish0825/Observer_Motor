@@ -1,3 +1,11 @@
+/**
+ * @file app_memory.h
+ * @brief APP Flash布局宏定义，控制链接地址和Bootloader行为编译开关。
+ *
+ * CMake预设通过 -DAPP_LAYOUT=standalone|boot 覆盖下面两个宏：
+ * - standalone：APP从0x08000000启动，不使用Bootloader。
+ * - boot：APP从0x08005000启动，启用CAN返回Bootloader逻辑。
+ */
 #ifndef APP_MEMORY_H
 #define APP_MEMORY_H
 

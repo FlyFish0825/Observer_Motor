@@ -66,18 +66,30 @@ typedef struct {
 } FOC_SIN_COS_t;
 
 
+/**
+ * @brief 三相电流重构相选择
+ *
+ * 当某一相PWM占空比接近100%时，该相低侧导通窗口过短，
+ * 分流电阻采样不可靠，需用另外两相电流重构（Ia+Ib+Ic=0）。
+ * 该枚举记录本拍选择重构的是哪一相。
+ */
 typedef enum {
 
-  CURRENT_REBUILD_A = 0,
-  CURRENT_REBUILD_B,
-  CURRENT_REBUILD_C
+  CURRENT_REBUILD_A = 0, /**< 重构A相电流（U相） */
+  CURRENT_REBUILD_B,     /**< 重构B相电流（V相） */
+  CURRENT_REBUILD_C      /**< 重构C相电流（W相） */
 
 } FOC_CurrentRebuild_t;
 
+/**
+ * @brief 电机运行状态
+ *
+ * 控制中断内切换：IDLE时功率桥关闭，CLOSED_LOOP时执行FOC闭环。
+ */
 typedef enum
 {
-    FOC_MOTOR_IDLE = 0,
-    FOC_MOTOR_CLOSED_LOOP,
+    FOC_MOTOR_IDLE = 0,      /**< 空闲状态，功率桥关闭，仅保留ADC采样触发 */
+    FOC_MOTOR_CLOSED_LOOP,   /**< 闭环运行，执行观测器+双闭环+SVPWM */
 
 } FOC_Motor_State_t;
 
@@ -222,18 +234,55 @@ extern FOC_Motor_State_t foc_motor_state;
 
 /* ======================== FOC 相关函数 ======================== */
 
+/**
+ * @brief 初始化FOC全部板级参数、电机模型和观测器配置。
+ * @note 必须在 MX_TIM1_Init() 之前调用，因为定时器初始化会读取 foc.timer 参数。
+ */
 void FOC_Data_Init(void);
 
+/**
+ * @brief 启动三相互补PWM和CH4 ADC触发。
+ * @note 启动前先将三相CCR置为50%中点，避免跳变产生冲击。
+ */
 void FOC_PWM_Start(void);
+
+/**
+ * @brief 停止三相主/互补PWM和CH4触发通道。
+ */
 void FOC_PWM_Stop(void);
 
+/**
+ * @brief 使用DMA阻塞读取ADC规则组（保留接口，当前未使用）。
+ * @return HAL_OK成功，HAL_TIMEOUT超时，HAL_ERROR启动失败。
+ */
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void);
+
+/**
+ * @brief 三相电流ADC零偏校准（已废弃，校准逻辑移入motor_app.c）。
+ * @note 保留声明以兼容旧代码；实际校准在MotorApp_OnInjectedConversion中完成。
+ */
 void FOC_Iabc_Calibration(void);
+
+/**
+ * @brief 将三相ADC原始计数换算为电流，并在占空比超限时重构一相。
+ * @param handle  FOC全局句柄指针，保存零偏、增益和运行状态。
+ * @param adc1    ADC1注入Rank1原始计数（U相电流）。
+ * @param adc2    ADC2注入Rank1原始计数（V相电流）。
+ * @param adc3    ADC1注入Rank2原始计数（W相电流）。
+ */
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
 
 
 /* ======================== FOC 计算函数 ======================== */
 
+/**
+ * @brief 基于公共模注入的SVPWM计算，将三相电压命令转为占空比和CCR。
+ * @param u_abc   三相参考电压（V），来自逆Clarke变换。
+ * @param vbus    直流母线电压（V），用于计算占空比和电压限幅。
+ * @param timer   定时器参数（使用pwm_arr字段）。
+ * @param output  输出结构体，填充三相占空比、CCR和公共模信息。
+ * @return HAL_OK正常或发生限幅；HAL_ERROR参数无效或母线过低。
+ */
 HAL_StatusTypeDef FOC_SVPWM_Run(const FOC_ABC_t *u_abc,float vbus,const FOC_TimerConfig_t *timer,
     FOC_SVPWM_Output_t *output);
 

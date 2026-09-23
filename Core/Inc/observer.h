@@ -172,13 +172,28 @@ typedef struct {
 
 } Observer_Handle_t;
 
+/**
+ * @brief 初始化观测器：复制电机参数和配置，设置初始磁链为alpha轴正方向。
+ * @param obs    观测器句柄指针，保存运行时状态。
+ * @param motor  电机参数（Rs、Ls、磁链、极对数），只读。
+ * @param config 观测器配置（增益、周期、PLL参数），只读。
+ */
+
 void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config);
 
-/* 每拍调用：融合电压、积分磁链、提取原始角度，再更新PLL。 */
+/**
+ * @brief 每控制周期调用一次：融合电压、积分磁链、提取原始角度，再更新PLL。
+ * @param obs    观测器句柄指针。
+ * @param input  本拍输入（占空比、实测电压、权重、母线、电流），只读。
+ */
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input);
 
-/* 由Observer_Run调用；独立调用时须先准备有效的磁链状态及已初始化句柄。 */
+/**
+ * @brief 执行SRF-PLL鉴相和速度估计，由Observer_Run内部调用。
+ * @note 独立调用时须先准备有效的磁链状态及已初始化句柄。
+ * @param obs 观测器句柄指针。
+ */
 void Observer_PLL_Run(Observer_Handle_t *obs);
 
 #endif

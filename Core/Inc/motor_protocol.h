@@ -36,9 +36,23 @@ extern "C" {
 /* 0x000上的APP管理命令。 */
 #define MOTOR_PROTOCOL_CMD_ENTER_BOOT       0x04U
 
+/**
+ * @brief 初始化FDCAN协议：配置过滤器、读取节点号、启动CAN并发送HELLO。
+ * @param hfdcan  CubeMX生成的FDCAN句柄指针。
+ * @param control 电机控制器指针，协议层通过它写入速度命令。
+ * @return HAL_OK初始化成功；HAL_ERROR参数无效或FDCAN配置失败。
+ */
 HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
                                      FOC_Control_t *control);
+/**
+ * @brief 主循环周期调用：轮询接收帧、解析控制命令、发送反馈和心跳。
+ * @note 包含阻塞式调度，不可在中断中调用。
+ */
 void MotorProtocol_Process(void);
+/**
+ * @brief 保留的定时器tick接口；当前PCB由主循环HAL_GetTick调度，此函数为空。
+ * @param htim 未使用的TIM句柄。
+ */
 void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim);
 
 #ifdef __cplusplus

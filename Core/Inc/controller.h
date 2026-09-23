@@ -139,27 +139,89 @@ typedef struct {
 
 /* ======================== 通用PI接口 ======================== */
 
+/**
+ * @brief 初始化PI控制器并清零运行状态。
+ * @param pi          PI控制器结构体指针。
+ * @param kp          比例增益，单位 = 输出单位/输入单位。
+ * @param ki          积分增益，单位 = 输出单位/(输入单位·s)。
+ * @param sample_time 离散积分使用的采样周期（s）。
+ * @param output_min  输出下限（同时作为积分下限默认值）。
+ * @param output_max  输出上限（同时作为积分上限默认值）。
+ */
 void PI_Controller_Init(PI_Controller_t *pi, float kp, float ki,
                         float sample_time, float output_min, float output_max);
 
+/**
+ * @brief 给定参考和反馈值，计算一次PI输出。
+ * @param pi        PI控制器指针。
+ * @param reference 参考值（目标）。
+ * @param feedback  反馈值（实测）。
+ * @return 限幅后的PI输出。
+ */
 float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback);
 
+/**
+ * @brief 直接使用误差值计算一次PI输出（适用于PLL等已计算好误差的场景）。
+ * @param pi     PI控制器指针。
+ * @param error  本拍误差（= reference - feedback）。
+ * @return 限幅后的PI输出。
+ */
 float PI_Controller_RunError(PI_Controller_t *pi, float error);
 
+/**
+ * @brief 清除PI运行状态（误差、积分、输出），保留增益和限幅配置。
+ * @param pi PI控制器指针。
+ */
 void PI_Controller_Reset(PI_Controller_t *pi);
 
+/**
+ * @brief 运行时更新比例和积分增益，不改变积分历史。
+ * @param pi   PI控制器指针。
+ * @param kp   新的比例增益。
+ * @param ki   新的积分增益。
+ */
 void PI_Controller_SetGains(PI_Controller_t *pi, float kp, float ki);
 
+/**
+ * @brief 运行时更新离散积分的采样周期。
+ * @param pi          PI控制器指针。
+ * @param sample_time 新的采样周期（s），负值被钳为0。
+ */
 void PI_Controller_SetSampleTime(PI_Controller_t *pi, float sample_time);
 
+/**
+ * @brief 同时设置输出和积分限幅，并立即将已有状态修正到新范围。
+ * @param pi      PI控制器指针。
+ * @param minimum 新的下限（自动与maximum交换若顺序颠倒）。
+ * @param maximum 新的上限。
+ */
 void PI_Controller_SetLimits(PI_Controller_t *pi, float minimum, float maximum);
 
+/**
+ * @brief 仅设置PI输出限幅；积分限幅保持不变。
+ * @param pi      PI控制器指针。
+ * @param minimum 输出下限。
+ * @param maximum 输出上限。
+ */
 void PI_Controller_SetOutputLimits(PI_Controller_t *pi, float minimum,
                                    float maximum);
 
+/**
+ * @brief 仅设置积分项限幅，并将当前积分值夹到新范围。
+ * @param pi      PI控制器指针。
+ * @param minimum 积分下限。
+ * @param maximum 积分上限。
+ */
 void PI_Controller_SetIntegralLimits(PI_Controller_t *pi, float minimum,
                                      float maximum);
 
+/**
+ * @brief 按期望输出反算积分状态，用于模式切换时无扰预加载。
+ * @param pi             PI控制器指针。
+ * @param desired_output 期望本拍输出的值（将被限幅）。
+ * @param reference     当前参考值，用于计算比例项。
+ * @param feedback      当前反馈值，用于计算比例项。
+ */
 void PI_Controller_PreloadOutput(PI_Controller_t *pi, float desired_output,
                                  float reference, float feedback);
 
@@ -181,7 +243,14 @@ void FOC_Control_Reset(FOC_Control_t *control);
  *
  * 速度模式下，函数内部自动按speed_loop_divider运行速度PI；
  * 电流模式下，直接使用id_ref和iq_ref。
- * dc_bus_voltage用于计算本拍SVPWM可实现的dq电压矢量上限。
+ *
+ * @param control           FOC总控制器指针。
+ * @param id_feedback       d轴电流反馈（A）。
+ * @param iq_feedback       q轴电流反馈（A）。
+ * @param speed_feedback_rpm 转速反馈（rpm），来自观测器PLL。
+ * @param dc_bus_voltage    当前直流母线电压（V），用于电压矢量限幅。
+ * @param ud_output         [out] d轴电压输出（V），可为NULL。
+ * @param uq_output         [out] q轴电压输出（V），可为NULL。
  */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,

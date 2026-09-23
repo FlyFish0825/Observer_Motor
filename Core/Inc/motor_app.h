@@ -9,7 +9,9 @@ extern "C" {
 #include "controller.h"
 
 /**
- * @brief HAL初始化前将六路栅极驱动输出置于安全低电平
+ * @brief HAL初始化前将六路栅极驱动输出置于安全低电平。
+ * @note 在main()最开头调用，防止上电时PWM引脚不确定状态误导通MOSFET。
+ *       后续由CubeMX生成的GPIO/TIM初始化重新配置为复用功能。
  */
 void MotorApp_ForcePowerStageSafe(void);
 
@@ -19,11 +21,13 @@ void MotorApp_ForcePowerStageSafe(void);
  * @note 外设初始化完成后调用一次；成功返回后先执行电流零偏校准，
  *       校准后保持IDLE，由Process响应串口run启动请求并开启PWM。
  */
+/** @return HAL_OK初始化成功；HAL_ERROR任一步骤失败。 */
 HAL_StatusTypeDef MotorApp_Init(void);
 
 /**
  * @brief 主循环任务：更新规则组ADC并处理串口启动请求和调试命令
  */
+/** @note 包含ADC轮询和串口解析，不可在中断中调用。 */
 void MotorApp_Process(void);
 
 /**
@@ -35,6 +39,7 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc);
 /**
  * @brief 获取应用层正在使用的FOC控制器，供CAN协议层更新目标参数。
  */
+/** @return 指向应用层FOC控制器实例的指针，永不返回NULL。 */
 FOC_Control_t *MotorApp_GetControl(void);
 
 /**
