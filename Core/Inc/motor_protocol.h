@@ -1,6 +1,8 @@
 #ifndef MOTOR_PROTOCOL_H
 #define MOTOR_PROTOCOL_H
 
+/* 手写协议头定义总线ID、帧长度和入口；字段偏移由 motor_protocol.c 固化。 */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -9,20 +11,20 @@ extern "C" {
 #include "stm32g4xx_hal.h"
 
 /* 固定节点协议：上位机预先知道节点号，不做发现和注册。 */
-#define MOTOR_PROTOCOL_NODE_MIN             1U
-#define MOTOR_PROTOCOL_NODE_MAX             8U
+#define MOTOR_PROTOCOL_NODE_MIN             1U /* 节点号下界，包含。 */
+#define MOTOR_PROTOCOL_NODE_MAX             8U /* 节点号上界，包含。 */
 
-#define MOTOR_PROTOCOL_ID_BOOT              0x000U
-#define MOTOR_PROTOCOL_ID_CONTROL           0x100U
-#define MOTOR_PROTOCOL_ID_RESPONSE_BASE     0x180U
-#define MOTOR_PROTOCOL_ID_FEEDBACK_BASE     0x200U
-#define MOTOR_PROTOCOL_ID_HEARTBEAT_BASE    0x280U
-#define MOTOR_PROTOCOL_ID_DEBUG_BASE        0x300U
-#define MOTOR_PROTOCOL_ID_HELLO_BASE        0x380U
+#define MOTOR_PROTOCOL_ID_BOOT              0x000U /* Bootloader管理命令。 */
+#define MOTOR_PROTOCOL_ID_CONTROL           0x100U /* 广播控制命令。 */
+#define MOTOR_PROTOCOL_ID_RESPONSE_BASE     0x180U /* APP对Boot命令的应答。 */
+#define MOTOR_PROTOCOL_ID_FEEDBACK_BASE     0x200U /* 普通运行反馈。 */
+#define MOTOR_PROTOCOL_ID_HEARTBEAT_BASE    0x280U /* Classic CAN在线心跳。 */
+#define MOTOR_PROTOCOL_ID_DEBUG_BASE        0x300U /* 调试高带宽反馈。 */
+#define MOTOR_PROTOCOL_ID_HELLO_BASE        0x380U /* 上电能力/节点问候。 */
 
-#define MOTOR_PROTOCOL_CONTROL_DLC          FDCAN_DLC_BYTES_24
-#define MOTOR_PROTOCOL_FEEDBACK_DLC         FDCAN_DLC_BYTES_12
-#define MOTOR_PROTOCOL_DEBUG_DLC            FDCAN_DLC_BYTES_64
+#define MOTOR_PROTOCOL_CONTROL_DLC          FDCAN_DLC_BYTES_24 /* 控制帧有效载荷24字节。 */
+#define MOTOR_PROTOCOL_FEEDBACK_DLC         FDCAN_DLC_BYTES_12 /* 普通反馈12字节。 */
+#define MOTOR_PROTOCOL_DEBUG_DLC            FDCAN_DLC_BYTES_64 /* 调试反馈64字节。 */
 
 /* 当前测试总线数据段也是1 Mbit/s，FD帧关闭BRS；切换8M时改为1。 */
 #define MOTOR_PROTOCOL_CANFD_BRS_ENABLED    0U

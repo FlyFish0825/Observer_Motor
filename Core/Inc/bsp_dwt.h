@@ -1,3 +1,4 @@
+/* 基于 Cortex-M DWT CYCCNT 的高精度计时与忙等待接口。 */
 #ifndef __BSP_DWT_H
 #define __BSP_DWT_H
 
@@ -12,16 +13,19 @@ extern "C" {
  * @brief  初始化 DWT 周期计数器
  * @retval 1：成功，0：失败
  */
+/* 读取 HCLK、开启 CYCCNT；返回值表示计数器是否真正使能。 */
 uint8_t DWT_Delay_Init(void);
 
 /**
  * @brief  获取当前 CPU 周期计数
  */
+/* 返回 32 位周期计数器当前值，可作为测量起点保存。 */
 uint32_t DWT_GetCycle(void);
 
 /**
  * @brief  计算从 start_cycle 到当前经过的周期数
  */
+/* 无符号减法天然支持一次计数器回绕范围内的测量。 */
 uint32_t DWT_ElapsedCycle(uint32_t start_cycle);
 
 /**

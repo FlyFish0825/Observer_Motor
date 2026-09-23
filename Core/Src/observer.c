@@ -96,24 +96,24 @@ Observer_RebuildVoltage(const Observer_Input_t *input,
  *
  */
 void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
-  float Rs;
-  float Ls;
-  float Ts;
+  float Rs; /* 电机定子电阻模型参数。 */
+  float Ls; /* 电机定子电感模型参数。 */
+  float Ts; /* 离散积分步长。 */
 
-  float u_alpha;
-  float u_beta;
+  float u_alpha; /* 由占空比重构的α轴电压。 */
+  float u_beta; /* 由占空比重构的β轴电压。 */
 
-  float x_alpha;
-  float x_beta;
+  float x_alpha; /* 上一拍定子总磁链α状态。 */
+  float x_beta; /* 上一拍定子总磁链β状态。 */
 
-  float psi_alpha;
-  float psi_beta;
+  float psi_alpha; /* 去除电感磁链后的永磁磁链α分量。 */
+  float psi_beta; /* 去除电感磁链后的永磁磁链β分量。 */
 
-  float psi_mag_sq;
-  float error;
+  float psi_mag_sq; /* 永磁磁链幅值的平方，避免中间开方。 */
+  float error; /* 目标磁链幅值平方与当前值之差。 */
 
-  float correction_alpha;
-  float correction_beta;
+  float correction_alpha; /* α轴非线性校正量。 */
+  float correction_beta; /* β轴非线性校正量。 */
 
   if ((obs == NULL) || (input == NULL)) {
     return;
@@ -225,16 +225,16 @@ void Observer_Run(Observer_Handle_t *obs, const Observer_Input_t *input) {
  *   保持上一拍速度继续推算角度
  */
 void Observer_PLL_Run(Observer_Handle_t *obs) {
-  float psi_alpha_n;
-  float psi_beta_n;
+  float psi_alpha_n; /* 归一化永磁磁链α分量。 */
+  float psi_beta_n; /* 归一化永磁磁链β分量。 */
 
-  float inv_psi_mag;
-  float pll_error;
-  float omega_e;
+  float inv_psi_mag; /* 磁链幅值倒数，复用以减少除法。 */
+  float pll_error; /* SRF-PLL鉴相误差。 */
+  float omega_e; /* 本拍沿用或更新的电角速度。 */
 
-  int32_t pll_phase_q31;
+  int32_t pll_phase_q31; /* PLL角度对应的CORDIC Q1.31值。 */
 
-  uint8_t psi_valid;
+  uint8_t psi_valid; /* 当前磁链幅值是否允许参与PLL校正。 */
 
   /*
    * 判断当前磁链幅值是否可信。

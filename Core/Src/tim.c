@@ -115,17 +115,20 @@ void MX_TIM1_Init(void)
   }
   /* USER CODE BEGIN TIM1_Init 2 */
 
-  // 25Khz的控制频率
+  /* 根据 FOC 运行时参数重新写入 PWM 周期，控制环目标频率为 25 kHz。 */
   htim1.Init.Period = foc.timer.pwm_arr;
+  /* 周期更新后重新应用基础定时器配置，确保计数范围与运行参数一致。 */
   if (HAL_TIM_Base_Init(&htim1) != HAL_OK) {
     Error_Handler();
   }
 
+  /* 使用 FOC 计算出的 ADC 触发比较值，决定电流采样时刻。 */
   sConfigOC.Pulse = foc.timer.adc_trigger;
   if (HAL_TIM_PWM_ConfigChannel(&htim1, &sConfigOC, TIM_CHANNEL_4) != HAL_OK) {
     Error_Handler();
   }
 
+  /* 使用运行时死区参数重新配置高级定时器的互补 PWM 保护。 */
   sBreakDeadTimeConfig.DeadTime = foc.timer.dead_time;
   if (HAL_TIMEx_ConfigBreakDeadTime(&htim1, &sBreakDeadTimeConfig) != HAL_OK) {
     Error_Handler();

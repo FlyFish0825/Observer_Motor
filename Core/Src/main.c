@@ -86,6 +86,10 @@ static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 
 /* USER CODE BEGIN PV */
 
+/*
+ * 以下状态由主循环、FOC注入ADC中断和协议定时器共同访问；新增字段时
+ * 必须明确访问上下文，避免在高频ISR中引入阻塞调用或不可原子共享。
+ */
 typedef struct {
   float data[6];
   uint32_t tail;
@@ -176,6 +180,10 @@ int main(void)
   MX_CORDIC_Init();
   MX_FDCAN1_Init();
   /* USER CODE BEGIN 2 */
+  /*
+   * 这里是应用集成初始化区：只启动业务模块，不重复改写CubeMX外设配置。
+   * 任一校准、协议或调试通道初始化失败都进入Error_Handler，禁止带故障运行。
+   */
   DWT_Delay_Init();
   CORDIC_SinCos_RegisterConfig();
   JustFloat_Init();
@@ -217,6 +225,10 @@ int main(void)
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
 
+  /*
+   * 注入ADC中断负责FOC实时环；主循环只处理低速规则组采样、协议和调试命令，
+   * 不应在此处加入会长时间关闭中断或阻塞串口的操作。
+   */
   if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK) {
     Error_Handler();
   }
@@ -346,6 +358,10 @@ void SystemClock_Config(void)
 
 /* USER CODE BEGIN 4 */
 
+/*
+ * 该回调运行在PWM同步的ADC注入中断上下文，必须保持确定性：不使用HAL延时、
+ * 不等待外设完成，不调用会阻塞的协议/日志接口；慢速工作下放到主循环或TIM6。
+ */
 /** @brief ADC注入组转换完成回调（每个PWM周期触发）：校准阶段累加零偏，运行阶段执行FOC电流环闭环控制。 */
 void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
@@ -522,6 +538,9 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       break;
     }
     }
+
+    /* FOC实时估算母线电流；100 Hz CAN反馈读取低通滤波后的快照。 */
+    FOC_UpdateBusCurrentEstimate(&foc);
 
     
     TIM1->CCR1 = foc.svpwm.ccr_a;
@@ -719,6 +738,7 @@ void HAL_UARTEx_RxEventCallback(
     UART_HandleTypeDef *huart,
     uint16_t Size)
 {
+    /* 回调仅转交事件；命令解析在主循环执行，避免DMA/USART中断中执行重活。 */
     DebugConsole_OnRxEvent(huart, Size);
 }
 
@@ -726,6 +746,7 @@ void HAL_UARTEx_RxEventCallback(
 void HAL_UART_ErrorCallback(
     UART_HandleTypeDef *huart)
 {
+    /* 错误路径只记录并安排恢复，不在USART错误中断中阻塞等待。 */
     DebugConsole_OnError(huart);
 }
 

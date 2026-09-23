@@ -1,3 +1,4 @@
+/* UART DMA 空闲接收调试控制台：主循环解析命令，中断只搬运接收数据。 */
 #ifndef DEBUG_CONSOLE_H
 #define DEBUG_CONSOLE_H
 
@@ -79,6 +80,7 @@ bool DebugConsole_RegisterF32(
     float maximum,
     bool read_only);
 
+/* 注册带有最小值/最大值约束的有符号 32 位变量。 */
 bool DebugConsole_RegisterI32(
     const char *name,
     volatile int32_t *value,
@@ -86,6 +88,7 @@ bool DebugConsole_RegisterI32(
     int32_t maximum,
     bool read_only);
 
+/* 注册带有最小值/最大值约束的无符号 32 位变量。 */
 bool DebugConsole_RegisterU32(
     const char *name,
     volatile uint32_t *value,
