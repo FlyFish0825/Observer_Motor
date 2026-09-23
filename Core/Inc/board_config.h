@@ -1,6 +1,8 @@
 #ifndef BOARD_CONFIG_H
 #define BOARD_CONFIG_H
 
+/* 手写板级配置只描述硬件差异；时钟初始化通过 HSE_VALUE 使用它。 */
+
 /*
  * 板卡外部晶振频率：当前硬件为 24 MHz。
  * 更换为 16 MHz 晶振板时，只需把下面一行改成 16000000UL，

@@ -7,9 +7,9 @@
 
 /* ======================== CORDIC 常量 ======================== */
 
-#define CORDIC_PI_F 3.14159265358979323846f
-#define CORDIC_TWO_PI_F 6.28318530717958647692f
-#define CORDIC_INV_PI_F 0.31830988618379067154f
+#define CORDIC_PI_F 3.14159265358979323846f /* CORDIC角度归一化使用的π。 */
+#define CORDIC_TWO_PI_F 6.28318530717958647692f /* 一整圈弧度。 */
+#define CORDIC_INV_PI_F 0.31830988618379067154f /* 1/π。 */
 
 #define CORDIC_Q31_SCALE_F 2147483648.0f
 #define CORDIC_Q31_TO_FLOAT_F 4.656612873077392578125e-10f
@@ -20,12 +20,15 @@
 
 /* ======================== FOC 数学常量 ======================== */
 
-#define FOC_ONE_THIRD_F   0.33333333333333333333f
-#define FOC_INV_SQRT3_F   0.57735026918962576451f
-#define FOC_SQRT3_BY_2_F  0.86602540378443864676f
-#define FOC_PI            3.14159265358979323846f
-#define CURRENT_OFFSET_SAMPLE_NUM 1000 // 校准采样次数
-#define ADC_REGULAR_SAMPLE_PERIOD_MS 10U
+#define FOC_ONE_THIRD_F   0.33333333333333333333f /* Clarke变换中的1/3。 */
+#define FOC_INV_SQRT3_F   0.57735026918962576451f /* 1/sqrt(3)。 */
+#define FOC_SQRT3_BY_2_F  0.86602540378443864676f /* sqrt(3)/2。 */
+#define FOC_PI            3.14159265358979323846f /* FOC数学运算使用的π。 */
+#define CURRENT_OFFSET_SAMPLE_NUM 1000 // 电流零偏校准采样次数。
+#define ADC_REGULAR_SAMPLE_PERIOD_MS 10U /* 规则组DMA采样周期，单位 ms。 */
+#define FOC_BUS_CURRENT_VBUS_MIN 0.1f
+#define FOC_BUS_CURRENT_FILTER_OLD 0.95f
+#define FOC_BUS_CURRENT_FILTER_NEW 0.05f
 
 /* ======================== FOC 结构体变量 ======================== */
 
@@ -33,9 +36,9 @@
  * 三相坐标
  */
 typedef struct {
-  float a;
-  float b;
-  float c;
+  float a; /* A相分量。 */
+  float b; /* B相分量。 */
+  float c; /* C相分量。 */
 
 } FOC_ABC_t;
 
@@ -43,8 +46,8 @@ typedef struct {
  * 静止两相坐标
  */
 typedef struct {
-  float alpha;
-  float beta;
+  float alpha; /* α轴分量。 */
+  float beta; /* β轴分量。 */
 
 } FOC_AlphaBeta_t;
 
@@ -52,8 +55,8 @@ typedef struct {
  * 旋转坐标
  */
 typedef struct {
-  float d;
-  float q;
+  float d; /* 与转子磁链同轴的d轴分量。 */
+  float q; /* 超前90度的q轴分量。 */
 
 } FOC_DQ_t;
 
@@ -61,25 +64,25 @@ typedef struct {
  * sin cos
  */
 typedef struct {
-  float sin;
-  float cos;
+  float sin; /* 角度正弦。 */
+  float cos; /* 角度余弦。 */
 
 } FOC_SIN_COS_t;
 
 
 typedef enum {
 
-  CURRENT_REBUILD_A = 0,
-  CURRENT_REBUILD_B,
-  CURRENT_REBUILD_C
+  CURRENT_REBUILD_A = 0, /* 由A相重构缺失电流。 */
+  CURRENT_REBUILD_B, /* 由B相重构缺失电流。 */
+  CURRENT_REBUILD_C /* 由C相重构缺失电流。 */
 
 } FOC_CurrentRebuild_t;
 
 typedef enum
 {
-    FOC_MOTOR_IDLE = 0,
-    FOC_MOTOR_OPEN_LOOP,
-    FOC_MOTOR_CLOSED_LOOP,
+    FOC_MOTOR_IDLE = 0, /* PWM关闭或电机未运行。 */
+    FOC_MOTOR_OPEN_LOOP, /* 使用给定电压和角度。 */
+    FOC_MOTOR_CLOSED_LOOP, /* 使用观测器和电流环闭环。 */
 
 } FOC_Motor_State_t;
 
@@ -119,6 +122,9 @@ typedef struct {
   FOC_ABC_t i_abc;
   FOC_AlphaBeta_t i_alpha_beta;
   FOC_DQ_t i_dq;
+  /* 由dq轴电功率和母线电压估算的母线电流及其低通滤波值，单位：A。 */
+  float ibus_est;
+  float ibus_filter;
 
   /// 电压
   FOC_DQ_t u_dq;
@@ -224,6 +230,7 @@ void FOC_PWM_Stop(void);
 void ADC_Regular_Service(uint32_t now_ms);
 void FOC_Iabc_Calibration(void);
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
+void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle);
 
 
 void FOC_Open_Loop(float u_d, float u_q);

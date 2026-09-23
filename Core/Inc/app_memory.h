@@ -1,6 +1,8 @@
 #ifndef APP_MEMORY_H
 #define APP_MEMORY_H
 
+/* 应用镜像的链接地址和向量表偏移集中在此处，供启动配置与应用代码共用。 */
+
 /*
  * CMake 会根据当前构建模式覆盖 APP_FLASH_START。
  *

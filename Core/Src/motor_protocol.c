@@ -5,37 +5,45 @@
 #include "tim.h"
 #include <string.h>
 
-#define MOTOR_PROTOCOL_BOOT_MAGIC       0x544F4F42UL
-#define MOTOR_PROTOCOL_CONFIG_NODE_ADDR 0x0801F808UL
-#define MOTOR_PROTOCOL_BROADCAST_MASK   0xFFU
-#define MOTOR_PROTOCOL_RX_RING_SIZE     8U
-#define MOTOR_PROTOCOL_SLOT_COUNT       10U
-#define MOTOR_PROTOCOL_DEBUG_DIVIDER    2U
-#define MOTOR_PROTOCOL_BOOT_ACK_TIMEOUT_MS 20U
-#define MOTOR_PROTOCOL_HELLO_TX_TIMEOUT_MS  10U
+#define MOTOR_PROTOCOL_BOOT_MAGIC       0x544F4F42UL /* Bootloader跳转魔数。 */
+#define MOTOR_PROTOCOL_CONFIG_NODE_ADDR 0x0801F808UL /* Flash中的节点号配置地址。 */
+#define MOTOR_PROTOCOL_BROADCAST_MASK   0xFFU /* 控制帧中的广播节点掩码。 */
+#define MOTOR_PROTOCOL_RX_RING_SIZE     8U /* ISR到主循环的接收环形队列深度。 */
+#define MOTOR_PROTOCOL_SLOT_COUNT       10U /* TIM6调度时隙总数。 */
+#define MOTOR_PROTOCOL_DEBUG_DIVIDER    2U /* 调试帧相对TIM6节拍的分频。 */
+#define MOTOR_PROTOCOL_BOOT_ACK_TIMEOUT_MS 20U /* Boot应答发送等待上限。 */
+#define MOTOR_PROTOCOL_HELLO_TX_TIMEOUT_MS  10U /* HELLO物理发送等待上限。 */
+#define MOTOR_PROTOCOL_BUS_CURRENT_MAX_A    10.0f
+#define MOTOR_PROTOCOL_BUS_CURRENT_SCALE \
+  (65535.0f / MOTOR_PROTOCOL_BUS_CURRENT_MAX_A)
+#define MOTOR_PROTOCOL_TEMPERATURE_MIN_C   (-20.0f)
+#define MOTOR_PROTOCOL_TEMPERATURE_MAX_C   150.0f
+#define MOTOR_PROTOCOL_TEMPERATURE_SCALE \
+  (65535.0f / (MOTOR_PROTOCOL_TEMPERATURE_MAX_C - \
+               MOTOR_PROTOCOL_TEMPERATURE_MIN_C))
 /* 基础运行反馈：每个节点由TIM6错开发送普通反馈，当前目标为100 Hz。 */
 #define MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED 1U
 /* 每秒发送一次Classic CAN心跳，便于上位机判断节点在线。 */
 #define MOTOR_PROTOCOL_HEARTBEAT_ENABLED 1U
 
 typedef struct {
-  FDCAN_RxHeaderTypeDef header;
-  uint8_t data[64];
+  FDCAN_RxHeaderTypeDef header; /* ISR接收的完整FDCAN头。 */
+  uint8_t data[64]; /* 按最大CAN FD帧保留的载荷。 */
 } MotorProtocol_RxItem_t;
 
 typedef struct {
-  FDCAN_HandleTypeDef *fdcan;
-  FOC_Control_t *control;
-  uint8_t node_id;
-  volatile uint8_t feedback_sequence;
-  volatile uint8_t debug_enabled;
-  volatile uint8_t debug_suppressed;
-  volatile uint8_t timer_slot;
-  volatile uint8_t debug_divider;
-  volatile uint8_t rx_head;
-  volatile uint8_t rx_tail;
-  uint32_t heartbeat_next_tick;
-  MotorProtocol_RxItem_t rx_ring[MOTOR_PROTOCOL_RX_RING_SIZE];
+  FDCAN_HandleTypeDef *fdcan; /* 绑定的FDCAN外设。 */
+  FOC_Control_t *control; /* 协议命令写入的FOC控制器。 */
+  uint8_t node_id; /* 本节点号，参与所有节点相关ID计算。 */
+  volatile uint8_t feedback_sequence; /* 普通反馈的递增序号。 */
+  volatile uint8_t debug_enabled; /* 本节点是否发送调试反馈。 */
+  volatile uint8_t debug_suppressed; /* 调试选择期间是否抑制普通反馈。 */
+  volatile uint8_t timer_slot; /* 当前TIM6调度时隙。 */
+  volatile uint8_t debug_divider; /* 调试反馈分频计数。 */
+  volatile uint8_t rx_head; /* ISR生产者索引。 */
+  volatile uint8_t rx_tail; /* 主循环消费者索引。 */
+  uint32_t heartbeat_next_tick; /* 下一次心跳的HAL tick。 */
+  MotorProtocol_RxItem_t rx_ring[MOTOR_PROTOCOL_RX_RING_SIZE]; /* 接收快照队列。 */
 } MotorProtocol_Context_t;
 
 static MotorProtocol_Context_t motor_protocol;
@@ -45,8 +53,8 @@ static MotorProtocol_Context_t motor_protocol;
  */
 static uint8_t MotorProtocol_CRC8(const uint8_t *data, uint8_t len)
 {
-  uint8_t crc = 0U;
-  uint8_t bit;
+  uint8_t crc = 0U; /* CRC-8/多项式0x07的初值。 */
+  uint8_t bit; /* 当前字节内的位计数。 */
 
   while (len-- != 0U) {
     crc ^= *data++;
@@ -217,17 +225,24 @@ static void MotorProtocol_SetRun(uint8_t run)
  */
 static void MotorProtocol_SendNormalFeedback(void)
 {
-  uint8_t data[12] = {0};
-  uint8_t flags = 0U;
+  uint8_t data[12] = {0}; /* 普通反馈固定12字节，字段采用小端序。 */
+  uint8_t flags = 0U; /* Byte9状态位：校准、速度环和SVPWM限幅。 */
 
+  /* Byte0..1：机械转速，rpm，S16*1。 */
   MotorProtocol_PutS16(&data[0],
                        MotorProtocol_S16(foc.observer.state.speed_rpm, 1.0f));
-  MotorProtocol_PutS16(&data[2],
-                       MotorProtocol_S16(foc.state.i_dq.q, 100.0f));
+  /* Byte2..3：母线电流，0..10 A映射到无符号16位。 */
+  MotorProtocol_PutU16(&data[2],
+                       MotorProtocol_U16(foc.state.ibus_filter,
+                                         MOTOR_PROTOCOL_BUS_CURRENT_SCALE));
+  /* Byte4..5：母线电压，单位 V，比例100。 */
   MotorProtocol_PutU16(&data[4],
                        MotorProtocol_U16(foc.state.vbus, 100.0f));
-  MotorProtocol_PutS16(&data[6],
-                       MotorProtocol_S16(foc.state.temperature_c, 10.0f));
+  /* Byte6..7：温度，-20..150 C线性映射到无符号16位。 */
+  MotorProtocol_PutU16(&data[6],
+                       MotorProtocol_U16(foc.state.temperature_c -
+                                             MOTOR_PROTOCOL_TEMPERATURE_MIN_C,
+                                         MOTOR_PROTOCOL_TEMPERATURE_SCALE));
 
   if (foc.calibration.calibrated != 0U) {
     flags |= 0x01U;
@@ -239,10 +254,10 @@ static void MotorProtocol_SendNormalFeedback(void)
     flags |= 0x04U;
   }
 
-  data[8] = (uint8_t)foc_motor_state;
-  data[9] = flags;
-  data[10] = motor_protocol.feedback_sequence++;
-  data[11] = 0U;
+  data[8] = (uint8_t)foc_motor_state; /* 状态枚举。 */
+  data[9] = flags; /* 运行状态位。 */
+  data[10] = motor_protocol.feedback_sequence++; /* 反馈序号，8位回绕。 */
+  data[11] = 0U; /* 预留字节，保持协议长度稳定。 */
 
   (void)MotorProtocol_Send(MOTOR_PROTOCOL_ID_FEEDBACK_BASE +
                                motor_protocol.node_id,
@@ -256,7 +271,7 @@ static void MotorProtocol_SendNormalFeedback(void)
  */
 static void MotorProtocol_SendDebugFeedback(void)
 {
-  uint8_t data[64] = {0};
+  uint8_t data[64] = {0}; /* 调试帧按64字节CAN FD载荷发送。 */
 
   MotorProtocol_PutS16(&data[0],
                        MotorProtocol_S16(foc.observer.state.speed_rpm, 1.0f));
@@ -294,7 +309,7 @@ static void MotorProtocol_SendDebugFeedback(void)
  */
 static void MotorProtocol_SendHeartbeat(void)
 {
-  uint8_t data[8] = {0};
+  uint8_t data[8] = {0}; /* Classic CAN心跳固定8字节，末字节为CRC。 */
 
   data[0] = motor_protocol.node_id;
   data[1] = (uint8_t)foc_motor_state;

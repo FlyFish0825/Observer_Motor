@@ -6,6 +6,7 @@
  * @brief 浮点限幅
  */
 static inline float PI_Clamp(float value, float minimum, float maximum) {
+  /* 统一保证控制器输出或积分状态落在调用方给出的闭区间内。 */
   if (value > maximum) {
     return maximum;
   }
@@ -23,6 +24,7 @@ static inline float PI_Clamp(float value, float minimum, float maximum) {
 static void PI_NormalizeLimits(float *minimum, float *maximum) {
   float temporary;
 
+  /* 配置接口允许上下限反向传入，内部先恢复为 minimum <= maximum。 */
   if ((*minimum) > (*maximum)) {
     temporary = *minimum;
     *minimum = *maximum;
@@ -100,9 +102,9 @@ float PI_Controller_Run(PI_Controller_t *pi, float reference, float feedback) {
  * @brief 使用已计算的误差运行PI控制器，执行比例、条件积分抗饱和及输出限幅。
  */
 float PI_Controller_RunError(PI_Controller_t *pi, float error) {
-  float kp;
-  float ki;
-  float sample_time;
+  float kp; /* 本次计算使用的比例增益快照。 */
+  float ki; /* 本次计算使用的积分增益快照。 */
+  float sample_time; /* 本次积分换算所用周期。 */
 
   float output_min;
   float output_max;
@@ -110,11 +112,11 @@ float PI_Controller_RunError(PI_Controller_t *pi, float error) {
   float integral_min;
   float integral_max;
 
-  float integral_old;
-  float integral_candidate;
+  float integral_old; /* 上一拍积分状态。 */
+  float integral_candidate; /* 未执行条件积分回退前的候选状态。 */
 
-  float output_unsaturated;
-  float output;
+  float output_unsaturated; /* 比例项与候选积分项之和。 */
+  float output; /* 最终限幅输出。 */
 
   if (pi == NULL) {
     return 0.0f;

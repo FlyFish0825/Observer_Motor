@@ -6,10 +6,10 @@
 #include "tim.h"
 #include <stdint.h>
 
-FOC_Handle_t foc = {0};
-FOC_SIN_COS_t foc_sin_cos = {0};
-FOC_SIN_COS_t observer_sin_cos = {0};
-FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE;
+FOC_Handle_t foc = {0}; /* 全局FOC状态、采样值、观测器和SVPWM结果。 */
+FOC_SIN_COS_t foc_sin_cos = {0}; /* 电流环/开环变换使用的正余弦。 */
+FOC_SIN_COS_t observer_sin_cos = {0}; /* PLL鉴相使用的正余弦。 */
+FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE; /* 当前电机运行状态。 */
 
 /* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */
 static uint32_t foc_current_rebuild_threshold = 0U;
@@ -52,6 +52,8 @@ void FOC_Data_Init(void) {
 
   foc.state.omega = 0.0f;
   foc.state.temperature_c = 0.0f;
+  foc.state.ibus_est = 0.0f;
+  foc.state.ibus_filter = 0.0f;
 
   Observer_MotorParam_t motor = {
       .Rs = 2.55f, 
@@ -113,6 +115,10 @@ void FOC_PWM_Stop(void) {
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+
+  /* 停机后不再有FOC中断更新，主动清零避免CAN持续反馈停机前电流。 */
+  foc.state.ibus_est = 0.0f;
+  foc.state.ibus_filter = 0.0f;
 }
 
 /**
@@ -124,10 +130,10 @@ void FOC_PWM_Stop(void) {
  */
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,
                   uint16_t adc3) {
-  uint32_t ccr_a;
-  uint32_t ccr_b;
-  uint32_t ccr_c;
-  uint32_t ccr_max;
+  uint32_t ccr_a; /* A相比较值。 */
+  uint32_t ccr_b; /* B相比较值。 */
+  uint32_t ccr_c; /* C相比较值。 */
+  uint32_t ccr_max; /* 三相中最大的比较值，用于判断采样窗口。 */
 
   if (handle == NULL) {
     return;
@@ -200,9 +206,9 @@ void FOC_Open_Loop(float u_d, float u_q) {
   FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer, &foc.svpwm);
 }
 
-static volatile uint8_t adc_regular_dma_busy = 0U;
-static uint8_t adc_regular_schedule_initialized = 0U;
-static uint32_t adc_regular_last_start_ms = 0U;
+static volatile uint8_t adc_regular_dma_busy = 0U; /* DMA进行中时阻止重复启动。 */
+static uint8_t adc_regular_schedule_initialized = 0U; /* 首次调用的时间基准标志。 */
+static uint32_t adc_regular_last_start_ms = 0U; /* 上次启动规则组DMA的tick。 */
 
 /**
  * @brief 按10 ms周期非阻塞启动ADC1规则组DMA。
@@ -227,6 +233,37 @@ void ADC_Regular_Service(uint32_t now_ms) {
                         2U) != HAL_OK) {
     adc_regular_dma_busy = 0U;
   }
+}
+
+/**
+ * @brief 由dq轴电功率估算母线电流，并执行一阶低通滤波。
+ * @note 公式：Pe=1.5*(Vd*Id+Vq*Iq)，Ibus=Pe/Vbus。
+ */
+void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle) {
+  float ibus_est = 0.0f; /* 本拍未滤波的母线电流估计值。 */
+
+  if (handle == NULL) {
+    return;
+  }
+
+  if (foc_motor_state == FOC_MOTOR_IDLE) {
+    handle->state.ibus_est = 0.0f;
+    handle->state.ibus_filter = 0.0f;
+    return;
+  }
+
+  if (handle->state.vbus > FOC_BUS_CURRENT_VBUS_MIN) {
+    /* dq功率换算到三相瞬时电功率，再除以母线电压。 */
+    float electric_power =
+        1.5f * (handle->state.u_dq.d * handle->state.i_dq.d +
+                handle->state.u_dq.q * handle->state.i_dq.q);
+    ibus_est = electric_power / handle->state.vbus;
+  }
+
+  handle->state.ibus_est = ibus_est;
+  handle->state.ibus_filter =
+      FOC_BUS_CURRENT_FILTER_OLD * handle->state.ibus_filter +
+      FOC_BUS_CURRENT_FILTER_NEW * ibus_est;
 }
 
 /** @brief ADC1规则组DMA完成后更新母线电压和MCU温度快照。 */

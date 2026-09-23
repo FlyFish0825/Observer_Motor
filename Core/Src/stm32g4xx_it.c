@@ -396,6 +396,11 @@ void CORDIC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
+/*
+ * 下面的GPIO回调是本文件唯一的应用集成逻辑；中断中只做状态切换、PWM启停和
+ * 指示灯操作，不执行延时、串口发送或协议处理，确保按键中断可快速返回。
+ * PC10/PC11必须与原理图和CubeMX引脚配置保持一致，修改前需同步检查硬件定义。
+ */
 /** @brief GPIO外部中断回调：PC10按下启动开环，PC11按下停止并复位FOC状态机。 */
 void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {

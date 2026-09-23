@@ -1,5 +1,6 @@
 #include "bsp_dwt.h"
 
+/* CYCCNT 的换算基准，单位 Hz，由当前 HCLK 初始化。 */
 static uint32_t dwt_cpu_freq_hz = 0;
 
 /**
@@ -21,6 +22,7 @@ static uint32_t DWT_MsToCycle(uint32_t ms)
 /**
  * @brief 初始化DWT周期计数器并使能CYCCNT，返回硬件是否成功启动。
  */
+/* 初始化调试寄存器和周期计数器；后续换算函数依赖 dwt_cpu_freq_hz 非零。 */
 uint8_t DWT_Delay_Init(void)
 {
     dwt_cpu_freq_hz = HAL_RCC_GetHCLKFreq();
@@ -57,6 +59,7 @@ uint8_t DWT_Delay_Init(void)
 /**
  * @brief 读取当前DWT CYCCNT值，作为高精度时间戳或延时起点。
  */
+/* 该值可能自然回绕，调用者应使用 DWT_ElapsedCycle 做差。 */
 uint32_t DWT_GetCycle(void)
 {
     return DWT->CYCCNT;
@@ -97,6 +100,7 @@ uint32_t DWT_ElapsedMs(uint32_t start_cycle)
 /**
  * @brief 按照CPU周期执行忙等待延时，适用于短时间、对时序要求高的代码。
  */
+/* 忙等待期间不让出 CPU，仅适合短延时或严格时序窗口。 */
 void DWT_Delay_Cycle(uint32_t cycles)
 {
     uint32_t start_cycle = DWT_GetCycle();
@@ -120,6 +124,7 @@ void DWT_Delay_Us(uint32_t us)
 /**
  * @brief 按照毫秒执行忙等待延时，通过多个1毫秒延时避免长周期换算溢出。
  */
+/* 分段执行毫秒延时，避免一次性周期换算过大。 */
 void DWT_Delay_Ms(uint32_t ms)
 {
     /*
