@@ -93,6 +93,12 @@ cmake --build --preset Boot-Release-HSE24
 | Boot-Release | 16 MHz | 0x08005000 | build/Boot-Release/Observer_boot.bin | CBT6 板 Bootloader 升级 |
 | Boot-Release-HSE24 | 24 MHz | 0x08005000 | build/Boot-Release-HSE24/Observer_boot_hse24.bin | CBU6 板 CAN/Boot 临时验证 |
 
+**换回 CBT6 正式板后的清理提醒：**24 MHz CBU6 方案只为这次跨板通信测试保留。确认 16 MHz CBT6 板工作正常后：
+
+- 删除 `CMakePresets.json` 中的 `Boot-Release-HSE24` 预设，以及 `CMakeLists.txt` 中的 `BOARD_HSE_HZ` 双晶振选项和 `_boot_hse24` 输出分支。
+- 删除 `Core/Inc/board_clock.h` 与 `Core/Src/main.c` 中用于选择 24 MHz 的临时代码；将 `Core/Inc/stm32g4xx_hal_conf.h`、`Core/Src/system_stm32g4xx.c` 的 HSE 和 `main.c` 的 PLL 固定回 16 MHz、M=4。
+- 清理本地 `build/Boot-Release-HSE24` 及其测试 BIN，并同步更新上表。CAN 协议、接收队列、心跳和反馈属于正式功能，继续保留。
+
 地址布局和 Boot 返回协议见[通信与调试](doc/04-通信与调试.md)及[底层参考](doc/05-底层参考.md)。
 
 ## 串口快速调试
