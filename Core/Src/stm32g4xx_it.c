@@ -61,6 +61,8 @@ extern ADC_HandleTypeDef hadc1;
 extern ADC_HandleTypeDef hadc2;
 extern CORDIC_HandleTypeDef hcordic;
 extern TIM_HandleTypeDef htim1;
+extern TIM_HandleTypeDef htim6;
+extern FDCAN_HandleTypeDef hfdcan1;
 extern DMA_HandleTypeDef hdma_usart1_rx;
 extern DMA_HandleTypeDef hdma_usart1_tx;
 extern UART_HandleTypeDef huart1;
@@ -277,6 +279,18 @@ void ADC1_2_IRQHandler(void)
   /* USER CODE END ADC1_2_IRQn 1 */
 }
 
+/** @brief FDCAN1接收FIFO0/发送事件中断入口。 */
+void FDCAN1_IT0_IRQHandler(void)
+{
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+}
+
+/** @brief FDCAN1第二中断线入口。 */
+void FDCAN1_IT1_IRQHandler(void)
+{
+  HAL_FDCAN_IRQHandler(&hfdcan1);
+}
+
 /**
   * @brief This function handles TIM1 update interrupt and TIM16 global interrupt.
   */
@@ -289,6 +303,12 @@ void TIM1_UP_TIM16_IRQHandler(void)
   /* USER CODE BEGIN TIM1_UP_TIM16_IRQn 1 */
 
   /* USER CODE END TIM1_UP_TIM16_IRQn 1 */
+}
+
+/** @brief TIM6每1 ms触发一次CAN反馈时隙调度。 */
+void TIM6_DAC_IRQHandler(void)
+{
+  HAL_TIM_IRQHandler(&htim6);
 }
 
 /**

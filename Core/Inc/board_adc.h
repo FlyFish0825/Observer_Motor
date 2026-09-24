@@ -23,12 +23,15 @@ typedef struct {
   uint16_t phase_u_raw;
   uint16_t phase_v_raw;
   uint16_t phase_w_raw;
+  uint16_t temperature_raw;
 
   /* 已恢复100k/5.1k分压倍率，单位V；端电压为对地测量值。 */
   float vbus_voltage;
   float phase_u_voltage;
   float phase_v_voltage;
   float phase_w_voltage;
+  /* MCU内部温度传感器的换算结果，单位摄氏度。 */
+  float temperature_c;
 } BoardAdcMeasurements_t;
 
 /**

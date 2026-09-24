@@ -122,6 +122,8 @@ typedef struct {
 
   // 输入
   float vbus;
+  /* MCU内部温度传感器换算值，单位摄氏度。 */
+  float temperature_c;
   float theta;
   float omega;
 
@@ -129,6 +131,9 @@ typedef struct {
   FOC_ABC_t i_abc;
   FOC_AlphaBeta_t i_alpha_beta;
   FOC_DQ_t i_dq;
+  /* 由dq轴电功率估算的母线电流及其滤波值，单位A。 */
+  float ibus_est;
+  float ibus_filter;
 
   /// 电压
   FOC_DQ_t u_dq;
@@ -239,6 +244,8 @@ extern FOC_Motor_State_t foc_motor_state;
  * @note 必须在 MX_TIM1_Init() 之前调用，因为定时器初始化会读取 foc.timer 参数。
  */
 void FOC_Data_Init(void);
+/** @brief 按dq轴电功率估算母线电流并进行一阶低通滤波。 */
+void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle);
 
 /**
  * @brief 启动三相互补PWM和CH4 ADC触发。

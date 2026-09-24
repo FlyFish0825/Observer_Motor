@@ -34,6 +34,16 @@
                 "CMAKE_BUILD_TYPE": "Release",
                 "APP_LAYOUT": "boot"
             }
+        },
+        {
+            "name": "Boot-Release-HSE24",
+            "displayName": "Bootloader APP Release for 24 MHz CBU6 test board",
+            "inherits": "default",
+            "cacheVariables": {
+                "CMAKE_BUILD_TYPE": "Release",
+                "APP_LAYOUT": "boot",
+                "BOARD_HSE_HZ": "24000000"
+            }
         }
     ],
     "buildPresets": [
@@ -48,6 +58,10 @@
         {
             "name": "Boot-Release",
             "configurePreset": "Boot-Release"
+        },
+        {
+            "name": "Boot-Release-HSE24",
+            "configurePreset": "Boot-Release-HSE24"
         }
     ]
     

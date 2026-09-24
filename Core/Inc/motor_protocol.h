@@ -24,8 +24,8 @@ extern "C" {
 #define MOTOR_PROTOCOL_FEEDBACK_DLC         FDCAN_DLC_BYTES_12
 #define MOTOR_PROTOCOL_DEBUG_DLC            FDCAN_DLC_BYTES_64
 
-/* 当前CBT6板使用500 kbit/s仲裁段、5 Mbit/s数据段和BRS。 */
-#define MOTOR_PROTOCOL_CANFD_BRS_ENABLED    1U
+/* 当前板卡的CAN收发器只支持1 Mbit/s；CAN FD当前关闭BRS。 */
+#define MOTOR_PROTOCOL_CANFD_BRS_ENABLED    0U
 
 /* 0x100广播控制帧命令。 */
 #define MOTOR_PROTOCOL_CMD_SPEED_VECTOR     0x10U
@@ -45,13 +45,13 @@ extern "C" {
 HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
                                      FOC_Control_t *control);
 /**
- * @brief 主循环周期调用：轮询接收帧、解析控制命令、发送反馈和心跳。
- * @note 包含阻塞式调度，不可在中断中调用。
+ * @brief 主循环周期调用：消费CAN接收中断环形队列并发送低频心跳。
+ * @note 控制命令只在主循环解析；周期反馈由TIM6中断调度。
  */
 void MotorProtocol_Process(void);
 /**
- * @brief 保留的定时器tick接口；当前PCB由主循环HAL_GetTick调度，此函数为空。
- * @param htim 未使用的TIM句柄。
+ * @brief 处理TIM6的1 ms节拍，调度普通或高速CAN反馈。
+ * @param htim HAL定时器句柄；仅处理TIM6。
  */
 void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim);
 

@@ -542,6 +542,7 @@ HAL_StatusTypeDef MotorApp_Init(void) {
   /* 在电流采样中断开始前先取得母线和端电压初值。 */
   if (BoardAdc_Update() == HAL_OK) {
     foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
+    foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
   }
 
   /*
@@ -600,6 +601,7 @@ void MotorApp_Process(void) {
    */
   if (BoardAdc_Update() == HAL_OK) {
     foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
+    foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
   }
 
   /* 校准完成且IDLE复位已完成才能启动，重复run 1不会重新初始化运行电机。
@@ -692,6 +694,9 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
   }
+
+  /* 高频更新估算值，供低频CAN反馈使用；IDLE时函数会同步清零。 */
+  FOC_UpdateBusCurrentEstimate(&foc);
 
   /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、电角度(deg)、母线(V)。 */
   if ((just_float_enabled != 0U) &&

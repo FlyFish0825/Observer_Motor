@@ -1,8 +1,8 @@
 /**
  * @file board_adc.c
- * @brief 主循环的软件触发电压采样，以及主循环到控制中断的数据发布。
- * ADC1按母线/U/W顺序读取，随后启动ADC2读取V；并非PWM同步采样。
- * 当前规则组为12位、6.5T、无过采样，输出是RC滤波后的端电压。
+ * @brief 主循环软件触发电压与温度采样，并发布完整测量快照。
+ * ADC1 Rank1-3依次采母线/U/W（6.5周期），Rank4采MCU温度（247.5周期）；ADC2采V。
+ * 规则组非PWM同步采样；电压输出为RC滤波后的端电压。
  */
 #include "board_adc.h"
 
@@ -37,13 +37,13 @@ static volatile uint8_t board_adc_valid = 0U;
 HAL_StatusTypeDef BoardAdc_Update(void) {
   /* 暂存本轮完整结果；只有所有 ADC 转换成功才会发布到共享对象。 */
   BoardAdcMeasurements_t next = {0};
-  /* ADC1 三个规则组 Rank 的原始计数：母线、U 相、W 相。 */
-  uint16_t adc1_values[3];
+  /* ADC1规则组原始计数：母线、U相、W相和MCU内部温度。 */
+  uint16_t adc1_values[4];
 
   /* ADC1规则组间断模式：每次触发只转换一个Rank，读完再推进到下一Rank。
-   * 6.5T下连续扫描快于HAL轮询，不能依赖CPU在两个转换之间抢读DR。
+   * 温度通道使用长采样时间，仍按逐Rank轮询确保每个结果与通道对应。
    */
-  for (uint32_t rank = 0U; rank < 3U; rank++) {
+  for (uint32_t rank = 0U; rank < 4U; rank++) {
     /* rank 是当前要触发并读取的 ADC1 规则组序号。 */
     if (HAL_ADC_Start(&hadc1) != HAL_OK) {
       (void)HAL_ADCEx_RegularStop(&hadc1);
@@ -67,6 +67,7 @@ HAL_StatusTypeDef BoardAdc_Update(void) {
   next.vbus_raw = adc1_values[0];
   next.phase_u_raw = adc1_values[1];
   next.phase_w_raw = adc1_values[2];
+  next.temperature_raw = adc1_values[3];
   next.phase_v_raw = (uint16_t)HAL_ADC_GetValue(&hadc2);
 
   /* ADC计数先换算引脚电压，再乘分压倍率，恢复分压器输入侧电压(V)。 */
@@ -77,6 +78,8 @@ HAL_StatusTypeDef BoardAdc_Update(void) {
       (float)next.phase_v_raw * BOARD_ADC_COUNT_TO_VOLTAGE;
   next.phase_w_voltage =
       (float)next.phase_w_raw * BOARD_ADC_COUNT_TO_VOLTAGE;
+  next.temperature_c = (float)__HAL_ADC_CALC_TEMPERATURE(
+      3300U, next.temperature_raw, ADC_RESOLUTION_12B);
 
   /* 奇数表示正在写，偶数表示中断可以读取完整快照。 */
   board_adc_sequence++;
@@ -124,7 +127,8 @@ uint8_t BoardAdc_GetSnapshot(BoardAdcMeasurements_t *snapshot,
       (!isfinite(local.vbus_voltage)) ||
       (!isfinite(local.phase_u_voltage)) ||
       (!isfinite(local.phase_v_voltage)) ||
-      (!isfinite(local.phase_w_voltage))) {
+      (!isfinite(local.phase_w_voltage)) ||
+      (!isfinite(local.temperature_c))) {
     return 0U;
   }
 

@@ -66,6 +66,9 @@ void FOC_Data_Init(void) {
   foc_sin_cos.cos = 1.0f;
 
   foc.state.omega = 0.0f;
+  foc.state.temperature_c = 0.0f;
+  foc.state.ibus_est = 0.0f;
+  foc.state.ibus_filter = 0.0f;
 
   /* 新水下电机参数：相电阻0.5 ohm、相电感100 uH、磁链2.84 mWb、7极对。 */
   Observer_MotorParam_t motor = { /* 当前电机的电阻、电感、磁链和极对数。 */
@@ -135,6 +138,39 @@ void FOC_PWM_Stop(void) {
   HAL_TIMEx_PWMN_Stop(&htim1, TIM_CHANNEL_3);
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+
+  /* 停止注入ADC触发后不再有FOC中断，主动清零CAN反馈使用的电流估算。 */
+  foc.state.ibus_est = 0.0f;
+  foc.state.ibus_filter = 0.0f;
+}
+
+/**
+ * @brief 由dq轴电功率估算母线电流，并执行一阶低通滤波。
+ * @note Ibus = 1.5 * (Ud*Id + Uq*Iq) / Vbus；IDLE时清零。
+ */
+void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle) {
+  float ibus_est = 0.0f;
+
+  if (handle == NULL) {
+    return;
+  }
+
+  if (foc_motor_state == FOC_MOTOR_IDLE) {
+    handle->state.ibus_est = 0.0f;
+    handle->state.ibus_filter = 0.0f;
+    return;
+  }
+
+  if (handle->state.vbus > 0.1f) {
+    const float electric_power =
+        1.5f * (handle->state.u_dq.d * handle->state.i_dq.d +
+                handle->state.u_dq.q * handle->state.i_dq.q);
+    ibus_est = electric_power / handle->state.vbus;
+  }
+
+  handle->state.ibus_est = ibus_est;
+  handle->state.ibus_filter =
+      0.95f * handle->state.ibus_filter + 0.05f * ibus_est;
 }
 
 /**

@@ -15,6 +15,11 @@ set(CMAKE_C_EXTENSIONS ON)
 # 同一套源码保留 standalone / boot 两种 Flash 布局。
 set(APP_LAYOUT "standalone" CACHE STRING "APP memory layout: standalone or boot")
 set_property(CACHE APP_LAYOUT PROPERTY STRINGS standalone boot)
+set(BOARD_HSE_HZ "16000000" CACHE STRING "Board external crystal frequency in Hz")
+set_property(CACHE BOARD_HSE_HZ PROPERTY STRINGS 16000000 24000000)
+if(NOT BOARD_HSE_HZ MATCHES "^(16000000|24000000)$")
+    message(FATAL_ERROR "BOARD_HSE_HZ must be 16000000 or 24000000")
+endif()
 
 
 # Define the build type
@@ -41,6 +46,9 @@ add_executable(${CMAKE_PROJECT_NAME})
 if(APP_LAYOUT STREQUAL "boot")
     message(STATUS "APP layout: bootloader offset 0x08005000")
     set(APP_OUTPUT_SUFFIX "_boot")
+    if(BOARD_HSE_HZ STREQUAL "24000000")
+        set(APP_OUTPUT_SUFFIX "_boot_hse24")
+    endif()
     target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
         APP_FLASH_START=0x08005000UL
         APP_WITH_BOOTLOADER=1
@@ -60,6 +68,7 @@ endif()
 
 # Add STM32CubeMX generated sources
 add_subdirectory(cmake/stm32cubemx)
+target_compile_definitions(stm32cubemx INTERFACE BOARD_HSE_HZ=${BOARD_HSE_HZ}UL)
 
 # Release speed optimization for the high-frequency FOC control path.
 # The toolchain currently uses -Os for Release; -O3 below appears later

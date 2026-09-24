@@ -4,11 +4,11 @@
 
 ## 项目基础
 
-- MCU：STM32G431CBT6，系统时钟 170 MHz
+- MCU：STM32G431CBT6；默认板载 HSE 16 MHz，经 PLL 得到系统时钟 170 MHz
 - PWM 与电流环：TIM1 中心对齐互补 PWM，25 kHz；ADC 注入组由 TIM1 CH4 触发
 - 实时控制：ADC1 注入序列 JEOS 完成后进入 FOC 控制中断
 - 主循环：处理串口命令、CAN 收发调度、规则组电压采样和运行请求
-- 调试接口：USART1，2,000,000 baud；FDCAN1，仲裁段 500 kbit/s、数据段 5 Mbit/s
+- 调试接口：USART1（PB6/PB7），2,000,000 baud；FDCAN1（PA11/PA12），仲裁段和数据段均为 1 Mbit/s，关闭 BRS
 - 电压与电流采样的引脚、量程和换算参数见[采样与板级文档](doc/03-采样与板级.md)
 
 控制原理可以先记成两条路径：
@@ -52,7 +52,7 @@ flowchart LR
 | Drivers、Middlewares | STM32 HAL、CMSIS-DSP 等依赖库 |
 | doc | 分层架构和符号参考文档 |
 
-应用层时序入口是 ADC1 JEOS 中断；CAN 接收由主循环轮询，串口 DMA 回调只搬运字节，命令解析留在主循环。详细边界见[第一层总览](doc/01-系统架构总览.md)。
+应用层实时入口是 ADC1 JEOS 中断；CAN 接收中断将帧放入队列，主循环解析；串口 DMA 回调只搬运字节，命令解析留在主循环。详细边界见[第一层总览](doc/01-系统架构总览.md)。
 
 ## 构建
 
@@ -77,11 +77,21 @@ cmake --preset Boot-Release
 cmake --build --preset Boot-Release
 ~~~
 
-| 预设 | APP 起始地址 | 输出 BIN | 用途 |
-|---|---|---|---|
-| Debug | 0x08000000 | build/Debug/Observer_standalone.bin | SWD 独立调试 |
-| Release | 0x08000000 | build/Release/Observer_standalone.bin | SWD 独立运行 |
-| Boot-Release | 0x08005000 | build/Boot-Release/Observer_boot.bin | Bootloader 升级 |
+在原 `main` 使用的 STM32G431CBU6、HSE 24 MHz 板上，只验证 CAN 通信与 Boot 返回时，构建专用镜像：
+
+~~~powershell
+cmake --preset Boot-Release-HSE24
+cmake --build --preset Boot-Release-HSE24
+~~~
+
+两个 Boot 镜像的 PLL 分别使用 M=4（16 MHz）和 M=6（24 MHz），均得到 170 MHz。CBU6 测试板串口为 USART2（PB3/PB4），此分支串口为 USART1（PB6/PB7）；原板串口口上不会看到本镜像的 READY。跨板测试只用于验证 CAN/Boot 通信，不能据此确认电机采样与驱动功能。
+
+| 预设 | HSE | APP 起始地址 | 输出 BIN | 用途 |
+|---|---|---|---|---|
+| Debug | 16 MHz | 0x08000000 | build/Debug/Observer_standalone.bin | CBT6 板 SWD 独立调试 |
+| Release | 16 MHz | 0x08000000 | build/Release/Observer_standalone.bin | CBT6 板 SWD 独立运行 |
+| Boot-Release | 16 MHz | 0x08005000 | build/Boot-Release/Observer_boot.bin | CBT6 板 Bootloader 升级 |
+| Boot-Release-HSE24 | 24 MHz | 0x08005000 | build/Boot-Release-HSE24/Observer_boot_hse24.bin | CBU6 板 CAN/Boot 临时验证 |
 
 地址布局和 Boot 返回协议见[通信与调试](doc/04-通信与调试.md)及[底层参考](doc/05-底层参考.md)。
 

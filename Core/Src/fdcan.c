@@ -39,23 +39,23 @@ void MX_FDCAN1_Init(void)
   /* USER CODE END FDCAN1_Init 1 */
   hfdcan1.Instance = FDCAN1;
   hfdcan1.Init.ClockDivider = FDCAN_CLOCK_DIV1;
-  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_BRS;
+  hfdcan1.Init.FrameFormat = FDCAN_FRAME_FD_NO_BRS;
   hfdcan1.Init.Mode = FDCAN_MODE_NORMAL;
   hfdcan1.Init.AutoRetransmission = DISABLE;
   hfdcan1.Init.TransmitPause = DISABLE;
   hfdcan1.Init.ProtocolException = DISABLE;
-  /* 与 Bootloader 一致：170 MHz FDCAN kernel clock -> 500 kbit/s。 */
-  hfdcan1.Init.NominalPrescaler = 17;
+  /* 当前收发器阶段速率均为1 Mbit/s；FDCAN kernel clock为170 MHz。 */
+  hfdcan1.Init.NominalPrescaler = 5;
   hfdcan1.Init.NominalSyncJumpWidth = 1;
-  hfdcan1.Init.NominalTimeSeg1 = 14;
+  hfdcan1.Init.NominalTimeSeg1 = 28;
   hfdcan1.Init.NominalTimeSeg2 = 5;
-  /* 170 MHz / 2 / (1 + 13 + 3) = 5 Mbit/s data phase。 */
-  hfdcan1.Init.DataPrescaler = 2;
-  hfdcan1.Init.DataSyncJumpWidth = 3;
-  hfdcan1.Init.DataTimeSeg1 = 13;
-  hfdcan1.Init.DataTimeSeg2 = 3;
-  /* USER CODE NOTE: one exact standard filter is reserved for Boot ID 0x000. */
-  hfdcan1.Init.StdFiltersNbr = 1;
+  /* BRS关闭时FD数据段也保持1 Mbit/s；170 MHz / (5 * 34 TQ) = 1 Mbit/s。 */
+  hfdcan1.Init.DataPrescaler = 5;
+  hfdcan1.Init.DataSyncJumpWidth = 1;
+  hfdcan1.Init.DataTimeSeg1 = 28;
+  hfdcan1.Init.DataTimeSeg2 = 5;
+  /* 两个精确标准ID过滤器分别接收Boot命令和控制帧。 */
+  hfdcan1.Init.StdFiltersNbr = 2;
   hfdcan1.Init.ExtFiltersNbr = 0;
   hfdcan1.Init.TxFifoQueueMode = FDCAN_TX_FIFO_OPERATION;
   if (HAL_FDCAN_Init(&hfdcan1) != HAL_OK)
@@ -99,9 +99,15 @@ void HAL_FDCAN_MspInit(FDCAN_HandleTypeDef* fdcanHandle)
     GPIO_InitStruct.Pin = GPIO_PIN_11|GPIO_PIN_12;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
     GPIO_InitStruct.Pull = GPIO_NOPULL;
-    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_VERY_HIGH;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_MEDIUM;
     GPIO_InitStruct.Alternate = GPIO_AF9_FDCAN1;
     HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    /* FDCAN接收中断优先级低于ADC电流环中断。 */
+    HAL_NVIC_SetPriority(FDCAN1_IT0_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(FDCAN1_IT0_IRQn);
+    HAL_NVIC_SetPriority(FDCAN1_IT1_IRQn, 2, 0);
+    HAL_NVIC_EnableIRQ(FDCAN1_IT1_IRQn);
 
   /* USER CODE BEGIN FDCAN1_MspInit 1 */
 
@@ -125,6 +131,9 @@ void HAL_FDCAN_MspDeInit(FDCAN_HandleTypeDef* fdcanHandle)
     PA12     ------> FDCAN1_TX
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_11|GPIO_PIN_12);
+
+    HAL_NVIC_DisableIRQ(FDCAN1_IT0_IRQn);
+    HAL_NVIC_DisableIRQ(FDCAN1_IT1_IRQn);
 
   /* USER CODE BEGIN FDCAN1_MspDeInit 1 */
 

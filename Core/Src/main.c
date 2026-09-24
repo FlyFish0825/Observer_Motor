@@ -109,6 +109,7 @@ int main(void)
   MX_GPIO_Init();
   MX_DMA_Init();
   MX_TIM1_Init();
+  MX_TIM6_Init();
   MX_ADC1_Init();
   MX_ADC2_Init();
   MX_OPAMP1_Init();
@@ -141,7 +142,7 @@ int main(void)
 }
 
 /**
-  * @brief 系统时钟配置：HSE 8MHz → PLL(M=4, N=85, P=2) → 170MHz SYSCLK。
+  * @brief 系统时钟配置：HSE 16/24MHz → PLL(M=4/6, N=85, R=2) → 170MHz SYSCLK。
   * @retval None（失败进入Error_Handler死循环）。
   * @note Flash等待周期设为4WS，对应170MHz @ 1.7V BOOST模式。
   */
@@ -161,7 +162,11 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
   RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+#if BOARD_HSE_HZ == 24000000UL
+  RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV6;
+#else
   RCC_OscInitStruct.PLL.PLLM = RCC_PLLM_DIV4;
+#endif
   RCC_OscInitStruct.PLL.PLLN = 85;
   RCC_OscInitStruct.PLL.PLLP = RCC_PLLP_DIV2;
   RCC_OscInitStruct.PLL.PLLQ = RCC_PLLQ_DIV2;
