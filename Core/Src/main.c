@@ -1,4 +1,4 @@
-/* USER CODE BEGIN Header */
+﻿/* USER CODE BEGIN Header */
 /**
  ******************************************************************************
  * @file           : main.c
@@ -66,6 +66,8 @@ static FOC_Control_t motor_control;
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
+/* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
+static volatile uint32_t just_float_on_off = 0U;
 
 /**
  * @brief 通过调试串口发送控制台格式化后的数据。
