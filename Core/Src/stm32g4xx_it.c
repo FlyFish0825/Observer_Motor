@@ -54,6 +54,16 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+/* CH3 内部比较点只读取 MCU PWM 引脚电平，不改变高侧硬件限时。 */
+void TIM1_CC_IRQHandler(void)
+{
+  if (((TIM1->SR & TIM_SR_CC3IF) != 0U) &&
+      ((TIM1->DIER & TIM_DIER_CC3IE) != 0U)) {
+    TIM1->SR &= ~TIM_SR_CC3IF;
+    MotorCalibration_LsTim1Compare();
+  }
+}
+
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/

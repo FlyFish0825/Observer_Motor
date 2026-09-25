@@ -172,6 +172,25 @@ static void Main_CommandRsIdentify(int argc, char *argv[])
 
 }
 
+static void Main_CommandLsIdentify(int argc, char *argv[])
+{
+  HAL_StatusTypeDef status;
+  if (argc == 2 && strcmp(argv[1], "dump") == 0) {
+    MotorCalibration_LsDump();
+    return;
+  }
+  if (argc != 1) {
+    DebugConsole_Printf("ERR usage: ls_identify [dump]\r\n");
+    return;
+  }
+  status = MotorCalibration_LsStart();
+  if (status == HAL_BUSY) {
+    DebugConsole_Printf("ERR ls_identify already running\r\n");
+  } else if (status != HAL_OK) {
+    DebugConsole_Printf("ERR ls_identify unavailable; see LS_BLOCK above\r\n");
+  }
+}
+
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -288,6 +307,8 @@ int main(void)
     &just_float_on_off, false);
   DebugConsole_RegisterCommand("rs_identify", Main_CommandRsIdentify,
     "voltage Rs identify; current mode or stop optional");
+  DebugConsole_RegisterCommand("ls_identify", Main_CommandLsIdentify,
+    "先运行 rs_identify，再进行单脉冲电感辨识；dump 导出采样");
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -381,6 +402,7 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     MotorProtocol_Process();
     DebugConsole_Process();
     MotorCalibration_Process();
+    MotorCalibration_LsProcess();
 
     if ((HAL_GetTick() - led_task_tick) >= 500U) {
       led_task_tick = HAL_GetTick();

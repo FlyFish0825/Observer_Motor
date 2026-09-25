@@ -723,6 +723,10 @@ void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim)
  */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 {
+  if ((htim != NULL) && (htim->Instance == TIM1)) {
+    MotorCalibration_LsTim1Update();
+    return;
+  }
   MotorProtocol_TimerTick(htim);
 }
 

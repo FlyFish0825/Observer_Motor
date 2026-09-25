@@ -741,7 +741,8 @@ HAL_StatusTypeDef MotorCalibration_StartMode(RsInjectionMode_t mode)
         return HAL_ERROR;
     }
 
-    if ((motor_calibration.state == MOTOR_CALIBRATION_STARTING) ||
+    if (MotorCalibration_LsIsActive() ||
+        (motor_calibration.state == MOTOR_CALIBRATION_STARTING) ||
         (motor_calibration.state == MOTOR_CALIBRATION_RUNNING) ||
         (motor_calibration.state == MOTOR_CALIBRATION_STOPPING) ||
         (motor_calibration.finish_pending != 0U))

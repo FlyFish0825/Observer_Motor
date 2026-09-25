@@ -59,7 +59,7 @@ void FOC_Data_Init(void) {
   foc.state.ibus_filter = 0.0f;
 
   Observer_MotorParam_t motor = {
-      .Rs = 2.55f, 
+      .Rs = 3.34f,
       .Ls = 0.00086f, 
       .flux_linkage = 0.0035f, 
       .pole_pairs = 7
@@ -280,11 +280,21 @@ void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle) {
       FOC_BUS_CURRENT_FILTER_NEW * ibus_est;
 }
 
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc) {
+  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
+    MotorCalibration_LsDmaHalf();
+  }
+}
+
 /** @brief ADC1规则组DMA完成后更新母线电压和MCU温度快照。 */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
   uint16_t adc_vbus;
   uint16_t adc_temperature;
 
+  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
+    MotorCalibration_LsDmaComplete();
+    return;
+  }
   if ((hadc == NULL) || (hadc->Instance != ADC1)) {
     return;
   }
@@ -301,8 +311,18 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
 /** @brief ADC1规则组DMA异常后释放忙标志，允许下一周期自动重试。 */
 void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc) {
+  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
+    MotorCalibration_LsDmaError();
+    return;
+  }
   if ((hadc != NULL) && (hadc->Instance == ADC1)) {
     adc_regular_dma_busy = 0U;
+  }
+}
+
+void HAL_ADC_LevelOutOfWindowCallback(ADC_HandleTypeDef *hadc) {
+  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
+    MotorCalibration_LsOvercurrent();
   }
 }
 

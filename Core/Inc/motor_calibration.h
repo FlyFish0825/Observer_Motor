@@ -3,13 +3,14 @@
 
 /**
  * @file motor_calibration.h
- * @brief 静止状态下的电机 Rs 辨识接口。
+ * @brief 静止状态下的电机参数辨识接口。
  * @details 默认模式按四个命令电压档位注入，累计已施加 Duty、母线电压和
  *          相电流并拟合线间电阻；另保留定电流模式用于对照。该模块独占
  *          TIM1 相输出和 ADC 回调期间的 CCR1 控制权。
  */
 
 #include "foc_math.h"
+#include "motor_calibration_ls.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -85,6 +86,22 @@ float MotorCalibration_GetResultOhm(void);
  * @return 0 表示无错误，非零值对应实现中的中止原因表。
  */
 uint8_t MotorCalibration_GetErrorCode(void);
+
+/**
+ * @brief 启动一次硬件限时 A-B 单脉冲及 ADC2 规则组 DMA 采样。
+ * @return HAL_OK 表示已开始，HAL_BUSY 表示已有辨识在运行，HAL_ERROR 表示前置检查失败。
+ * @note MCU 引脚与 ADC 采集已实机验证；MOS 栅极波形及看门狗关断延迟仍需示波器确认。
+ */
+HAL_StatusTypeDef MotorCalibration_LsStart(void);
+void MotorCalibration_LsProcess(void);
+void MotorCalibration_LsDump(void);
+void MotorCalibration_LsTim1Update(void);
+void MotorCalibration_LsTim1Compare(void);
+void MotorCalibration_LsDmaHalf(void);
+void MotorCalibration_LsDmaComplete(void);
+void MotorCalibration_LsDmaError(void);
+void MotorCalibration_LsOvercurrent(void);
+uint8_t MotorCalibration_LsIsActive(void);
 
 #ifdef __cplusplus
 }
