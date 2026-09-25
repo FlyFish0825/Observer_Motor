@@ -23,6 +23,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "foc_math.h"
+#include "motor_calibration.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -407,13 +408,19 @@ void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   switch (GPIO_Pin) {
   case GPIO_PIN_10:
   HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-  FOC_PWM_Start();
+  if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
+    foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+    FOC_PWM_Start();
+  }
     break;
   case GPIO_PIN_11:
   HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  foc_motor_state = FOC_MOTOR_IDLE;
-  FOC_PWM_Stop();
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    MotorCalibration_Stop();
+  } else {
+    foc_motor_state = FOC_MOTOR_IDLE;
+    FOC_PWM_Stop();
+  }
     break;
   case GPIO_PIN_13:
 

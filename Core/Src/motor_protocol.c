@@ -2,7 +2,9 @@
 
 #include "app_memory.h"
 #include "foc_math.h"
+#include "motor_calibration.h"
 #include "tim.h"
+#include <math.h>
 #include <string.h>
 
 #define MOTOR_PROTOCOL_BOOT_MAGIC       0x544F4F42UL /* Bootloader跳转魔数。 */
@@ -40,6 +42,7 @@ typedef struct {
   volatile uint8_t debug_suppressed; /* 调试选择期间是否抑制普通反馈。 */
   volatile uint8_t timer_slot; /* 当前TIM6调度时隙。 */
   volatile uint8_t debug_divider; /* 调试反馈分频计数。 */
+  MotorCalibrationState_t calibration_reported_state;
   volatile uint8_t rx_head; /* ISR生产者索引。 */
   volatile uint8_t rx_tail; /* 主循环消费者索引。 */
   uint32_t heartbeat_next_tick; /* 下一次心跳的HAL tick。 */
@@ -173,6 +176,66 @@ static HAL_StatusTypeDef MotorProtocol_Send(uint32_t identifier,
   return status;
 }
 
+#define MOTOR_PROTOCOL_IDENTIFY_STATUS_ACCEPTED  0U
+#define MOTOR_PROTOCOL_IDENTIFY_STATUS_DONE      1U
+#define MOTOR_PROTOCOL_IDENTIFY_STATUS_BUSY      2U
+#define MOTOR_PROTOCOL_IDENTIFY_STATUS_REJECTED  3U
+#define MOTOR_PROTOCOL_IDENTIFY_STATUS_ABORTED   4U
+
+static void MotorProtocol_SendIdentificationResponse(uint8_t status)
+{
+  uint8_t data[8] = {0};
+  float result_ohm = MotorCalibration_GetResultOhm();
+  uint16_t result_mohm;
+
+  if ((!isfinite(result_ohm)) || (result_ohm <= 0.0f)) {
+    result_mohm = 0U;
+  } else if (result_ohm >= 65.535f) {
+    result_mohm = 65535U;
+  } else {
+    result_mohm = (uint16_t)(result_ohm * 1000.0f + 0.5f);
+  }
+
+  data[0] = motor_protocol.node_id;
+  data[1] = MOTOR_PROTOCOL_CMD_MOTOR_IDENTIFY;
+  data[2] = status;
+  data[3] = MotorCalibration_GetErrorCode();
+  MotorProtocol_PutU16(&data[4], result_mohm);
+  data[6] = motor_protocol.feedback_sequence++;
+  data[7] = MotorProtocol_CRC8(data, 7U);
+
+  (void)MotorProtocol_Send(MOTOR_PROTOCOL_ID_RESPONSE_BASE +
+                               motor_protocol.node_id,
+                           FDCAN_DLC_BYTES_8,
+                           FDCAN_CLASSIC_CAN,
+                           data);
+}
+
+static void MotorProtocol_HandleIdentification(uint8_t action)
+{
+  HAL_StatusTypeDef result;
+
+  if (action != 0U) {
+    result = MotorCalibration_Start();
+    motor_protocol.calibration_reported_state =
+        MotorCalibration_GetState();
+    if (result == HAL_OK) {
+      MotorProtocol_SendIdentificationResponse(
+          MOTOR_PROTOCOL_IDENTIFY_STATUS_ACCEPTED);
+    } else if (result == HAL_BUSY) {
+      MotorProtocol_SendIdentificationResponse(
+          MOTOR_PROTOCOL_IDENTIFY_STATUS_BUSY);
+    } else {
+      MotorProtocol_SendIdentificationResponse(
+          MOTOR_PROTOCOL_IDENTIFY_STATUS_REJECTED);
+    }
+  } else {
+    MotorCalibration_Stop();
+    MotorProtocol_SendIdentificationResponse(
+        MOTOR_PROTOCOL_IDENTIFY_STATUS_ACCEPTED);
+  }
+}
+
 /**
  * @brief 上电后先发送经典CAN HELLO，确认APP已启动且CAN物理链路可通信。
  * @note 在周期反馈定时器启动前调用，避免CAN FD反馈抢先占用总线。
@@ -205,6 +268,13 @@ static void MotorProtocol_SendPowerOnHello(void)
  */
 static void MotorProtocol_SetRun(uint8_t run)
 {
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    if (run == 0U) {
+      MotorCalibration_Stop();
+    }
+    return;
+  }
+
   if (run == 0U) {
     foc_motor_state = FOC_MOTOR_IDLE;
     FOC_PWM_Stop();
@@ -447,6 +517,8 @@ static void MotorProtocol_HandleVector(const uint8_t data[24])
     } else if (data[1] == MOTOR_PROTOCOL_CMD_RUN_VECTOR) {
       MotorProtocol_SetRun(0U);
     }
+  } else if (data[1] == MOTOR_PROTOCOL_CMD_MOTOR_IDENTIFY) {
+    MotorProtocol_HandleIdentification(data[3]);
   } else if (data[1] == MOTOR_PROTOCOL_CMD_STATUS_ONCE) {
     MotorProtocol_SendNormalFeedback();
   }
@@ -475,6 +547,8 @@ static void MotorProtocol_HandleLegacy(const uint8_t data[8])
       motor_protocol.control->speed_ref_rpm = speed_rpm;
       FOC_Control_EnableSpeedLoop(motor_protocol.control, 1U);
     }
+  } else if (data[1] == MOTOR_PROTOCOL_CMD_MOTOR_IDENTIFY) {
+    MotorProtocol_HandleIdentification(data[3]);
   }
 }
 
@@ -596,6 +670,7 @@ HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
   motor_protocol.debug_suppressed = 0U;
   motor_protocol.timer_slot = 0U;
   motor_protocol.debug_divider = 0U;
+  motor_protocol.calibration_reported_state = MOTOR_CALIBRATION_IDLE;
   motor_protocol.heartbeat_next_tick =
       HAL_GetTick() + 1000U + ((uint32_t)motor_protocol.node_id * 10U);
 
@@ -669,6 +744,25 @@ void MotorProtocol_Process(void)
     motor_protocol.rx_tail =
         (uint8_t)((motor_protocol.rx_tail + 1U) % MOTOR_PROTOCOL_RX_RING_SIZE);
     MotorProtocol_HandleRx(&item);
+  }
+
+  {
+    MotorCalibrationState_t state = MotorCalibration_GetState();
+    if ((state == MOTOR_CALIBRATION_DONE) &&
+        (motor_protocol.calibration_reported_state !=
+         MOTOR_CALIBRATION_DONE)) {
+      MotorProtocol_SendIdentificationResponse(
+          MOTOR_PROTOCOL_IDENTIFY_STATUS_DONE);
+      motor_protocol.calibration_reported_state = state;
+    } else if ((state == MOTOR_CALIBRATION_ERROR) &&
+               (motor_protocol.calibration_reported_state !=
+                MOTOR_CALIBRATION_ERROR)) {
+      MotorProtocol_SendIdentificationResponse(
+          (MotorCalibration_GetErrorCode() == 1U) ?
+              MOTOR_PROTOCOL_IDENTIFY_STATUS_ABORTED :
+              MOTOR_PROTOCOL_IDENTIFY_STATUS_REJECTED);
+      motor_protocol.calibration_reported_state = state;
+    }
   }
 
   #if MOTOR_PROTOCOL_HEARTBEAT_ENABLED

@@ -83,6 +83,7 @@ typedef enum
     FOC_MOTOR_IDLE = 0, /* PWM关闭或电机未运行。 */
     FOC_MOTOR_OPEN_LOOP, /* 使用给定电压和角度。 */
     FOC_MOTOR_CLOSED_LOOP, /* 使用观测器和电流环闭环。 */
+    FOC_MOTOR_CALIBRATION, /* Rs辨识独占功率级和ADC回调。 */
 
 } FOC_Motor_State_t;
 
@@ -151,7 +152,7 @@ typedef struct {
 
 typedef struct {
 
-  uint8_t calibrated;
+  volatile uint8_t calibrated; /* ADC ISR写入，主循环读取。 */
 
   float ia_offset;
   float ib_offset;
@@ -216,7 +217,7 @@ typedef struct {
 extern FOC_SIN_COS_t foc_sin_cos;
 extern FOC_SIN_COS_t observer_sin_cos;
 extern FOC_Handle_t foc;
-extern FOC_Motor_State_t foc_motor_state;
+extern volatile FOC_Motor_State_t foc_motor_state;
 
 
 

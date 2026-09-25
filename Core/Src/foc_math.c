@@ -1,4 +1,5 @@
 #include "foc_math.h"
+#include "motor_calibration.h"
 #include "adc.h"
 #include "bsp_dwt.h"
 #include "cordic.h"
@@ -9,7 +10,7 @@
 FOC_Handle_t foc = {0}; /* 全局FOC状态、采样值、观测器和SVPWM结果。 */
 FOC_SIN_COS_t foc_sin_cos = {0}; /* 电流环/开环变换使用的正余弦。 */
 FOC_SIN_COS_t observer_sin_cos = {0}; /* PLL鉴相使用的正余弦。 */
-FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE; /* 当前电机运行状态。 */
+volatile FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE; /* 当前电机运行状态。 */
 
 /* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */
 static uint32_t foc_current_rebuild_threshold = 0U;
@@ -41,6 +42,8 @@ void FOC_Data_Init(void) {
   /*
    * 4倍硬件过采样后右移量未在ADC硬件中完成，
    * 因此保留原来的0.25比例。
+   * 当前板级参数由历史换算系数反推：5 mOhm分流电阻，
+   * 模拟差分增益约28.2776倍，对应R56=11 kOhm、R58/R59约390 Ohm。
    */
   foc.current.gain_a = 0.0056982421875f * 0.25f;
   foc.current.gain_b = 0.0056982421875f * 0.25f;
@@ -84,6 +87,11 @@ void FOC_Data_Init(void) {
  */
 void FOC_PWM_Start(void) {
 
+  /* Calibration owns TIM1; a late run request must not expose SVPWM outputs. */
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    return;
+  }
+
   uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U;
   TIM1->CCR1 = init_ccr;
   TIM1->CCR2 = init_ccr;
@@ -105,6 +113,12 @@ void FOC_PWM_Start(void) {
  * @brief 关闭PWM输出并清除比较值，保证停机时功率管不保持上一次状态。
  */
 void FOC_PWM_Stop(void) {
+
+  /* Convert any external stop request into the calibration safe-stop path. */
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    MotorCalibration_Stop();
+    return;
+  }
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);

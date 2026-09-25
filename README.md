@@ -128,8 +128,14 @@ cmake --preset Boot-Release
 cmake --build --preset Boot-Release
 ```
 
-- `Debug`/`Release`：独立 APP，向量表位于 `0x08000000`；
-- `Boot-Debug`/`Boot-Release`：配合 Bootloader 的 APP，向量表位于 `0x08005000`。
+`Debug`/`Release` 为独立 APP，向量表位于 `0x08000000`；`Boot-Debug`/`Boot-Release` 为配套 Bootloader 的 APP，向量表位于 `0x08005000`。当前板卡使用 24 MHz 外部晶振；16 MHz 板卡须先核对 `Core/Inc/board_config.h` 中的 `BOARD_HSE_HZ`。
 
-当前板卡使用 24 MHz 外部晶振。若使用 16 MHz 板卡，先修改
-`Core/Inc/board_config.h` 中的 `BOARD_HSE_HZ`。
+## Rs Identification
+
+默认通过串口 `rs_identify` 或 CAN `MOTOR_IDENTIFY (0x12)` 启动四档定电压辨识（0.65/0.95/1.25/1.55 V）。辨识以已施加 Duty 和动态 Vbus 计算理想命令电压并拟合 Rs；`rs_identify current` 保留定电流对照模式，`rs_identify stop` 可中止。CAN 帧、返回值及故障码详见 [CAN FD 电机协议](docs/CANFD_MOTOR_PROTOCOL.md)。
+
+### 改动记录
+
+- 2026-09-25：新增 `Core/Inc/motor_calibration.h` 和 `Core/Src/motor_calibration.c`，接入现有 ADC 回调、串口命令与 CAN 辨识命令。默认使用四档定电压注入，保留 `rs_identify current` 供定电流对照；正式结果使用已施加 Duty 与 Vbus 的理想电压拟合。
+- 将 CAN FD 协议移至 `docs/`，README 保留简介和链接；清理旧示波器 LUT、临时快照及实验测试文件。保留 TIM1 安全启停、B 相互补输出、1.80 A 软件过流与超时关断。
+- 根据辨识日志，将定电压模式采样前后窗口的电流稳定差值限值由 0.005 A 调为 0.010 A；ADC 停更、过流、Duty 和阶段超时保护保持不变。

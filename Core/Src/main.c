@@ -36,11 +36,13 @@
 #include "stdio.h"
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 #include "debug_console.h"
 #include "controller.h"
 
 #include "app_memory.h"
 #include "motor_protocol.h"
+#include "motor_calibration.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -75,11 +77,43 @@ static volatile uint32_t just_float_on_off = 0U;
  */
 static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 {
-    HAL_UART_Transmit(
-        &huart2,
-        (uint8_t *)data,
-        len,
-        100U);
+    uint32_t just_float_was_enabled = just_float_on_off;
+    uint32_t start_tick;
+    uint16_t index;
+
+    /* USART2 is shared by JustFloat DMA and text responses. */
+    just_float_on_off = 0U;
+    CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
+
+    /* Wait for the last DMA byte, then send the text directly through TDR. */
+    start_tick = HAL_GetTick();
+    while (((USART2->ISR & USART_ISR_TC) == 0U) &&
+           ((HAL_GetTick() - start_tick) < 10U)) {
+    }
+
+    USART2->ICR = USART_ICR_TCCF;
+    for (index = 0U; index < len; ++index) {
+      start_tick = HAL_GetTick();
+      while ((USART2->ISR & USART_ISR_TXE_TXFNF) == 0U) {
+        if ((HAL_GetTick() - start_tick) >= 100U) {
+          goto debug_console_tx_done;
+        }
+      }
+      USART2->TDR = data[index];
+    }
+
+    start_tick = HAL_GetTick();
+    while ((USART2->ISR & USART_ISR_TC) == 0U) {
+      if ((HAL_GetTick() - start_tick) >= 100U) {
+        break;
+      }
+    }
+
+debug_console_tx_done:
+    if (just_float_was_enabled != 0U) {
+      SET_BIT(USART2->CR3, USART_CR3_DMAT);
+    }
+    just_float_on_off = just_float_was_enabled;
 }
 
 /* USER CODE END PM */
@@ -100,8 +134,43 @@ typedef struct {
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
 
-/* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
-static volatile uint32_t just_float_on_off = 1U;
+static void Main_CommandRsIdentify(int argc, char *argv[])
+{
+  HAL_StatusTypeDef result;
+
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("RS_IDENTIFY STOP requested\r\n");
+    return;
+  }
+
+  if ((argc != 1) &&
+      !((argc == 2) && (strcmp(argv[1], "current") == 0))) {
+    DebugConsole_Printf("ERR usage: rs_identify [current|stop]\r\n");
+    return;
+  }
+
+  result = (argc == 2) ?
+    MotorCalibration_StartMode(RS_INJECTION_CURRENT) :
+    MotorCalibration_Start();
+  if (result == HAL_BUSY) {
+    DebugConsole_Printf("ERR rs_identify already running\r\n");
+    return;
+  }
+  if (result != HAL_OK) {
+    if (foc_motor_state != FOC_MOTOR_IDLE) {
+      DebugConsole_Printf("ERR rs_identify motor running\r\n");
+    } else if (foc.calibration.calibrated == 0U) {
+      DebugConsole_Printf("ERR rs_identify current offset not ready\r\n");
+    } else if (foc.state.vbus < 1.0f) {
+      DebugConsole_Printf("ERR rs_identify bus voltage below 1 V\r\n");
+    } else {
+      DebugConsole_Printf("ERR rs_identify unavailable\r\n");
+    }
+    return;
+  }
+
+}
 
 /* USER CODE END PV */
 
@@ -217,6 +286,8 @@ int main(void)
     &motor_control.speed_loop_enable, false);
   DebugConsole_RegisterBool("just_float",
     &just_float_on_off, false);
+  DebugConsole_RegisterCommand("rs_identify", Main_CommandRsIdentify,
+    "voltage Rs identify; current mode or stop optional");
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -239,8 +310,29 @@ int main(void)
     Error_Handler();
   }
 
-
-
+  /* 上电时仅启动TIM1 CH4内部ADC触发，不使能三相功率输出。
+   * 1000次注入采样约需40 ms；完成零偏校准后关闭触发，保持电机停机。 */
+  if ((TIM1->CCER & (TIM_CCER_CC1E | TIM_CCER_CC1NE |
+                      TIM_CCER_CC2E | TIM_CCER_CC2NE |
+                      TIM_CCER_CC3E | TIM_CCER_CC3NE)) != 0U) {
+    Error_Handler();
+  }
+  TIM1->CCR4 = foc.timer.adc_trigger;
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    Error_Handler();
+  }
+  {
+    uint32_t calibration_start_tick = HAL_GetTick();
+    while (foc.calibration.calibrated == 0U) {
+      if ((HAL_GetTick() - calibration_start_tick) >= 200U) {
+        (void)HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4);
+        Error_Handler();
+      }
+    }
+  }
+  if (HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    Error_Handler();
+  }
 
 
 
@@ -288,6 +380,7 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
+    MotorCalibration_Process();
 
     if ((HAL_GetTick() - led_task_tick) >= 500U) {
       led_task_tick = HAL_GetTick();
@@ -418,6 +511,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
 
+    if (MotorCalibration_IsActive() != 0U) {
+      MotorCalibration_AdcStep(adc_b);
+      return;
+    }
+
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
    
@@ -539,15 +637,21 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
       break;
     }
+
+    case FOC_MOTOR_CALIBRATION:
+      /* MotorCalibration_AdcStep owns CCR1; never resume SVPWM writeback. */
+      break;
     }
 
     /* FOC实时估算母线电流；100 Hz CAN反馈读取低通滤波后的快照。 */
     FOC_UpdateBusCurrentEstimate(&foc);
 
     
-    TIM1->CCR1 = foc.svpwm.ccr_a;
-    TIM1->CCR2 = foc.svpwm.ccr_b;
-    TIM1->CCR3 = foc.svpwm.ccr_c;
+    if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
+      TIM1->CCR1 = foc.svpwm.ccr_a;
+      TIM1->CCR2 = foc.svpwm.ccr_b;
+      TIM1->CCR3 = foc.svpwm.ccr_c;
+    }
 
 
 
