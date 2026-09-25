@@ -122,7 +122,6 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_calibration.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/fdcan_test.c
 )
 
 
