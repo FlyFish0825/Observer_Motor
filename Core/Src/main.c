@@ -144,15 +144,12 @@ static void Main_CommandRsIdentify(int argc, char *argv[])
     return;
   }
 
-  if ((argc != 1) &&
-      !((argc == 2) && (strcmp(argv[1], "current") == 0))) {
-    DebugConsole_Printf("ERR usage: rs_identify [current|stop]\r\n");
+  if (argc != 1) {
+    DebugConsole_Printf("ERR usage: rs_identify [stop]\r\n");
     return;
   }
 
-  result = (argc == 2) ?
-    MotorCalibration_StartMode(RS_INJECTION_CURRENT) :
-    MotorCalibration_Start();
+  result = MotorCalibration_Start();
   if (result == HAL_BUSY) {
     DebugConsole_Printf("ERR rs_identify already running\r\n");
     return;
@@ -175,12 +172,8 @@ static void Main_CommandRsIdentify(int argc, char *argv[])
 static void Main_CommandLsIdentify(int argc, char *argv[])
 {
   HAL_StatusTypeDef status;
-  if (argc == 2 && strcmp(argv[1], "dump") == 0) {
-    MotorCalibration_LsDump();
-    return;
-  }
   if (argc != 1) {
-    DebugConsole_Printf("ERR usage: ls_identify [dump]\r\n");
+    DebugConsole_Printf("ERR usage: ls_identify\r\n");
     return;
   }
   status = MotorCalibration_LsStart();
@@ -306,9 +299,9 @@ int main(void)
   DebugConsole_RegisterBool("just_float",
     &just_float_on_off, false);
   DebugConsole_RegisterCommand("rs_identify", Main_CommandRsIdentify,
-    "voltage Rs identify; current mode or stop optional");
+    "单相电阻辨识；stop 可中止");
   DebugConsole_RegisterCommand("ls_identify", Main_CommandLsIdentify,
-    "先运行 rs_identify，再进行单脉冲电感辨识；dump 导出采样");
+    "先运行 rs_identify，再进行单脉冲电感辨识");
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -534,7 +527,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
 
     if (MotorCalibration_IsActive() != 0U) {
-      MotorCalibration_AdcStep(adc_b);
+      MotorCalibration_AdcStep();
       return;
     }
 
@@ -661,7 +654,7 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     }
 
     case FOC_MOTOR_CALIBRATION:
-      /* MotorCalibration_AdcStep owns CCR1; never resume SVPWM writeback. */
+      /* Rs 辨识期间独占 CCR1，不再执行 FOC 的 SVPWM 写回。 */
       break;
     }
 

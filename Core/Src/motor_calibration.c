@@ -1,9 +1,11 @@
 #include "motor_calibration.h"
 
 #include "debug_console.h"
+#include "adc.h"
 #include "tim.h"
 #include <math.h>
 #include <stdint.h>
+#include <string.h>
 
 /* 辨识档位数；阶段数组、日志和拟合均以此为边界。 */
 #define MOTOR_CALIBRATION_STAGE_COUNT             4U
@@ -27,16 +29,11 @@
 #define MOTOR_CALIBRATION_MIN_CURRENT_A           0.02f
 /* 多档拟合的最小电流跨度；单位 A。 */
 #define MOTOR_CALIBRATION_MIN_CURRENT_SPREAD_A    0.02f
-/* 定电流对照模式下平均电流相对目标值的允许误差比例。 */
-#define MOTOR_CALIBRATION_TARGET_TOLERANCE        0.05f
-/* 定电流对照模式首尾窗口允许的电流幅值均值差；单位 A。 */
-#define MOTOR_CALIBRATION_STABLE_DELTA_A          0.002f
 /* 默认定电压模式首尾窗口允许的电流幅值均值差；单位 A。 */
 #define MOTOR_CALIBRATION_VOLTAGE_STABLE_DELTA_A  0.010f
+#define MOTOR_CALIBRATION_TARGET_TOLERANCE        0.05f
 /* 标定期间允许的最大 PWM 占空比，范围 0..1。 */
 #define MOTOR_CALIBRATION_MAX_DUTY                0.20f
-/* 保留的定电流对照模式离散积分系数，单位 duty/A。 */
-#define MOTOR_CALIBRATION_CURRENT_KP              0.003f
 /* 定电压模式每个 ADC 周期最大 Duty 变化量，限制电压建立斜率。 */
 #define MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP       0.0001f
 /* 判断实际量化 Duty 已到定电压目标的容差；Duty 比例。 */
@@ -52,15 +49,6 @@
      TIM_CCER_CC2E | TIM_CCER_CC2NE | \
      TIM_CCER_CC3E | TIM_CCER_CC3NE)
 
-/* 定电流对照模式的四档目标电流，单位 A；与定电压默认模式互斥。 */
-/**
- * @brief 可选定电流对照模式的四档目标；按阶段索引访问，单位 A。
- */
-static const float motor_calibration_stage_target_current[
-    MOTOR_CALIBRATION_STAGE_COUNT] = {
-    0.50f, 0.80f, 1.15f, 1.50f
-};
-
 /* 默认定电压模式的四档命令平均电压，单位 V，不代表实测绕组电压。 */
 /**
  * @brief 默认定电压模式的四档命令目标；按阶段索引访问，单位 V。
@@ -71,76 +59,27 @@ static const float rs_voltage_targets[MOTOR_CALIBRATION_STAGE_COUNT] = {
 };
 
 /** @brief 单一注入档的采样累计值、稳定性判定和故障标志。 */
-typedef struct
-{
-    float sum_ib;                         /**< 正式采样有符号 Ib 累加值，单位 A。 */
-    float sum_abs_ib;                     /**< 正式采样 |Ib| 累加值，单位 A。 */
-    uint64_t sum_adc_b;                   /**< 正式采样 ADC_B 原始累加码值总和。 */
-    uint64_t sum_ccr1;                    /**< 与正式 ADC 样本配对的 CCR1 总和。 */
-    float sum_vbus;                       /**< 正式采样母线电压总和，单位 V。 */
-    float sum_u_cmd;                      /**< Σ(已施加 Duty * 对应 Vbus)，单位 V。 */
-    float sum_start_abs_ib;               /**< 首 250 个正式样本的 |Ib| 累加，单位 A。 */
-    float sum_end_abs_ib;                 /**< 末 250 个正式样本的 |Ib| 累加，单位 A。 */
-    float sum_start_duty;                 /**< 首窗口配对 Duty 总和，比例值。 */
-    float sum_end_duty;                   /**< 末窗口配对 Duty 总和，比例值。 */
-    float min_duty;                       /**< 正式采样期间最小已施加 Duty。 */
-    float max_duty;                       /**< 正式采样期间最大已施加 Duty。 */
-    float min_ib;                         /**< 正式采样期间最小有符号 Ib，单位 A。 */
-    float max_ib;                         /**< 正式采样期间最大有符号 Ib，单位 A。 */
-    float max_abs_ib_seen;                /**< 全阶段观测到的最大 |Ib|，单位 A。 */
-    uint32_t sample_count;                /**< 正式采样有效样本数。 */
-    uint32_t start_window_count;          /**< 首窗口已累计样本数。 */
-    uint32_t end_window_count;            /**< 末窗口已累计样本数。 */
-    uint32_t settle_start_tick_ms;        /**< 稳定等待计时起点，HAL tick 毫秒。 */
-    uint32_t settle_elapsed_ms;           /**< 稳定等待实测耗时，单位 ms。 */
-    uint32_t duty_target_consecutive_cycles; /**< 等待期间连续达到目标 Duty 的回调数。 */
-    uint8_t settle_timing_valid;          /**< settle_elapsed_ms 是否来自完整计时。 */
-    uint8_t target_reached;               /**< 定电流模式目标电流误差是否合格。 */
-    uint8_t voltage_target_reached;       /**< 定电压模式平均命令电压是否合格。 */
-    uint8_t duty_target_settled;          /**< 正式采样前 Duty 是否连续稳定到位。 */
-    uint8_t current_stable;               /**< 首尾窗口电流差是否满足当前模式阈值。 */
-    uint8_t duty_saturated;               /**< 阶段是否因 Duty 上限而饱和。 */
-    uint8_t overcurrent_detected;         /**< 此阶段是否触发软件过流关断。 */
+typedef struct {
+    float sum_abs_ib, sum_u_cmd, sum_start_abs_ib, sum_end_abs_ib;
+    uint32_t sample_count, start_window_count, end_window_count;
+    uint32_t duty_target_consecutive_cycles;
+    uint8_t voltage_target_reached, duty_target_settled, current_stable;
 } MotorCalibrationStageData_t;
 
-/** @brief 跨 ISR 与主循环共享的辨识运行上下文及最终拟合结果。 */
-typedef struct
-{
-    volatile MotorCalibrationState_t state; /**< ISR 与主循环共享的当前状态。 */
-    volatile uint8_t finish_pending;         /**< ISR 请求主循环完成关断/报告的标志。 */
-    volatile MotorCalibrationState_t terminal_state; /**< 本次运行期望的终态。 */
-    uint32_t cycle;                          /**< 当前阶段等待/采样总回调计数。 */
-    uint8_t stage;                           /**< 当前阶段索引，范围 0..3。 */
-    RsInjectionMode_t mode;                  /**< 当前注入模式，决定 Duty 控制路径。 */
-    float duty;                              /**< 下一次写入 CCR1 的控制 Duty 比例。 */
-    volatile uint32_t last_adc_step_tick_ms; /**< 最近一次 ADC 处理时间，HAL tick 毫秒。 */
-    volatile uint32_t stage_start_tick_ms;   /**< 当前阶段起点，HAL tick 毫秒。 */
-
-    /* ADC 回调在 PWM 顶部附近由 CH4 触发。回调写入的 CCR 先进入预装载寄存器，
-     * 在随后中心对齐计数器 CNT=0 的更新事件才生效，并早于下一次 CH4 采样。
-     * 因此此处保存的是下一样本所配对的命令，不能用本次回调刚算出的新命令
-     * 回填当前样本的电压。 */
-    float next_sample_duty;                  /**< 下一 ADC 样本应配对的量化 Duty。 */
-    uint16_t next_sample_ccr1;               /**< 同一 PWM 命令的量化 CCR1 值。 */
-
-    MotorCalibrationStageData_t stage_data[MOTOR_CALIBRATION_STAGE_COUNT]; /**< 四档独立累计数据。 */
-    float r_ab_fit;                          /**< 四档拟合线间斜率，单位 Ω。 */
-    float voltage_fit_intercept;             /**< 四档 U-I 拟合截距，单位 V。 */
-    float rs_all;                            /**< 四档单相 Rs = r_ab_fit / 2，单位 Ω。 */
-    float rs_2_4;                            /**< 第 2～4 档对照拟合的单相 Rs，单位 Ω。 */
-    float ideal_r_ab_2_4;                    /**< 第 2～4 档拟合线间斜率，单位 Ω。 */
-    float ideal_intercept_2_4;               /**< 第 2～4 档拟合截距，单位 V。 */
-    float fit_all_current_span;              /**< 四档平均电流跨度，单位 A。 */
-    float fit_2_4_current_span;              /**< 第 2～4 档平均电流跨度，单位 A。 */
-    float fit_all_denominator;               /**< 四档最小二乘分母，用于退化诊断。 */
-    float fit_2_4_denominator;               /**< 第 2～4 档拟合分母，用于退化诊断。 */
-    uint8_t fit_all_valid;                   /**< 四档拟合是否数值有效。 */
-    uint8_t fit_2_4_valid;                   /**< 第 2～4 档拟合是否数值有效。 */
-    uint8_t all_stages_valid;                /**< 四档样本和阶段判据是否全部通过。 */
-    uint8_t error_code;                      /**< 最近一次失败原因码；0 表示无错误。 */
+typedef struct {
+    volatile MotorCalibrationState_t state;
+    volatile uint8_t finish_pending;
+    volatile MotorCalibrationState_t terminal_state;
+    uint32_t cycle;
+    uint8_t stage;
+    float duty;
+    volatile uint32_t last_adc_step_tick_ms, stage_start_tick_ms;
+    float next_sample_duty;
+    MotorCalibrationStageData_t stage_data[MOTOR_CALIBRATION_STAGE_COUNT];
+    float rs_all;
+    uint8_t error_code;
 } MotorCalibrationContext_t;
 
-/* 模块唯一运行上下文；ISR 写入采样数据，主循环读取并完成报告。 */
 static MotorCalibrationContext_t motor_calibration;
 
 /**
@@ -197,32 +136,19 @@ static float MotorCalibration_Average(float sum, uint32_t count)
 /**
  * @brief 根据阶段累计数据计算目标到位及电流稳定标志。
  * @param index 阶段数组索引，调用方须保证小于 MOTOR_CALIBRATION_STAGE_COUNT。
- * @return 无；结果写入该阶段的 target_reached、voltage_target_reached 和
- *         current_stable 字段。
+ * @return 无；结果写入电压目标和电流稳定标志。
  */
 static void MotorCalibration_CheckStage(uint8_t index)
 {
     /* 下列量均由当前阶段样本计算；电流使用幅值，电压使用实际配对命令。 */
     MotorCalibrationStageData_t *data = &motor_calibration.stage_data[index]; /* 当前阶段累计记录。 */
-    float target_i = motor_calibration_stage_target_current[index]; /* 电流对照目标，A。 */
     float target_u = rs_voltage_targets[index]; /* 默认模式命令电压目标，V。 */
-    float average_i = MotorCalibration_Average(data->sum_abs_ib,
-                                                data->sample_count); /* |Ib| 全窗均值，A。 */
     float average_u = MotorCalibration_Average(data->sum_u_cmd,
                                                 data->sample_count); /* 命令电压全窗均值，V。 */
     float start_i = MotorCalibration_Average(data->sum_start_abs_ib,
                                               data->start_window_count); /* 首窗口 |Ib| 均值，A。 */
     float end_i = MotorCalibration_Average(data->sum_end_abs_ib,
                                             data->end_window_count); /* 末窗口 |Ib| 均值，A。 */
-    float stable_delta_a = motor_calibration.mode == RS_INJECTION_VOLTAGE ?
-        MOTOR_CALIBRATION_VOLTAGE_STABLE_DELTA_A :
-        MOTOR_CALIBRATION_STABLE_DELTA_A; /* 当前模式采用的首尾差阈值，A。 */
-
-    data->target_reached =
-        (data->sample_count == MOTOR_CALIBRATION_SAMPLE_CYCLES) &&
-        isfinite(average_i) &&
-        (fabsf(average_i - target_i) <=
-         target_i * MOTOR_CALIBRATION_TARGET_TOLERANCE);
     data->voltage_target_reached =
         (data->sample_count == MOTOR_CALIBRATION_SAMPLE_CYCLES) &&
         isfinite(average_u) &&
@@ -232,151 +158,48 @@ static void MotorCalibration_CheckStage(uint8_t index)
         (data->start_window_count == MOTOR_CALIBRATION_WINDOW_CYCLES) &&
         (data->end_window_count == MOTOR_CALIBRATION_WINDOW_CYCLES) &&
         isfinite(start_i) && isfinite(end_i) &&
-        (fabsf(end_i - start_i) < stable_delta_a);
+        (fabsf(end_i - start_i) < MOTOR_CALIBRATION_VOLTAGE_STABLE_DELTA_A);
 }
 
-/**
- * @brief 对连续阶段的 (平均 |Ib|, 平均 U_CMD) 点做带截距最小二乘拟合。
- * @param first_stage 首档数组索引。
- * @param stage_count 纳入拟合的连续档数。
- * @param slope 输出线间电阻斜率，单位 Ω。
- * @param intercept 输出电压截距，单位 V。
- * @param current_span 输出参与拟合的最大与最小平均电流之差，单位 A。
- * @param fit_denominator 输出最小二乘分母，用于日志诊断。
- * @return 1 表示拟合数值有效；0 表示样本不足、电流跨度不足或拟合无效。
- * @note 输出指针必须有效；失败时所有输出先置为 NAN，斜率不是单相 Rs。
- */
-static uint8_t MotorCalibration_Fit(uint8_t first_stage,
-                                    uint8_t stage_count,
-                                    float *slope,
-                                    float *intercept,
-                                    float *current_span,
-                                    float *fit_denominator)
+/* 使用四档平均电压/电流拟合 U=R_AB*I+b，再换算单相 Rs=R_AB/2。 */
+static uint8_t MotorCalibration_Fit(float *rs)
 {
-    /* 对每档平均点拟合 U=R_AB*I+b；截距 b 吸收固定电压偏置，
-     * 最终单相参数由外层计算 Rs=R_AB/2。 */
-    float sum_i = 0.0f;       /* ΣI，用于最小二乘正规方程。 */
-    float sum_u = 0.0f;       /* ΣU，用于计算斜率和截距。 */
-    float sum_ii = 0.0f;      /* Σ(I²)，用于拟合分母。 */
-    float sum_iu = 0.0f;      /* Σ(IU)，用于拟合分子。 */
-    float min_i = INFINITY;   /* 所选阶段平均电流最小值，A。 */
-    float max_i = -INFINITY;  /* 所选阶段平均电流最大值，A。 */
-    float denominator;        /* nΣ(I²)-(ΣI)²，判断样本是否可辨识。 */
-    uint8_t offset;           /* 所选阶段区间内的零基循环索引。 */
+    float sum_i = 0.0f, sum_u = 0.0f, sum_ii = 0.0f, sum_iu = 0.0f;
+    float min_i = INFINITY, max_i = -INFINITY;
+    const uint8_t n = MOTOR_CALIBRATION_STAGE_COUNT;
 
-    *slope = NAN;
-    *intercept = NAN;
-    *current_span = NAN;
-    *fit_denominator = NAN;
-
-    for (offset = 0U; offset < stage_count; ++offset)
-    {
-        uint8_t index = (uint8_t)(first_stage + offset); /* 当前档索引。 */
-        const MotorCalibrationStageData_t *data =
-            &motor_calibration.stage_data[index]; /* 当前档只读累计数据。 */
-        float average_i; /* 当前档平均电流幅值，A。 */
-        float average_u; /* 当前档平均理想命令电压，V。 */
-
-        if (data->sample_count == 0U)
-        {
-            return 0U;
-        }
-
-        average_i = MotorCalibration_Average(
-            data->sum_abs_ib, data->sample_count);
-        average_u = MotorCalibration_Average(
-            data->sum_u_cmd, data->sample_count);
-        if ((!isfinite(average_i)) || (!isfinite(average_u)))
-        {
-            return 0U;
-        }
-
-        if (average_i < min_i)
-        {
-            min_i = average_i;
-        }
-        if (average_i > max_i)
-        {
-            max_i = average_i;
-        }
-
-        sum_i += average_i;
-        sum_u += average_u;
-        sum_ii += average_i * average_i;
-        sum_iu += average_i * average_u;
+    for (uint8_t i = 0U; i < n; ++i) {
+        const MotorCalibrationStageData_t *stage = &motor_calibration.stage_data[i];
+        float current = MotorCalibration_Average(stage->sum_abs_ib, stage->sample_count);
+        float voltage = MotorCalibration_Average(stage->sum_u_cmd, stage->sample_count);
+        if (!isfinite(current) || !isfinite(voltage)) return 0U;
+        if (current < min_i) min_i = current;
+        if (current > max_i) max_i = current;
+        sum_i += current;
+        sum_u += voltage;
+        sum_ii += current * current;
+        sum_iu += current * voltage;
     }
 
-    *current_span = max_i - min_i;
-    denominator = (float)stage_count * sum_ii - sum_i * sum_i;
-    *fit_denominator = denominator;
-    if ((!isfinite(*current_span)) || (!isfinite(denominator)) ||
-        (*current_span <= MOTOR_CALIBRATION_MIN_CURRENT_SPREAD_A) ||
-        (denominator <= MOTOR_CALIBRATION_FIT_DENOMINATOR_MIN))
-    {
+    float denominator = (float)n * sum_ii - sum_i * sum_i;
+    if ((max_i - min_i) <= MOTOR_CALIBRATION_MIN_CURRENT_SPREAD_A ||
+        (sum_i / (float)n) < MOTOR_CALIBRATION_MIN_CURRENT_A ||
+        !isfinite(denominator) || denominator <= MOTOR_CALIBRATION_FIT_DENOMINATOR_MIN)
         return 0U;
-    }
-    if ((sum_i / (float)stage_count) < MOTOR_CALIBRATION_MIN_CURRENT_A)
-    {
-        return 0U;
-    }
 
-    *slope = ((float)stage_count * sum_iu - sum_i * sum_u) /
-             denominator;
-    *intercept = (sum_u - (*slope * sum_i)) / (float)stage_count;
-    if ((!isfinite(*slope)) || (!isfinite(*intercept)) || (*slope <= 0.0f))
-    {
-        *slope = NAN;
-        *intercept = NAN;
-        return 0U;
-    }
-
+    float slope = ((float)n * sum_iu - sum_i * sum_u) / denominator;
+    if (!isfinite(slope) || slope <= 0.0f) return 0U;
+    *rs = slope * 0.5f;
     return 1U;
 }
 
-/**
- * @brief 计算四档正式 Rs 和第 2～4 档对照拟合结果。
- * @return 无；拟合状态、线间斜率、截距、跨度和单相 Rs 写入全局上下文。
- * @note 所有斜率先按 AB 线间电阻计算，单相 Rs 再乘 0.5；拟合包含截距。
- */
-static void MotorCalibration_ComputeFits(void)
+static uint8_t MotorCalibration_ComputeFits(void)
 {
-    float slope_all;       /* 四档 AB 线间拟合斜率，Ω。 */
-    float intercept_all;   /* 四档电压拟合截距，V。 */
-    float span_all;        /* 四档平均电流跨度，A。 */
-    float slope_2_4;       /* 第 2～4 档 AB 线间拟合斜率，Ω。 */
-    float intercept_2_4;   /* 第 2～4 档拟合截距，V。 */
-    float span_2_4;        /* 第 2～4 档平均电流跨度，A。 */
-
-    /* 第一组拟合使用全部四档；第二组跳过最低电流档，仅作诊断对照。 */
-    motor_calibration.fit_all_valid = MotorCalibration_Fit(
-        0U, MOTOR_CALIBRATION_STAGE_COUNT,
-        &slope_all, &intercept_all, &span_all,
-        &motor_calibration.fit_all_denominator);
-    motor_calibration.fit_2_4_valid = MotorCalibration_Fit(
-        1U, MOTOR_CALIBRATION_STAGE_COUNT - 1U,
-        &slope_2_4, &intercept_2_4, &span_2_4,
-        &motor_calibration.fit_2_4_denominator);
-
-    motor_calibration.r_ab_fit = slope_all;
-    motor_calibration.voltage_fit_intercept = intercept_all;
-    motor_calibration.fit_all_current_span = span_all;
-    motor_calibration.fit_2_4_current_span = span_2_4;
-    motor_calibration.rs_all = motor_calibration.fit_all_valid != 0U ?
-                               (slope_all * 0.5f) : NAN;
-    motor_calibration.rs_2_4 = motor_calibration.fit_2_4_valid != 0U ?
-                               (slope_2_4 * 0.5f) : NAN;
-    motor_calibration.ideal_r_ab_2_4 = slope_2_4;
-    motor_calibration.ideal_intercept_2_4 = intercept_2_4;
+    return MotorCalibration_Fit(&motor_calibration.rs_all);
 }
 
-/**
- * @brief 清空一次辨识的阶段累计、状态标志和拟合结果。
- * @return 无；全部累加器归零，未形成的数据和结果以 NAN 表示。
- */
 static void MotorCalibration_ResetData(void)
 {
-    uint8_t index; /* 遍历四个辨识阶段。 */
-
     motor_calibration.cycle = 0U;
     motor_calibration.stage = 0U;
     motor_calibration.duty = 0.0f;
@@ -384,151 +207,19 @@ static void MotorCalibration_ResetData(void)
     motor_calibration.stage_start_tick_ms = 0U;
     motor_calibration.finish_pending = 0U;
     motor_calibration.next_sample_duty = 0.0f;
-    motor_calibration.next_sample_ccr1 = 0U;
-    motor_calibration.r_ab_fit = NAN;
-    motor_calibration.voltage_fit_intercept = NAN;
     motor_calibration.rs_all = NAN;
-    motor_calibration.rs_2_4 = NAN;
-    motor_calibration.ideal_r_ab_2_4 = NAN;
-    motor_calibration.ideal_intercept_2_4 = NAN;
-    motor_calibration.fit_all_valid = 0U;
-    motor_calibration.fit_2_4_valid = 0U;
-    motor_calibration.all_stages_valid = 0U;
-    motor_calibration.fit_all_current_span = NAN;
-    motor_calibration.fit_2_4_current_span = NAN;
-    motor_calibration.fit_all_denominator = NAN;
-    motor_calibration.fit_2_4_denominator = NAN;
     motor_calibration.error_code = 0U;
     motor_calibration.terminal_state = MOTOR_CALIBRATION_ERROR;
-
-    for (index = 0U; index < MOTOR_CALIBRATION_STAGE_COUNT; ++index)
-    {
-        MotorCalibrationStageData_t *data = &motor_calibration.stage_data[index]; /* 当前档待清零记录。 */
-        data->sum_ib = 0.0f;
-        data->sum_abs_ib = 0.0f;
-        data->sum_adc_b = 0U;
-        data->sum_ccr1 = 0U;
-        data->sum_vbus = 0.0f;
-        data->sum_u_cmd = 0.0f;
-        data->sum_start_abs_ib = 0.0f;
-        data->sum_end_abs_ib = 0.0f;
-        data->sum_start_duty = 0.0f;
-        data->sum_end_duty = 0.0f;
-        data->min_duty = INFINITY;
-        data->max_duty = -INFINITY;
-        data->min_ib = INFINITY;
-        data->max_ib = -INFINITY;
-        data->max_abs_ib_seen = 0.0f;
-        data->sample_count = 0U;
-        data->start_window_count = 0U;
-        data->end_window_count = 0U;
-        data->settle_start_tick_ms = 0U;
-        data->settle_elapsed_ms = 0U;
-        data->duty_target_consecutive_cycles = 0U;
-        data->settle_timing_valid = 0U;
-        data->target_reached = 0U;
-        data->voltage_target_reached = 0U;
-        data->duty_target_settled = 0U;
-        data->current_stable = 0U;
-        data->duty_saturated = 0U;
-        data->overcurrent_detected = 0U;
-    }
+    memset(motor_calibration.stage_data, 0, sizeof(motor_calibration.stage_data));
 }
 
-/**
- * @brief 在辨识启动后由非 ISR 上下文打印参数、量程和硬件快照。
- * @return 无；只输出诊断文本，不修改电流控制、Duty 或拟合状态。
- */
 static void MotorCalibration_PrintHeader(void)
 {
-    float pwm_frequency_hz; /* 按中心对齐周期计算的 PWM 频率，Hz。 */
-
-    pwm_frequency_hz = (foc.timer.pwm_arr == 0U) ? NAN :
-        ((float)foc.timer.clock_freq /
-         (2.0f * (float)foc.timer.pwm_arr));
-
-    DebugConsole_Printf("RS_IDENTIFY STARTED\r\n");
-    DebugConsole_Printf("RS_DIAG_REV=VOLTAGE_INJECTION_V7\r\n");
-    DebugConsole_Printf("INJECTION_MODE=%s DUTY_STEP=%.7f DUTY_SETTLE_CYCLES=%u\r\n",
-        motor_calibration.mode == RS_INJECTION_VOLTAGE ? "VOLTAGE" : "CURRENT",
-        (double)MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP,
-        (unsigned int)MOTOR_CALIBRATION_DUTY_SETTLE_CYCLES);
-    DebugConsole_Printf("CURRENT_PI_ACTIVE=%s\r\n",
-        motor_calibration.mode == RS_INJECTION_CURRENT ? "YES" : "NO");
-    DebugConsole_Printf("CURRENT_STABLE_DELTA_LIMIT_A=%.6f\r\n",
-        (double)(motor_calibration.mode == RS_INJECTION_VOLTAGE ?
-            MOTOR_CALIBRATION_VOLTAGE_STABLE_DELTA_A :
-            MOTOR_CALIBRATION_STABLE_DELTA_A));
-    DebugConsole_Printf("RS_IDENTIFY_MAX_CURRENT=%.2f ADC_STALL_TIMEOUT_MS=%u STAGE_TIMEOUT_MS=%u\r\n",
-        (double)RS_IDENTIFY_MAX_CURRENT_A,
-        (unsigned int)RS_IDENTIFY_ADC_STALL_TIMEOUT_MS,
-        (unsigned int)RS_IDENTIFY_STAGE_TIMEOUT_MS);
-    DebugConsole_Printf("VOLTAGE_MODE_VBUS_RANGE=[1.0,%.1f] V\r\n",
-        (double)RS_IDENTIFY_VOLTAGE_VBUS_MAX_V);
-    DebugConsole_Printf("VOLTAGE_MODEL=IDEAL_COMMAND AB_DIFFERENTIAL_VERIFIED=NO\r\n");
-    DebugConsole_Printf(
-        "CURRENT_KP=%.6f SETTLE_CYCLES=%u SAMPLE_CYCLES=%u WINDOW_CYCLES=%u\r\n",
-        (double)MOTOR_CALIBRATION_CURRENT_KP,
-        (unsigned int)MOTOR_CALIBRATION_SETTLE_CYCLES,
-        (unsigned int)MOTOR_CALIBRATION_SAMPLE_CYCLES,
-        (unsigned int)MOTOR_CALIBRATION_WINDOW_CYCLES);
-    DebugConsole_Printf(
-        "PWM_FREQ=%.3f PWM_ARR=%lu DEADTIME_DTG=%u VBUS=%.6f TARGET_TOL=+/-%.1f%%\r\n",
-        (double)pwm_frequency_hz,
-        (unsigned long)foc.timer.pwm_arr,
-        (unsigned int)foc.timer.dead_time,
-        (double)foc.state.vbus,
-        (double)(MOTOR_CALIBRATION_TARGET_TOLERANCE * 100.0f));
-    DebugConsole_Printf("PWM_CLOCK_HZ=%lu TIM1_ARR_REG=%lu\r\n",
-        (unsigned long)foc.timer.clock_freq,
-        (unsigned long)TIM1->ARR);
-    DebugConsole_Printf(
-        "ADC_OFFSET_A=%.3f ADC_OFFSET_B=%.3f ADC_OFFSET_C=%.3f\r\n",
-        (double)foc.calibration.ia_offset,
-        (double)foc.calibration.ib_offset,
-        (double)foc.calibration.ic_offset);
-    DebugConsole_Printf(
-        "ADC_GAIN_A=%.12g ADC_GAIN_B=%.12g ADC_GAIN_C=%.12g\r\n",
-        (double)foc.current.gain_a,
-        (double)foc.current.gain_b,
-        (double)foc.current.gain_c);
+    DebugConsole_Printf("RS_IDENTIFY STARTED VBUS=%.3f CURRENT_LIMIT=%.2f\r\n",
+                        (double)foc.state.vbus,
+                        (double)RS_IDENTIFY_MAX_CURRENT_A);
 }
 
-/**
- * @brief 检查阶段是否收齐规定数量的正式样本。
- * @param data 待检查阶段的只读累计记录。
- * @return 1 表示样本数完整；0 表示不完整。
- */
-static uint8_t MotorCalibration_StageSamplesValid(
-    const MotorCalibrationStageData_t *data)
-{
-    return data->sample_count == MOTOR_CALIBRATION_SAMPLE_CYCLES;
-}
-
-/**
- * @brief 检查阶段样本、控制目标和电流稳定条件是否均通过。
- * @param data 待检查阶段的只读累计记录。
- * @return 1 表示阶段可用于结果；0 表示任一必要条件未通过。
- * @note 定电压模式检查电压目标和 Duty 稳定；定电流模式检查电流目标；
- *       两种模式都要求电流稳定。
- */
-static uint8_t MotorCalibration_StageCurrentValid(
-    const MotorCalibrationStageData_t *data)
-{
-    return (MotorCalibration_StageSamplesValid(data) != 0U) &&
-           (((motor_calibration.mode == RS_INJECTION_VOLTAGE) &&
-             (data->duty_target_settled != 0U) &&
-             (data->voltage_target_reached != 0U)) ||
-            ((motor_calibration.mode == RS_INJECTION_CURRENT) &&
-             (data->target_reached != 0U))) &&
-           (data->current_stable != 0U);
-}
-
-/**
- * @brief 判断 ADC 增益和零偏是否为有限值且数字码范围覆盖过流阈值。
- * @return 1 表示按当前软件换算仍有 ADC 数字余量；0 表示参数非法或余量不足。
- * @note 此项只检查换算后的 ADC 数字范围，不验证模拟前端线性度，也不替代硬件保护。
- */
 static uint8_t MotorCalibration_AdcHasCurrentHeadroom(void)
 {
     /* 三相各自拥有独立增益和零偏；统一用相同的电流阈值估算码值余量。 */
@@ -594,152 +285,11 @@ static const char *MotorCalibration_AbortReason(uint8_t error_code)
  * @brief 输出四档采样、有效性、拟合及退出原因报告。
  * @return 无；仅由主循环在功率输出关闭后调用，不在 ADC ISR 打印。
  */
-static void MotorCalibration_PrintReport(void)
-{
-    uint8_t index; /* 当前输出阶段索引。 */
-
-    for (index = 0U; index < MOTOR_CALIBRATION_STAGE_COUNT; ++index)
-    {
-        const MotorCalibrationStageData_t *data =
-            &motor_calibration.stage_data[index]; /* 当前档只读数据源。 */
-        /* 以下派生量只供日志展示，不回写辨识累计数据。 */
-        float average_ib = MotorCalibration_Average(
-            data->sum_ib, data->sample_count); /* 有符号 Ib 平均值，A。 */
-        float average_abs_ib = MotorCalibration_Average(
-            data->sum_abs_ib, data->sample_count); /* |Ib| 平均值，A。 */
-        float average_adc_b = data->sample_count == 0U ? NAN :
-            (float)data->sum_adc_b / (float)data->sample_count; /* ADC_B 平均原始码值。 */
-        float average_ccr1 = data->sample_count == 0U ? NAN :
-            (float)data->sum_ccr1 / (float)data->sample_count; /* 配对 CCR1 平均值。 */
-        float average_duty = foc.timer.pwm_arr == 0U ? NAN :
-            average_ccr1 / (float)(foc.timer.pwm_arr + 1U); /* CCR1 换算占空比。 */
-        float average_vbus = MotorCalibration_Average(
-            data->sum_vbus, data->sample_count); /* 母线平均值，V。 */
-        float average_u = MotorCalibration_Average(
-            data->sum_u_cmd, data->sample_count); /* 理想命令电压平均值，V。 */
-        float average_start_i = MotorCalibration_Average(
-            data->sum_start_abs_ib, data->start_window_count); /* 首窗口 |Ib| 均值，A。 */
-        float average_end_i = MotorCalibration_Average(
-            data->sum_end_abs_ib, data->end_window_count); /* 末窗口 |Ib| 均值，A。 */
-        float average_start_duty = MotorCalibration_Average(
-            data->sum_start_duty, data->start_window_count); /* 首窗口占空比均值。 */
-        float average_end_duty = MotorCalibration_Average(
-            data->sum_end_duty, data->end_window_count); /* 末窗口占空比均值。 */
-        float measured_adc_rate_hz =
-            (data->settle_timing_valid != 0U) &&
-            (data->settle_elapsed_ms != 0U) ?
-            (float)MOTOR_CALIBRATION_SETTLE_CYCLES * 1000.0f /
-            (float)data->settle_elapsed_ms : NAN; /* 按稳定等待实测时长估算回调频率，Hz。 */
-        float min_ib = data->sample_count == 0U ? NAN : data->min_ib; /* 最小有符号 Ib，A。 */
-        float max_ib = data->sample_count == 0U ? NAN : data->max_ib; /* 最大有符号 Ib，A。 */
-        float min_duty = data->sample_count == 0U ? NAN : data->min_duty; /* 最小已施加 Duty。 */
-        float max_duty = data->sample_count == 0U ? NAN : data->max_duty; /* 最大已施加 Duty。 */
-
-        DebugConsole_Printf("STAGE %u\r\n", (unsigned int)(index + 1U));
-        if (motor_calibration.mode == RS_INJECTION_VOLTAGE)
-        {
-            DebugConsole_Printf("TARGET_U=%.6f\r\n",
-                (double)rs_voltage_targets[index]);
-        }
-        else
-        {
-            DebugConsole_Printf("TARGET_I=%.6f\r\n",
-                (double)motor_calibration_stage_target_current[index]);
-        }
-        DebugConsole_Printf("IB_AVG=%.6f FABS_IB_AVG=%.6f\r\n",
-            (double)average_ib, (double)average_abs_ib);
-        DebugConsole_Printf(
-            "ADC_B_AVG=%.3f DUTY_AVG=%.8f CCR1_AVG=%.3f VBUS_AVG=%.6f U_CMD_AVG=%.6f U_IDEAL_AVG=%.6f\r\n",
-            (double)average_adc_b, (double)average_duty,
-            (double)average_ccr1, (double)average_vbus,
-            (double)average_u, (double)average_u);
-        DebugConsole_Printf("DUTY_MIN=%.8f DUTY_MAX=%.8f IB_MIN=%.6f IB_MAX=%.6f\r\n",
-            (double)min_duty, (double)max_duty,
-            (double)min_ib, (double)max_ib);
-        DebugConsole_Printf(
-            "I_START_AVG=%.6f I_END_AVG=%.6f DUTY_START_AVG=%.8f DUTY_END_AVG=%.8f\r\n",
-            (double)average_start_i, (double)average_end_i,
-            (double)average_start_duty, (double)average_end_duty);
-        DebugConsole_Printf(
-            "TARGET_REACHED=%s VOLTAGE_TARGET_REACHED=%s DUTY_TARGET_SETTLED=%s CURRENT_STABLE=%s STAGE_VALID=%s SAMPLES=%lu\r\n",
-            motor_calibration.mode == RS_INJECTION_CURRENT ?
-                (data->target_reached != 0U ? "YES" : "NO") : "NA",
-            motor_calibration.mode == RS_INJECTION_VOLTAGE ?
-                (data->voltage_target_reached != 0U ? "YES" : "NO") : "NA",
-            motor_calibration.mode == RS_INJECTION_VOLTAGE ?
-                (data->duty_target_settled != 0U ? "YES" : "NO") : "NA",
-            data->current_stable != 0U ? "YES" : "NO",
-            MotorCalibration_StageCurrentValid(data) != 0U ? "YES" : "NO",
-            (unsigned long)data->sample_count);
-        DebugConsole_Printf(
-            "IB_ABS_PEAK_ADC=%.6f DUTY_SATURATED=%s OVERCURRENT_DETECTED=%s\r\n",
-            (double)data->max_abs_ib_seen,
-            data->duty_saturated != 0U ? "YES" : "NO",
-            data->overcurrent_detected != 0U ? "YES" : "NO");
-        DebugConsole_Printf(
-            "SETTLE_MEASURED=%s SETTLE_MS=%lu ADC_STEP_HZ_EST=%.1f\r\n",
-            data->settle_timing_valid != 0U ? "YES" : "NO",
-            (unsigned long)data->settle_elapsed_ms,
-            (double)measured_adc_rate_hz);
-    }
-
-    DebugConsole_Printf("DATA_VALID=%s RESULT_VALID=%s\r\n",
-        motor_calibration.all_stages_valid != 0U ? "YES" : "NO",
-        (motor_calibration.all_stages_valid != 0U &&
-         motor_calibration.fit_all_valid != 0U) ? "YES" : "NO");
-    DebugConsole_Printf(
-        "FIT_ALL_VALID=%s FIT_2_4_VALID=%s FIT_SPAN_ALL=%.6f FIT_SPAN_2_4=%.6f\r\n",
-        motor_calibration.fit_all_valid != 0U ? "YES" : "NO",
-        motor_calibration.fit_2_4_valid != 0U ? "YES" : "NO",
-        (double)motor_calibration.fit_all_current_span,
-        (double)motor_calibration.fit_2_4_current_span);
-    DebugConsole_Printf(
-        "FIT_DENOM_ALL=%.9g FIT_DENOM_2_4=%.9g DENOM_MIN=%.9g\r\n",
-        (double)motor_calibration.fit_all_denominator,
-        (double)motor_calibration.fit_2_4_denominator,
-        (double)MOTOR_CALIBRATION_FIT_DENOMINATOR_MIN);
-    DebugConsole_Printf(
-        "R_AB_FIT=%.6f VOLTAGE_FIT_INTERCEPT=%.6f RS_ALL=%.6f RS_2_4=%.6f\r\n",
-        (double)motor_calibration.r_ab_fit,
-        (double)motor_calibration.voltage_fit_intercept,
-        (double)motor_calibration.rs_all,
-        (double)motor_calibration.rs_2_4);
-    DebugConsole_Printf("RS_IDENTIFY RESULT\r\n");
-    DebugConsole_Printf(
-        "RS_IDENTIFY_MAX_CURRENT=%.2f RS_IDENTIFY_ABORT_REASON=%s\r\n",
-        (double)RS_IDENTIFY_MAX_CURRENT_A,
-        MotorCalibration_AbortReason(motor_calibration.error_code));
-    DebugConsole_Printf("RS_IDEAL_ALL=%.6f RS_IDEAL_2_4=%.6f\r\n",
-        (double)motor_calibration.rs_all,
-        (double)motor_calibration.rs_2_4);
-    DebugConsole_Printf(
-        "R_AB_IDEAL=%.6f R_AB_IDEAL_2_4=%.6f IDEAL_INTERCEPT=%.6f IDEAL_2_4_INTERCEPT=%.6f\r\n",
-        (double)motor_calibration.r_ab_fit,
-        (double)motor_calibration.ideal_r_ab_2_4,
-        (double)motor_calibration.voltage_fit_intercept,
-        (double)motor_calibration.ideal_intercept_2_4);
-    DebugConsole_Printf(
-        "VOLTAGE_MODEL=IDEAL_COMMAND AB_DIFFERENTIAL_VERIFIED=NO\r\n");
-}
-
-
-/**
- * @brief 校验运行条件并按 MOE 关闭、定时器同步、桥臂配置、最后开 MOE 的次序启动。
- * @param mode 注入模式枚举；定电压为默认，定电流只用于显式对照。
- * @return HAL_OK 表示已进入运行；HAL_BUSY 表示已有请求占用；HAL_ERROR 表示
- *         输入模式、FOC 状态、零偏、母线或 ADC 数字余量不符合要求。
- * @note 成功返回不代表辨识已完成；结果稍后由 MotorCalibration_Process 输出。
- */
-HAL_StatusTypeDef MotorCalibration_StartMode(RsInjectionMode_t mode)
+HAL_StatusTypeDef MotorCalibration_Start(void)
 {
     HAL_StatusTypeDef status; /* HAL 定时器启动状态，传回调用方。 */
     uint32_t adc_trigger_mask = TIM_CCER_CC4E; /* CH4 ADC 触发输出位。 */
     uint32_t primask; /* 保存中断屏蔽状态，确保只恢复本函数改变的状态。 */
-
-    if ((mode != RS_INJECTION_VOLTAGE) && (mode != RS_INJECTION_CURRENT))
-    {
-        return HAL_ERROR;
-    }
 
     if (MotorCalibration_LsIsActive() ||
         (motor_calibration.state == MOTOR_CALIBRATION_STARTING) ||
@@ -754,8 +304,7 @@ HAL_StatusTypeDef MotorCalibration_StartMode(RsInjectionMode_t mode)
         (foc.calibration.calibrated == 0U) ||
         (!isfinite(foc.state.vbus)) ||
         (foc.state.vbus < 1.0f) ||
-        ((mode == RS_INJECTION_VOLTAGE) &&
-         (foc.state.vbus > RS_IDENTIFY_VOLTAGE_VBUS_MAX_V)))
+        (foc.state.vbus > RS_IDENTIFY_VOLTAGE_VBUS_MAX_V))
     {
         return HAL_ERROR;
     }
@@ -774,7 +323,6 @@ HAL_StatusTypeDef MotorCalibration_StartMode(RsInjectionMode_t mode)
     foc_motor_state = FOC_MOTOR_CALIBRATION;
     __DMB();
     MotorCalibration_ResetData();
-    motor_calibration.mode = mode;
     motor_calibration.state = MOTOR_CALIBRATION_STARTING;
 
     /* 修改定时器前先关总门控并关闭三相通道。 */
@@ -870,15 +418,6 @@ HAL_StatusTypeDef MotorCalibration_StartMode(RsInjectionMode_t mode)
 }
 
 /**
- * @brief 使用默认定电压模式启动辨识。
- * @return 与 MotorCalibration_StartMode 相同的 HAL 状态码。
- */
-HAL_StatusTypeDef MotorCalibration_Start(void)
-{
-    return MotorCalibration_StartMode(RS_INJECTION_VOLTAGE);
-}
-
-/**
  * @brief 以“用户请求停止”错误码进入安全关断流程。
  * @return 无；若模块正处于 STARTING/RUNNING，则立即关断相输出。
  */
@@ -894,21 +433,19 @@ void MotorCalibration_Stop(void)
  * @note 按当前触发与预装载时序，先以“上次实际施加”的 CCR/Duty 配对本样本，
  *       再计算并写入下一次 PWM 命令；ISR 中严禁格式化或打印日志。
  */
-void MotorCalibration_AdcStep(uint16_t adc_b_raw)
+void MotorCalibration_AdcStep(void)
 {
     float signed_ia;       /* 当前采样换算的有符号 A 相电流，A。 */
     float signed_ib;       /* 当前采样换算的有符号 B 相电流，A。 */
     float signed_ic;       /* 当前采样换算的有符号 C 相电流，A。 */
     float current_a;       /* 电流幅值 |Ib|，供保护及控制/辨识使用，A。 */
-    float target_a;        /* 定电流对照模式的当前档目标电流，A。 */
     float target_duty;     /* 定电压目标除以当前母线后的目标 Duty。 */
-    float error_a;         /* 定电流对照模式目标与测量的差值，A。 */
     float sample_duty;     /* 与当前 ADC 样本对应的已施加 Duty。 */
     float sample_vbus;     /* 当前样本对应的母线电压，V。 */
     float sample_u_ideal;  /* 已施加 Duty * Vbus 的理想命令电压，V。 */
     MotorCalibrationStageData_t *data; /* 当前阶段的累计数据记录。 */
-    uint16_t sample_ccr1;  /* 与样本配对的已施加 CCR1。 */
     uint16_t next_ccr1;    /* 本次计算后写给预装载寄存器的下一 CCR1。 */
+
 
     if (motor_calibration.state != MOTOR_CALIBRATION_RUNNING)
     {
@@ -928,15 +465,10 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
         MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 4U);
         return;
     }
-    if (current_a > data->max_abs_ib_seen)
-    {
-        data->max_abs_ib_seen = current_a;
-    }
     if ((fabsf(signed_ia) > RS_IDENTIFY_MAX_CURRENT_A) ||
         (current_a > RS_IDENTIFY_MAX_CURRENT_A) ||
         (fabsf(signed_ic) > RS_IDENTIFY_MAX_CURRENT_A))
     {
-        data->overcurrent_detected = 1U;
         MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 2U);
         return;
     }
@@ -950,11 +482,9 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
 
     /* 先将本次 ADC 样本与上次回调之后已生效的 PWM 命令配对。 */
     sample_duty = motor_calibration.next_sample_duty;
-    sample_ccr1 = motor_calibration.next_sample_ccr1;
     sample_vbus = foc.state.vbus;
     if ((sample_vbus < 1.0f) ||
-        ((motor_calibration.mode == RS_INJECTION_VOLTAGE) &&
-         (sample_vbus > RS_IDENTIFY_VOLTAGE_VBUS_MAX_V)))
+        (sample_vbus > RS_IDENTIFY_VOLTAGE_VBUS_MAX_V))
     {
         MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 11U);
         return;
@@ -968,58 +498,29 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
     }
     sample_u_ideal = sample_duty * sample_vbus;
 
-    if (motor_calibration.cycle == 0U)
+    target_duty = rs_voltage_targets[motor_calibration.stage] / sample_vbus;
+    if ((!isfinite(target_duty)) || (target_duty < 0.0f))
     {
-        data->settle_start_tick_ms = HAL_GetTick();
+        MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 11U);
+        return;
     }
-
-    /* 定电压模式逐回调向目标 Duty 靠近；定电流模式才执行误差积分。 */
-    if (motor_calibration.mode == RS_INJECTION_VOLTAGE)
+    if (target_duty > MOTOR_CALIBRATION_MAX_DUTY)
     {
-        target_duty = rs_voltage_targets[motor_calibration.stage] / sample_vbus;
-        if ((!isfinite(target_duty)) || (target_duty < 0.0f))
-        {
-            MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 11U);
-            return;
-        }
-        if (target_duty > MOTOR_CALIBRATION_MAX_DUTY)
-        {
-            data->duty_saturated = 1U;
-            MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 6U);
-            return;
-        }
-        /* 每个 ADC 周期只改变有限 Duty；切档时也以相同步长平滑过渡。 */
-        if (motor_calibration.duty < target_duty)
-        {
-            motor_calibration.duty = fminf(
-                motor_calibration.duty + MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP,
-                target_duty);
-        }
-        else
-        {
-            motor_calibration.duty = fmaxf(
-                motor_calibration.duty - MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP,
-                target_duty);
-        }
+        MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 6U);
+        return;
+    }
+    /* 每个 ADC 周期只改变有限 Duty；切档时也以相同步长平滑过渡。 */
+    if (motor_calibration.duty < target_duty)
+    {
+        motor_calibration.duty = fminf(
+            motor_calibration.duty + MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP,
+            target_duty);
     }
     else
     {
-        target_a = motor_calibration_stage_target_current[motor_calibration.stage];
-        error_a = target_a - current_a;
-        /* 保留定电流对照积分器；只有显式选择该模式时才执行此分支。 */
-        motor_calibration.duty += MOTOR_CALIBRATION_CURRENT_KP * error_a;
-        if (motor_calibration.duty < 0.0f)
-        {
-            motor_calibration.duty = 0.0f;
-        }
-        if ((motor_calibration.duty >= MOTOR_CALIBRATION_MAX_DUTY) &&
-            (error_a > 0.0f))
-        {
-            motor_calibration.duty = MOTOR_CALIBRATION_MAX_DUTY;
-            data->duty_saturated = 1U;
-            MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 6U);
-            return;
-        }
+        motor_calibration.duty = fmaxf(
+            motor_calibration.duty - MOTOR_CALIBRATION_VOLTAGE_DUTY_STEP,
+            target_duty);
     }
 
     next_ccr1 = (uint16_t)FOC_DutyToCCR(
@@ -1028,30 +529,21 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
     /* 记录量化后的下一 PWM 命令，供下一次 ADC 样本正确配对。 */
     motor_calibration.next_sample_duty =
         (float)next_ccr1 / (float)(foc.timer.pwm_arr + 1U);
-    motor_calibration.next_sample_ccr1 = next_ccr1;
 
     /* 等待阶段仅计数并确认 Duty 到位，不把爬升样本混入正式平均。 */
     if (motor_calibration.cycle < MOTOR_CALIBRATION_SETTLE_CYCLES)
     {
-        if (motor_calibration.mode == RS_INJECTION_VOLTAGE)
-        {
-            /* 只统计本次采样之前已生效的 Duty 是否到达目标。 */
-            if (fabsf(sample_duty - target_duty) <=
-                MOTOR_CALIBRATION_DUTY_SETTLE_TOLERANCE)
-            {
-                data->duty_target_consecutive_cycles++;
-            }
-            else
-            {
-                data->duty_target_consecutive_cycles = 0U;
-            }
-        }
+        /* 只统计本次采样之前已生效的 Duty 是否到达目标。 */
+        if (fabsf(sample_duty - target_duty) <=
+            MOTOR_CALIBRATION_DUTY_SETTLE_TOLERANCE)
+            data->duty_target_consecutive_cycles++;
+        else
+            data->duty_target_consecutive_cycles = 0U;
         motor_calibration.cycle++;
         return;
     }
 
-    if ((motor_calibration.mode == RS_INJECTION_VOLTAGE) &&
-        (data->sample_count == 0U))
+    if (data->sample_count == 0U)
     {
         data->duty_target_settled =
             data->duty_target_consecutive_cycles >=
@@ -1063,19 +555,11 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
         }
     }
 
-    if (data->sample_count == 0U)
-    {
-        data->settle_elapsed_ms = HAL_GetTick() -
-                                  data->settle_start_tick_ms;
-        data->settle_timing_valid = 1U;
-    }
-
     {
         /* 首尾 250 点为不重叠窗口，用于判断正式采样期间电流是否仍漂移。 */
         if (data->sample_count < MOTOR_CALIBRATION_WINDOW_CYCLES)
         {
             data->sum_start_abs_ib += current_a;
-            data->sum_start_duty += sample_duty;
             data->start_window_count++;
         }
         if (data->sample_count >=
@@ -1083,39 +567,10 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
             MOTOR_CALIBRATION_WINDOW_CYCLES)
         {
             data->sum_end_abs_ib += current_a;
-            data->sum_end_duty += sample_duty;
             data->end_window_count++;
         }
-        data->sum_ib += signed_ib;
         data->sum_abs_ib += current_a;
-        data->sum_adc_b += (uint64_t)adc_b_raw;
-        if (sample_duty < data->min_duty)
-        {
-            data->min_duty = sample_duty;
-        }
-        if (sample_duty > data->max_duty)
-        {
-            data->max_duty = sample_duty;
-        }
-        data->sum_ccr1 += (uint64_t)sample_ccr1;
-        data->sum_vbus += sample_vbus;
         data->sum_u_cmd += sample_u_ideal;
-        if (data->sample_count == 0U)
-        {
-            data->min_ib = signed_ib;
-            data->max_ib = signed_ib;
-        }
-        else
-        {
-            if (signed_ib < data->min_ib)
-            {
-                data->min_ib = signed_ib;
-            }
-            if (signed_ib > data->max_ib)
-            {
-                data->max_ib = signed_ib;
-            }
-        }
         data->sample_count++;
     }
 
@@ -1126,19 +581,16 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
         return;
     }
 
-    if (motor_calibration.mode == RS_INJECTION_VOLTAGE)
+    MotorCalibration_CheckStage(motor_calibration.stage);
+    if (data->current_stable == 0U)
     {
-        MotorCalibration_CheckStage(motor_calibration.stage);
-        if (data->current_stable == 0U)
-        {
-            MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 12U);
-            return;
-        }
-        if (data->voltage_target_reached == 0U)
-        {
-            MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 13U);
-            return;
-        }
+        MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 12U);
+        return;
+    }
+    if (data->voltage_target_reached == 0U)
+    {
+        MotorCalibration_Finish(MOTOR_CALIBRATION_ERROR, 13U);
+        return;
     }
 
     motor_calibration.cycle = 0U;
@@ -1161,7 +613,6 @@ void MotorCalibration_AdcStep(uint16_t adc_b_raw)
 void MotorCalibration_Process(void)
 {
     MotorCalibrationState_t terminal_state; /* 最终需要发布的成功/失败状态。 */
-    uint8_t index; /* 完成时遍历全部阶段的索引。 */
 
     if (motor_calibration.state == MOTOR_CALIBRATION_RUNNING)
     {
@@ -1197,28 +648,10 @@ void MotorCalibration_Process(void)
 
     if (terminal_state == MOTOR_CALIBRATION_DONE)
     {
-        motor_calibration.all_stages_valid = 1U;
-        for (index = 0U; index < MOTOR_CALIBRATION_STAGE_COUNT; ++index)
-        {
-            MotorCalibration_CheckStage(index);
-            if (MotorCalibration_StageCurrentValid(
-                    &motor_calibration.stage_data[index]) == 0U)
-            {
-                motor_calibration.all_stages_valid = 0U;
-            }
-        }
-
-        /* 所有输出均已关闭后再验证每档数据，并计算完整与后三档拟合。 */
-        MotorCalibration_ComputeFits();
-        if (motor_calibration.fit_all_valid == 0U)
+        if (MotorCalibration_ComputeFits() == 0U)
         {
             terminal_state = MOTOR_CALIBRATION_ERROR;
             motor_calibration.error_code = 3U;
-        }
-        else if (motor_calibration.all_stages_valid == 0U)
-        {
-            terminal_state = MOTOR_CALIBRATION_ERROR;
-            motor_calibration.error_code = 5U;
         }
         motor_calibration.terminal_state = terminal_state;
     }
@@ -1228,7 +661,6 @@ void MotorCalibration_Process(void)
     motor_calibration.state = terminal_state;
     __DMB();
 
-    MotorCalibration_PrintReport();
     if (terminal_state == MOTOR_CALIBRATION_DONE)
     {
         DebugConsole_Printf("RS_IDENTIFY DONE Rs=%.6f ohm\r\n",
@@ -1236,8 +668,8 @@ void MotorCalibration_Process(void)
     }
     else
     {
-        DebugConsole_Printf("RS_IDENTIFY ERROR code=%u\r\n",
-                            (unsigned int)motor_calibration.error_code);
+        DebugConsole_Printf("RS_IDENTIFY ERROR reason=%s\r\n",
+                            MotorCalibration_AbortReason(motor_calibration.error_code));
     }
 }
 
@@ -1278,4 +710,590 @@ float MotorCalibration_GetResultOhm(void)
 uint8_t MotorCalibration_GetErrorCode(void)
 {
     return motor_calibration.error_code;
+}
+
+/* Ls pulse sampling and curve fitting. */
+
+#define LS_MIN_SAMPLES 5U
+#define LS_MIN_SPAN_US 8.0f
+#define LS_MIN_CURRENT_A 0.02f
+#define LS_MAX_RMSE_A 0.02f
+#define LS_MAX_RELATIVE_L_DIFF 0.40f
+
+typedef struct {
+    double n, sx, sy, sxx, sxy;
+    double slope, intercept;
+    uint32_t count;
+    float start_us, end_us;
+} LsRegression_t;
+
+static void LsRegression_Add(LsRegression_t *reg, double x, double y)
+{
+    if (reg->count == 0U) reg->start_us = (float)x;
+    reg->end_us = (float)x;
+    reg->count++;
+    reg->n += 1.0;
+    reg->sx += x;
+    reg->sy += y;
+    reg->sxx += x * x;
+    reg->sxy += x * y;
+}
+
+static uint8_t LsRegression_Solve(LsRegression_t *reg)
+{
+    double denominator = reg->n * reg->sxx - reg->sx * reg->sx;
+    if ((reg->count < LS_MIN_SAMPLES) ||
+        ((reg->end_us - reg->start_us) < LS_MIN_SPAN_US) ||
+        (!isfinite(denominator)) || (denominator <= 1.0e-9)) return 0U;
+    reg->slope = (reg->n * reg->sxy - reg->sx * reg->sy) / denominator;
+    reg->intercept = (reg->sy - reg->slope * reg->sx) / reg->n;
+    return (isfinite(reg->slope) && isfinite(reg->intercept)) ? 1U : 0U;
+}
+
+static float LsCurrent(const LsSample_t *sample, const LsFitConfig_t *config)
+{
+    return ((float)sample->adc_raw - config->adc_offset) *
+           config->adc_gain_a_per_code;
+}
+
+LsFitStatus_t MotorCalibration_LsFit(const LsSample_t *samples, size_t count,
+                                    const LsFitConfig_t *config,
+                                    LsFitResult_t *result)
+{
+    LsRegression_t rise = {0}, decay = {0};
+    uint32_t previous = 0U;
+    uint8_t saw_rise = 0U, saw_decay = 0U;
+    double rise_error = 0.0, decay_error = 0.0;
+
+    if (result == NULL) return LS_FIT_BAD_ARGUMENT;
+    memset(result, 0, sizeof(*result));
+    result->status = LS_FIT_BAD_ARGUMENT;
+    if ((samples == NULL) || (config == NULL) || (count == 0U) ||
+        !isfinite(config->timestamp_tick_us) || (config->timestamp_tick_us <= 0.0f) ||
+        !isfinite(config->adc_offset) ||
+        !isfinite(config->adc_gain_a_per_code) || (config->adc_gain_a_per_code <= 0.0f) ||
+        !isfinite(config->applied_voltage_v) || (config->applied_voltage_v <= 0.0f) ||
+        !isfinite(config->loop_resistance_ohm) || (config->loop_resistance_ohm <= 0.0f) ||
+        !isfinite(config->current_limit_a) || (config->current_limit_a <= 0.0f) ||
+        !isfinite(config->pulse_hard_limit_us) || (config->pulse_hard_limit_us <= 0.0f) ||
+        !isfinite(config->blanking_us) || (config->blanking_us < 0.0f)) return result->status;
+    if (config->adc_overrun) return result->status = LS_FIT_ADC_OVERRUN;
+    if ((config->pulse_start_timestamp >= config->pulse_end_timestamp) ||
+        (config->pulse_end_timestamp > config->freewheel_start_timestamp) ||
+        ((double)(config->pulse_end_timestamp - config->pulse_start_timestamp) *
+         config->timestamp_tick_us > config->pulse_hard_limit_us))
+        return result->status = LS_FIT_TIMING;
+
+    for (size_t i = 0U; i < count; i++) {
+        float current = LsCurrent(&samples[i], config);
+        if ((i != 0U) && (samples[i].timestamp <= previous))
+            return result->status = LS_FIT_TIMING;
+        previous = samples[i].timestamp;
+        if (samples[i].state > LS_SAMPLE_INVALID)
+            return result->status = LS_FIT_BAD_ARGUMENT;
+        if (!isfinite(current)) return result->status = LS_FIT_NUMERIC;
+        if (fabsf(current) > config->current_limit_a)
+            return result->status = LS_FIT_OVERCURRENT;
+        if (samples[i].adc_raw >= 4095U)
+            return result->status = LS_FIT_SATURATED;
+        if (samples[i].state == LS_SAMPLE_RISE) {
+            if (saw_decay) return result->status = LS_FIT_TIMING;
+            if ((samples[i].timestamp < config->pulse_start_timestamp) ||
+                (samples[i].timestamp > config->pulse_end_timestamp))
+                return result->status = LS_FIT_TIMING;
+            saw_rise = 1U;
+        } else if (samples[i].state == LS_SAMPLE_DECAY) {
+            if (!saw_rise) return result->status = LS_FIT_TIMING;
+            if (samples[i].timestamp < config->freewheel_start_timestamp)
+                return result->status = LS_FIT_TIMING;
+            saw_decay = 1U;
+        }
+    }
+    if (!saw_rise || !saw_decay) return result->status = LS_FIT_SAMPLE_SHORT;
+    if (count > 1U)
+        result->sample_period_us = (float)((double)(samples[count - 1U].timestamp -
+            samples[0].timestamp) * config->timestamp_tick_us / (count - 1U));
+
+    for (size_t i = 0U; i < count; i++) {
+        float current = LsCurrent(&samples[i], config);
+        float t_us = (float)(((double)samples[i].timestamp -
+                             config->pulse_start_timestamp) *
+                             config->timestamp_tick_us);
+        if ((samples[i].state == LS_SAMPLE_RISE) &&
+            (t_us >= config->blanking_us) && (current > LS_MIN_CURRENT_A))
+            LsRegression_Add(&rise, t_us, current);
+        if ((samples[i].state == LS_SAMPLE_DECAY) &&
+            (current > LS_MIN_CURRENT_A))
+            LsRegression_Add(&decay, t_us, log((double)current));
+    }
+    result->rise_samples = rise.count;
+    result->decay_samples = decay.count;
+    result->rise_start_us = rise.start_us;
+    result->rise_end_us = rise.end_us;
+    result->decay_start_us = decay.start_us;
+    result->decay_end_us = decay.end_us;
+    if (!LsRegression_Solve(&rise) || !LsRegression_Solve(&decay))
+        return result->status = LS_FIT_SAMPLE_SHORT;
+    if ((rise.slope <= 0.0) || (decay.slope >= 0.0))
+        return result->status = LS_FIT_NUMERIC;
+
+    /* 上升斜率单位 A/us；下降段对 ln(I) 的斜率单位 1/us。 */
+    double mean_rise_a = rise.sy / rise.n;
+    double l_rise_uh = (config->applied_voltage_v -
+                        config->loop_resistance_ohm * mean_rise_a) / rise.slope;
+    double tau_decay_us = -1.0 / decay.slope;
+    double l_decay_uh = tau_decay_us * config->loop_resistance_ohm;
+    if (!isfinite(l_rise_uh) || !isfinite(l_decay_uh) ||
+        (l_rise_uh <= 0.0) || (l_decay_uh <= 0.0))
+        return result->status = LS_FIT_NUMERIC;
+
+    for (size_t i = 0U; i < count; i++) {
+        float current = LsCurrent(&samples[i], config);
+        float t_us = (float)(((double)samples[i].timestamp -
+                             config->pulse_start_timestamp) *
+                             config->timestamp_tick_us);
+        if ((samples[i].state == LS_SAMPLE_RISE) &&
+            (t_us >= config->blanking_us) && (current > LS_MIN_CURRENT_A)) {
+            double error = current - (rise.intercept + rise.slope * t_us);
+            rise_error += error * error;
+        }
+        if ((samples[i].state == LS_SAMPLE_DECAY) &&
+            (current > LS_MIN_CURRENT_A)) {
+            double error = current - exp(decay.intercept + decay.slope * t_us);
+            decay_error += error * error;
+        }
+    }
+    result->tau_rise_us = (float)(l_rise_uh / config->loop_resistance_ohm);
+    result->tau_decay_us = (float)tau_decay_us;
+    result->l_ab_rise_uh = (float)l_rise_uh;
+    result->l_ab_decay_uh = (float)l_decay_uh;
+    result->ls_rise_uh = (float)(l_rise_uh / 2.0);
+    result->ls_decay_uh = (float)(l_decay_uh / 2.0);
+    result->rise_rmse_a = (float)sqrt(rise_error / rise.n);
+    result->decay_rmse_a = (float)sqrt(decay_error / decay.n);
+    if (!isfinite(result->rise_rmse_a) || !isfinite(result->decay_rmse_a) ||
+        (result->rise_rmse_a > LS_MAX_RMSE_A) ||
+        (result->decay_rmse_a > LS_MAX_RMSE_A)) {
+        result->l_ab_rise_uh = result->l_ab_decay_uh = 0.0f;
+        result->ls_rise_uh = result->ls_decay_uh = 0.0f;
+        return result->status = LS_FIT_POOR_QUALITY;
+    }
+    result->rise_valid = 1U;
+    result->decay_valid = 1U;
+    /* 两段各自残差较小，也可能对应互相矛盾的等效电路。 */
+    if (fabs(l_rise_uh - l_decay_uh) / (0.5 * (l_rise_uh + l_decay_uh)) >
+        LS_MAX_RELATIVE_L_DIFF)
+        return result->status = LS_FIT_INCONSISTENT;
+    return result->status = LS_FIT_OK;
+}
+
+#define LS_TIMER_HZ             168000000UL
+#define LS_SAMPLE_PERIOD_US     2U
+#define LS_SAMPLE_TICKS         336U
+#define LS_PREPULSE_US          4U
+#define LS_BOOTSTRAP_CHARGE_MS  2U
+#define LS_PULSE_WIDTH_US       60U
+#define LS_PULSE_HARD_LIMIT_US  60U
+#define LS_CAPTURE_COUNT        256U
+#define LS_CURRENT_LIMIT_A      1.50f
+#define LS_VBUS_MIN_V           10.0f
+#define LS_VBUS_MAX_V           18.0f
+#define LS_TIMEOUT_MS           5U
+#define LS_PHASE_CCER_MASK (TIM_CCER_CC1E | TIM_CCER_CC1NE | \
+                            TIM_CCER_CC2E | TIM_CCER_CC2NE | \
+                            TIM_CCER_CC3E | TIM_CCER_CC3NE)
+
+typedef enum {
+    LS_HW_IDLE = 0,
+    LS_HW_RISE,
+    LS_HW_DECAY,
+    LS_HW_COMPLETE,
+    LS_HW_FAULT,
+    LS_HW_LOCKED
+} LsHardwareState_t;
+
+static volatile LsHardwareState_t ls_state;
+static volatile uint8_t ls_dma_overrun;
+static volatile uint8_t ls_overcurrent_detected;
+static uint8_t ls_adc_restored;
+static uint8_t ls_tim1_restored;
+static volatile uint32_t ls_freewheel_start_us;
+static uint32_t ls_start_tick_ms;
+static float ls_vbus_v;
+static float ls_rs_ohm;
+static volatile uint8_t ls_pin_fault;
+static ADC_InitTypeDef ls_saved_adc_init;
+static uint32_t ls_saved_adc1_jsqr;
+static uint32_t ls_saved_adc1_cfgr2;
+static uint32_t ls_saved_adc_cfgr;
+static uint32_t ls_saved_adc2_jsqr;
+static uint32_t ls_saved_adc2_cfgr2;
+static uint32_t ls_saved_adc_sqr1;
+static uint32_t ls_saved_adc_smpr1;
+static uint32_t ls_saved_adc_smpr2;
+static uint32_t ls_saved_adc_tr1;
+static uint32_t ls_saved_adc_ier;
+static uint16_t ls_adc_raw[LS_CAPTURE_COUNT] __attribute__((aligned(4)));
+static LsSample_t ls_samples[LS_CAPTURE_COUNT];
+
+/* bit0=PA8/HIN1，bit1=PB13/LIN1，bit2=PB14/LIN2。 */
+static uint8_t LsReadPwmPins(void)
+{
+    uint32_t pa = GPIOA->IDR;
+    uint32_t pb = GPIOB->IDR;
+    return (uint8_t)(((pa & GPIO_PIN_8) != 0U ? 1U : 0U) |
+                     ((pb & GPIO_PIN_13) != 0U ? 2U : 0U) |
+                     ((pb & GPIO_PIN_14) != 0U ? 4U : 0U));
+}
+
+static void LsPowerOff(void)
+{
+    TIM1->BDTR &= ~TIM_BDTR_MOE;
+    __DSB();
+    TIM1->CCER &= ~LS_PHASE_CCER_MASK;
+    TIM1->DIER &= ~(TIM_DIER_UIE | TIM_DIER_CC3IE);
+    HAL_NVIC_DisableIRQ(TIM1_CC_IRQn);
+    TIM1->CR1 &= ~TIM_CR1_CEN;
+    TIM2->CR1 &= ~TIM_CR1_CEN;
+}
+
+static void LsRestore(void)
+{
+    ls_adc_restored = 1U;
+    ls_tim1_restored = 0U;
+    LsPowerOff();
+    (void)HAL_ADC_Stop_DMA(&hadc2);
+    __HAL_ADC_DISABLE_IT(&hadc2, ADC_IT_AWD1);
+    __HAL_ADC_CLEAR_FLAG(&hadc2, ADC_FLAG_AWD1);
+    hadc2.Init = ls_saved_adc_init;
+    if (HAL_ADC_Init(&hadc2) != HAL_OK) ls_adc_restored = 0U;
+    ADC2->CFGR = ls_saved_adc_cfgr;
+    ADC2->SQR1 = ls_saved_adc_sqr1;
+    ADC2->SMPR1 = ls_saved_adc_smpr1;
+    ADC2->SMPR2 = ls_saved_adc_smpr2;
+    ADC2->TR1 = ls_saved_adc_tr1;
+    ADC2->IER = ls_saved_adc_ier;
+    /* 停止注入组可能清除 JSQR；HAL_ADC_Init 不会重建该寄存器，故需保存并恢复。 */
+    ADC1->CFGR2 = ls_saved_adc1_cfgr2;
+    ADC1->JSQR = ls_saved_adc1_jsqr;
+    ADC2->CFGR2 = ls_saved_adc2_cfgr2;
+    ADC2->JSQR = ls_saved_adc2_jsqr;
+    MX_TIM1_Init();
+    /* HAL 基础初始化不会清 OPM；Rs/FOC 需要定时器持续产生 PWM 周期。 */
+    TIM1->CR1 &= ~(TIM_CR1_OPM | TIM_CR1_CEN);
+    TIM1->BDTR &= ~TIM_BDTR_MOE;
+    TIM1->CCER &= ~LS_PHASE_CCER_MASK;
+    ls_tim1_restored = ((TIM1->CR1 & TIM_CR1_OPM) == 0U) ? 1U : 0U;
+    if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK) ls_adc_restored = 0U;
+    if (HAL_ADCEx_InjectedStart_IT(&hadc2) != HAL_OK) ls_adc_restored = 0U;
+    if ((ADC1->JSQR != ls_saved_adc1_jsqr) ||
+        (ADC2->JSQR != ls_saved_adc2_jsqr)) ls_adc_restored = 0U;
+    __HAL_RCC_TIM2_CLK_DISABLE();
+    if (ls_adc_restored && ls_tim1_restored) foc_motor_state = FOC_MOTOR_IDLE;
+}
+
+uint8_t MotorCalibration_LsIsActive(void)
+{
+    return (ls_state == LS_HW_RISE || ls_state == LS_HW_DECAY ||
+            ls_state == LS_HW_COMPLETE || ls_state == LS_HW_FAULT ||
+            ls_state == LS_HW_LOCKED) ? 1U : 0U;
+}
+
+HAL_StatusTypeDef MotorCalibration_LsStart(void)
+{
+    ADC_ChannelConfTypeDef channel = {0};
+    ADC_AnalogWDGConfTypeDef watchdog = {0};
+    uint32_t pulse_ticks = LS_PULSE_WIDTH_US * (LS_TIMER_HZ / 1000000UL);
+    uint32_t prepulse_ticks = LS_PREPULSE_US * (LS_TIMER_HZ / 1000000UL);
+    float adc_offset = foc.calibration.ib_offset / 4.0f;
+    float adc_gain = foc.current.gain_b * 4.0f;
+    float limit_codes = LS_CURRENT_LIMIT_A / adc_gain;
+
+    if (MotorCalibration_LsIsActive() || MotorCalibration_IsActive())
+        return HAL_BUSY;
+    if (foc_motor_state != FOC_MOTOR_IDLE) {
+        DebugConsole_Printf("LS_BLOCK=MOTOR_NOT_IDLE state=%u\r\n",
+                            (unsigned int)foc_motor_state);
+        return HAL_ERROR;
+    }
+    if (foc.calibration.calibrated == 0U) {
+        DebugConsole_Printf("LS_BLOCK=ADC_OFFSET_NOT_READY\r\n");
+        return HAL_ERROR;
+    }
+    if (!isfinite(foc.state.vbus) ||
+        (foc.state.vbus < LS_VBUS_MIN_V) ||
+        (foc.state.vbus > LS_VBUS_MAX_V)) {
+        DebugConsole_Printf("LS_BLOCK=VBUS_RANGE VBUS=%.4f MIN=%.1f MAX=%.1f\r\n",
+                            (double)foc.state.vbus,
+                            (double)LS_VBUS_MIN_V, (double)LS_VBUS_MAX_V);
+        return HAL_ERROR;
+    }
+    if ((HAL_RCC_GetPCLK2Freq() != LS_TIMER_HZ) ||
+        (HAL_RCC_GetPCLK1Freq() != LS_TIMER_HZ)) {
+        DebugConsole_Printf("LS_BLOCK=TIMER_CLOCK PCLK1=%lu PCLK2=%lu EXPECTED=%lu\r\n",
+                            (unsigned long)HAL_RCC_GetPCLK1Freq(),
+                            (unsigned long)HAL_RCC_GetPCLK2Freq(),
+                            (unsigned long)LS_TIMER_HZ);
+        return HAL_ERROR;
+    }
+    if (LS_PULSE_WIDTH_US > LS_PULSE_HARD_LIMIT_US) {
+        DebugConsole_Printf("LS_BLOCK=PULSE_CONFIG\r\n");
+        return HAL_ERROR;
+    }
+    if (!isfinite(adc_offset) || !isfinite(adc_gain) ||
+        (adc_gain <= 0.0f) || !isfinite(limit_codes) ||
+        (adc_offset <= limit_codes) ||
+        (adc_offset + limit_codes >= 4095.0f)) {
+        DebugConsole_Printf("LS_BLOCK=ADC_RANGE OFFSET=%.2f GAIN=%.8f LIMIT_CODES=%.2f\r\n",
+                            (double)adc_offset, (double)adc_gain,
+                            (double)limit_codes);
+        return HAL_ERROR;
+    }
+
+    ls_rs_ohm = MotorCalibration_GetResultOhm();
+    if (!isfinite(ls_rs_ohm) || ls_rs_ohm <= 0.0f) {
+        DebugConsole_Printf("LS_BLOCK=RS_NOT_MEASURED RUN=rs_identify\r\n");
+        return HAL_ERROR;
+    }
+    ls_vbus_v = foc.state.vbus;
+    ls_saved_adc_init = hadc2.Init;
+    ls_saved_adc1_jsqr = ADC1->JSQR;
+    ls_saved_adc1_cfgr2 = ADC1->CFGR2;
+    ls_saved_adc_cfgr = ADC2->CFGR;
+    ls_saved_adc2_jsqr = ADC2->JSQR;
+    ls_saved_adc2_cfgr2 = ADC2->CFGR2;
+    ls_saved_adc_sqr1 = ADC2->SQR1;
+    ls_saved_adc_smpr1 = ADC2->SMPR1;
+    ls_saved_adc_smpr2 = ADC2->SMPR2;
+    ls_saved_adc_tr1 = ADC2->TR1;
+    ls_saved_adc_ier = ADC2->IER;
+    ls_freewheel_start_us = 0U;
+    ls_dma_overrun = 0U;
+    ls_overcurrent_detected = 0U;
+    ls_pin_fault = 0U;
+    memset(ls_adc_raw, 0, sizeof(ls_adc_raw));
+    foc_motor_state = FOC_MOTOR_CALIBRATION;
+
+    /* 准备期间先关闭功率输出，停止原 25 kHz ADC 注入触发。 */
+    LsPowerOff();
+    TIM1->CCER &= ~TIM_CCER_CC4E;
+    (void)HAL_ADCEx_InjectedStop_IT(&hadc1);
+    (void)HAL_ADCEx_InjectedStop_IT(&hadc2);
+    /* Rs 辨识可能留下单脉冲状态；复位 TIM1 后从确定的 GPIO/寄存器状态启动。 */
+    __HAL_RCC_TIM1_CLK_ENABLE();
+    __HAL_RCC_TIM1_FORCE_RESET();
+    __HAL_RCC_TIM1_RELEASE_RESET();
+    MX_TIM1_Init();
+    TIM1->BDTR &= ~TIM_BDTR_MOE;
+    TIM1->CCER &= ~(LS_PHASE_CCER_MASK | TIM_CCER_CC4E);
+
+    /* ADC2_IN3 为 B/V 相运放输出；规则组单次 12 位，不启用 4 倍过采样。 */
+    hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T2_TRGO;
+    hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+    hadc2.Init.DMAContinuousRequests = ENABLE;
+    if (HAL_ADC_Init(&hadc2) != HAL_OK) goto fail;
+    channel.Channel = ADC_CHANNEL_3;
+    channel.Rank = ADC_REGULAR_RANK_1;
+    channel.SamplingTime = ADC_SAMPLETIME_6CYCLES_5;
+    channel.SingleDiff = ADC_SINGLE_ENDED;
+    channel.OffsetNumber = ADC_OFFSET_NONE;
+    if (HAL_ADC_ConfigChannel(&hadc2, &channel) != HAL_OK) goto fail;
+    watchdog.WatchdogNumber = ADC_ANALOGWATCHDOG_1;
+    watchdog.WatchdogMode = ADC_ANALOGWATCHDOG_SINGLE_REG;
+    watchdog.Channel = ADC_CHANNEL_3;
+    watchdog.ITMode = ENABLE;
+    watchdog.HighThreshold = (uint32_t)(adc_offset + limit_codes);
+    watchdog.LowThreshold = (uint32_t)(adc_offset - limit_codes);
+    watchdog.FilteringConfig = ADC_AWD_FILTERING_NONE;
+    if (HAL_ADC_AnalogWDGConfig(&hadc2, &watchdog) != HAL_OK) goto fail;
+
+    __HAL_RCC_TIM2_CLK_ENABLE();
+    TIM2->CR1 = 0U;
+    TIM2->PSC = 0U;
+    TIM2->ARR = LS_SAMPLE_TICKS - 1U;
+    TIM2->CNT = 0U;
+    TIM2->CR2 = TIM_TRGO_UPDATE;
+    TIM2->SMCR = TIM_SLAVEMODE_TRIGGER | TIM_TS_ITR0; /* TIM1 TRGO → TIM2 ITR0。 */
+
+    if (HAL_ADC_Start_DMA(&hadc2, (uint32_t *)ls_adc_raw,
+                          LS_CAPTURE_COUNT) != HAL_OK) goto fail;
+
+    /* OPM + PWM2：脉冲前 CH1N、CH2N 导通，为 U 高侧自举充电。
+     * CCR1..ARR 期间 CH1 导通、CH1N 关闭；CH2/CH2N 均使能以保持 V 低侧导通。 */
+    TIM1->BDTR &= ~TIM_BDTR_MOE;
+    TIM1->CR1 = TIM_CR1_OPM | TIM_CR1_ARPE;
+    TIM1->PSC = 0U;
+    TIM1->RCR = 0U;
+    /* 先关闭比较值预装载并指定模式，再写 CCR，避免沿用 FOC 的影子比较值。 */
+    TIM1->CCMR1 = TIM_OCMODE_PWM2 | (TIM_OCMODE_PWM1 << 8);
+    TIM1->CR2 = TIM_TRGO_OC1REF; /* CCPC=0，CCER/OCxM 立即生效。 */
+    TIM1->ARR = prepulse_ticks + pulse_ticks - 1U;
+    TIM1->CCR1 = prepulse_ticks;
+    TIM1->CCR2 = 0U;
+    /* CH3 输出保持禁用，仅在高侧脉冲中点产生比较中断。 */
+    TIM1->CCR3 = prepulse_ticks + pulse_ticks / 2U;
+    TIM1->CCR4 = 0U;
+    TIM1->CCER = TIM_CCER_CC1E | TIM_CCER_CC1NE |
+                 TIM_CCER_CC2E | TIM_CCER_CC2NE;
+    TIM1->CNT = 0U;
+    TIM1->EGR = TIM_EGR_UG;
+    TIM1->SR &= ~(TIM_SR_UIF | TIM_SR_CC3IF);
+    HAL_NVIC_SetPriority(TIM1_CC_IRQn, 0U, 0U);
+    HAL_NVIC_ClearPendingIRQ(TIM1_CC_IRQn);
+    HAL_NVIC_EnableIRQ(TIM1_CC_IRQn);
+    TIM1->DIER = TIM_DIER_UIE | TIM_DIER_CC3IE;
+    DebugConsole_Printf("LS_IDENTIFY STARTED LS_DIAG_REV=SINGLE_PULSE_ADC_V10\r\n");
+    DebugConsole_Printf("VBUS=%.4f RS_USED=%.6f RS_SOURCE=%s ADC_SAMPLE_RATE=500000 ADC_SAMPLE_PERIOD_US=2\r\n",
+                        (double)ls_vbus_v, (double)ls_rs_ohm,
+                        "MEASURED");
+    DebugConsole_Printf("PULSE_WIDTH_US=%u PULSE_HARD_LIMIT_US=%u CURRENT_LIMIT_A=%.2f CAPTURE_BUFFER_SIZE=%u BOOTSTRAP_CHARGE_MS=%u\r\n",
+                        LS_PULSE_WIDTH_US, LS_PULSE_HARD_LIMIT_US,
+                        (double)LS_CURRENT_LIMIT_A, LS_CAPTURE_COUNT,
+                        LS_BOOTSTRAP_CHARGE_MS);
+    ls_state = LS_HW_RISE;
+    __DMB();
+    TIM1->BDTR |= TIM_BDTR_MOE;
+    HAL_Delay(LS_BOOTSTRAP_CHARGE_MS);
+    uint8_t precharge_pins = LsReadPwmPins();
+    if (precharge_pins != 6U) {
+        ls_pin_fault = 1U;
+        DebugConsole_Printf("LS_BLOCK=PWM_PRECHARGE_PINS PINS=%u EXPECTED=6\r\n",
+                            precharge_pins);
+        goto fail;
+    }
+    ls_start_tick_ms = HAL_GetTick();
+    TIM1->CR1 |= TIM_CR1_CEN;
+
+    return HAL_OK;
+
+fail:
+    LsRestore();
+    ls_state = ls_adc_restored ? LS_HW_IDLE : LS_HW_LOCKED;
+    DebugConsole_Printf("LS_STOP=%s ADC_RESTORED=%u TIM1_RESTORED=%u\r\n",
+                        ls_pin_fault ? "PWM_PIN_FAULT" : "PERIPHERAL_SETUP",
+                        ls_adc_restored, ls_tim1_restored);
+    return HAL_ERROR;
+}
+
+void MotorCalibration_LsTim1Compare(void)
+{
+    if (ls_state != LS_HW_RISE) return;
+    if (LsReadPwmPins() != 5U) {
+        ls_pin_fault = 2U;
+        ls_state = LS_HW_FAULT;
+        LsPowerOff();
+    }
+}
+
+void MotorCalibration_LsTim1Update(void)
+{
+    if (ls_state != LS_HW_RISE) return;
+    /* 保留 CH1/CH1N 使能；清除 CC1E 会同时让 U 下管互补输出消失。 */
+    TIM1->CCMR1 = (TIM1->CCMR1 & ~TIM_CCMR1_OC1M) |
+                   TIM_OCMODE_FORCED_INACTIVE;
+    /* 跳过高低侧硬件死区附近的边界样本。 */
+    ls_freewheel_start_us = LS_PULSE_WIDTH_US + 1U;
+    ls_state = LS_HW_DECAY;
+}
+
+void MotorCalibration_LsDmaHalf(void)
+{
+    if (ls_state != LS_HW_DECAY) return;
+    /* 半传输约在 256 us 到达，用引脚读数确认 60 us 脉冲后两相下管续流。 */
+    if (LsReadPwmPins() != 6U) {
+        ls_pin_fault = 3U;
+        ls_state = LS_HW_FAULT;
+        LsPowerOff();
+    }
+}
+
+void MotorCalibration_LsDmaComplete(void)
+{
+    if (ls_state != LS_HW_DECAY) {
+        ls_dma_overrun = 1U;
+        ls_state = LS_HW_FAULT;
+    } else {
+        ls_state = LS_HW_COMPLETE;
+    }
+    LsPowerOff();
+}
+
+void MotorCalibration_LsDmaError(void)
+{
+    ls_dma_overrun = 1U;
+    ls_state = LS_HW_FAULT;
+    LsPowerOff();
+}
+
+void MotorCalibration_LsOvercurrent(void)
+{
+    if (ls_state == LS_HW_RISE || ls_state == LS_HW_DECAY) {
+        ls_overcurrent_detected = 1U;
+        ls_state = LS_HW_FAULT;
+        LsPowerOff();
+    }
+}
+
+void MotorCalibration_LsProcess(void)
+{
+    LsHardwareState_t completed = ls_state;
+    LsFitConfig_t config = {0};
+    LsFitResult_t result;
+    uint8_t overcurrent = ls_overcurrent_detected;
+
+    if ((completed == LS_HW_RISE || completed == LS_HW_DECAY) &&
+        (HAL_GetTick() - ls_start_tick_ms > LS_TIMEOUT_MS)) {
+        LsPowerOff();
+        ls_state = LS_HW_FAULT;
+        completed = LS_HW_FAULT;
+    }
+    if (completed != LS_HW_COMPLETE && completed != LS_HW_FAULT) return;
+
+    LsPowerOff();
+    if (completed == LS_HW_COMPLETE) {
+        for (uint32_t i = 0U; i < LS_CAPTURE_COUNT; i++) {
+            uint32_t t_us = (i + 1U) * LS_SAMPLE_PERIOD_US;
+            float current = ((float)ls_adc_raw[i] - foc.calibration.ib_offset / 4.0f) *
+                            (foc.current.gain_b * 4.0f);
+            if (fabsf(current) > LS_CURRENT_LIMIT_A) overcurrent = 1U;
+            ls_samples[i].adc_raw = ls_adc_raw[i];
+            ls_samples[i].timestamp = t_us;
+            ls_samples[i].state = (t_us < LS_PULSE_WIDTH_US) ? LS_SAMPLE_RISE :
+                (t_us >= ls_freewheel_start_us) ? LS_SAMPLE_DECAY : LS_SAMPLE_INVALID;
+        }
+    }
+    LsRestore();
+    ls_state = ls_adc_restored ? LS_HW_IDLE : LS_HW_LOCKED;
+
+    config.timestamp_tick_us = 1.0f;
+    config.pulse_start_timestamp = 0U;
+    config.pulse_end_timestamp = LS_PULSE_WIDTH_US;
+    config.freewheel_start_timestamp = ls_freewheel_start_us;
+    config.adc_offset = foc.calibration.ib_offset / 4.0f;
+    config.adc_gain_a_per_code = foc.current.gain_b * 4.0f;
+    config.applied_voltage_v = ls_vbus_v; /* 近似模型，尚无绕组差分电压测量。 */
+    config.loop_resistance_ohm = 2.0f * ls_rs_ohm;
+    config.current_limit_a = LS_CURRENT_LIMIT_A;
+    config.pulse_hard_limit_us = LS_PULSE_HARD_LIMIT_US;
+    config.blanking_us = 2.0f;
+    config.adc_overrun = ls_dma_overrun;
+    if (completed == LS_HW_COMPLETE && !overcurrent)
+        (void)MotorCalibration_LsFit(ls_samples, LS_CAPTURE_COUNT, &config, &result);
+    else {
+        memset(&result, 0, sizeof(result));
+        result.status = overcurrent ? LS_FIT_OVERCURRENT :
+                        ls_pin_fault ? LS_FIT_TIMING : LS_FIT_ADC_OVERRUN;
+    }
+    if (result.status == LS_FIT_OK) {
+        DebugConsole_Printf("LS_RESULT RISE_UH=%.3f DECAY_UH=%.3f FIT_VALID=1 SAMPLES=%lu/%lu\r\n",
+                            (double)result.ls_rise_uh, (double)result.ls_decay_uh,
+                            (unsigned long)result.rise_samples,
+                            (unsigned long)result.decay_samples);
+    } else {
+        DebugConsole_Printf("LS_RESULT RISE_UH=NA DECAY_UH=NA FIT_VALID=0 ABORT_REASON=%u\r\n",
+                            (unsigned int)result.status);
+    }
+    DebugConsole_Printf("ADC_OVERRUN=%u OVERCURRENT_DETECTED=%u ABORT_REASON=%u TIM1_RESTORED=%u ADC_RESTORED=%u POWER_STAGE_OFF=1\r\n",
+                        ls_dma_overrun, overcurrent, (unsigned int)result.status,
+                        ls_tim1_restored, ls_adc_restored);
 }
