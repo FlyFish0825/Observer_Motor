@@ -83,6 +83,7 @@ typedef enum
     FOC_MOTOR_IDLE = 0, /* PWM关闭或电机未运行。 */
     FOC_MOTOR_OPEN_LOOP, /* 使用给定电压和角度。 */
     FOC_MOTOR_CLOSED_LOOP, /* 使用观测器和电流环闭环。 */
+    FOC_MOTOR_CALIBRATION, /* 电机参数辨识。 */
 
 } FOC_Motor_State_t;
 

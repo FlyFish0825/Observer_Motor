@@ -38,15 +38,10 @@ void FOC_Data_Init(void) {
   foc.calibration.ib_offset = 0.0f;
   foc.calibration.ic_offset = 0.0f;
 
-  /*
-   * 4倍硬件过采样后右移量未在ADC硬件中完成，
-   * 因此保留原来的0.25比例。
-   * 当前板级参数由历史换算系数反推：5 mOhm分流电阻，
-   * 模拟差分增益约28.2776倍，对应R56=11 kOhm、R58/R59约390 Ohm。
-   */
-  foc.current.gain_a = 0.0056982421875f * 0.25f;
-  foc.current.gain_b = 0.0056982421875f * 0.25f;
-  foc.current.gain_c = 0.0056982421875f * 0.25f;
+  /* ADC injected conversions now return one 12-bit sample per trigger. */
+  foc.current.gain_a = 0.0056982421875f;
+  foc.current.gain_b = 0.0056982421875f;
+  foc.current.gain_c = 0.0056982421875f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;

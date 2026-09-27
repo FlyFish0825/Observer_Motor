@@ -40,6 +40,7 @@
 #include "debug_console.h"
 #include "controller.h"
 
+#include "motor_calibration.h"
 #include "app_memory.h"
 #include "motor_protocol.h"
 /* USER CODE END Includes */
@@ -333,12 +334,12 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
 
 
 
-
   uint32_t led_task_tick = HAL_GetTick();
   while (1) {
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
+    MotorCalibration_DebugProcess();
 
     if ((HAL_GetTick() - led_task_tick) >= 500U) {
       led_task_tick = HAL_GetTick();
@@ -469,6 +470,14 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
 
+    if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+      MotorCalibration_Run(foc.state.i_abc.a,
+                           foc.state.i_abc.b,
+                           foc.state.i_abc.c,
+                           foc.state.vbus);
+      return;
+    }
+
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
    
@@ -597,10 +606,11 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     FOC_UpdateBusCurrentEstimate(&foc);
 
     
+    if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
-
+}
 
 
 
@@ -614,16 +624,16 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
      * 115200波特率下DMA绝大多数电流环周期都处于忙状态，
      * 外层先判断TC可减少函数调用、周期差计算和浮点角度换算。
      */
-    if ((just_float_on_off != 0U) &&
-        ((USART2->ISR & USART_ISR_TC) != 0U)) {
-      Fast_Send_6Floats(
-          foc.state.i_dq.d,
-          foc.state.i_dq.q,
-          foc.observer.state.speed_rpm,
-          foc.observer.state.psi_mag,
-          foc.observer.state.phase_raw * RAD_TO_DEG_F,
-          foc.observer.state.pll_phase * RAD_TO_DEG_F);
-    }
+    // if ((just_float_on_off != 0U) &&
+    //     ((USART2->ISR & USART_ISR_TC) != 0U)) {
+    //   Fast_Send_6Floats(
+    //       foc.state.i_dq.d,
+    //       foc.state.i_dq.q,
+    //       foc.observer.state.speed_rpm,
+    //       foc.observer.state.psi_mag,
+    //       foc.observer.state.phase_raw * RAD_TO_DEG_F,
+    //       foc.observer.state.pll_phase * RAD_TO_DEG_F);
+    // }
   }
 }
 
