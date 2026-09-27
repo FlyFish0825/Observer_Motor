@@ -1,5 +1,4 @@
 #include "foc_math.h"
-#include "motor_calibration.h"
 #include "adc.h"
 #include "bsp_dwt.h"
 #include "cordic.h"
@@ -87,11 +86,6 @@ void FOC_Data_Init(void) {
  */
 void FOC_PWM_Start(void) {
 
-  /* Calibration owns TIM1; a late run request must not expose SVPWM outputs. */
-  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
-    return;
-  }
-
   uint32_t init_ccr = (foc.timer.pwm_arr + 1U) / 2U;
   TIM1->CCR1 = init_ccr;
   TIM1->CCR2 = init_ccr;
@@ -113,12 +107,6 @@ void FOC_PWM_Start(void) {
  * @brief 关闭PWM输出并清除比较值，保证停机时功率管不保持上一次状态。
  */
 void FOC_PWM_Stop(void) {
-
-  /* Convert any external stop request into the calibration safe-stop path. */
-  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
-    MotorCalibration_Stop();
-    return;
-  }
 
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_1);
   HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_2);
@@ -280,21 +268,11 @@ void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle) {
       FOC_BUS_CURRENT_FILTER_NEW * ibus_est;
 }
 
-void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc) {
-  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
-    MotorCalibration_LsDmaHalf();
-  }
-}
-
 /** @brief ADC1规则组DMA完成后更新母线电压和MCU温度快照。 */
 void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
   uint16_t adc_vbus;
   uint16_t adc_temperature;
 
-  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
-    MotorCalibration_LsDmaComplete();
-    return;
-  }
   if ((hadc == NULL) || (hadc->Instance != ADC1)) {
     return;
   }
@@ -311,18 +289,8 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
 /** @brief ADC1规则组DMA异常后释放忙标志，允许下一周期自动重试。 */
 void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc) {
-  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
-    MotorCalibration_LsDmaError();
-    return;
-  }
   if ((hadc != NULL) && (hadc->Instance == ADC1)) {
     adc_regular_dma_busy = 0U;
-  }
-}
-
-void HAL_ADC_LevelOutOfWindowCallback(ADC_HandleTypeDef *hadc) {
-  if ((hadc != NULL) && (hadc->Instance == ADC2)) {
-    MotorCalibration_LsOvercurrent();
   }
 }
 

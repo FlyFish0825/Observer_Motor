@@ -42,7 +42,6 @@
 
 #include "app_memory.h"
 #include "motor_protocol.h"
-#include "motor_calibration.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -133,56 +132,6 @@ typedef struct {
 
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
-
-static void Main_CommandRsIdentify(int argc, char *argv[])
-{
-  HAL_StatusTypeDef result;
-
-  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
-    MotorCalibration_Stop();
-    DebugConsole_Printf("RS_IDENTIFY STOP requested\r\n");
-    return;
-  }
-
-  if (argc != 1) {
-    DebugConsole_Printf("ERR usage: rs_identify [stop]\r\n");
-    return;
-  }
-
-  result = MotorCalibration_Start();
-  if (result == HAL_BUSY) {
-    DebugConsole_Printf("ERR rs_identify already running\r\n");
-    return;
-  }
-  if (result != HAL_OK) {
-    if (foc_motor_state != FOC_MOTOR_IDLE) {
-      DebugConsole_Printf("ERR rs_identify motor running\r\n");
-    } else if (foc.calibration.calibrated == 0U) {
-      DebugConsole_Printf("ERR rs_identify current offset not ready\r\n");
-    } else if (foc.state.vbus < 1.0f) {
-      DebugConsole_Printf("ERR rs_identify bus voltage below 1 V\r\n");
-    } else {
-      DebugConsole_Printf("ERR rs_identify unavailable\r\n");
-    }
-    return;
-  }
-
-}
-
-static void Main_CommandLsIdentify(int argc, char *argv[])
-{
-  HAL_StatusTypeDef status;
-  if (argc != 1) {
-    DebugConsole_Printf("ERR usage: ls_identify\r\n");
-    return;
-  }
-  status = MotorCalibration_LsStart();
-  if (status == HAL_BUSY) {
-    DebugConsole_Printf("ERR ls_identify already running\r\n");
-  } else if (status != HAL_OK) {
-    DebugConsole_Printf("ERR ls_identify unavailable; see LS_BLOCK above\r\n");
-  }
-}
 
 /* USER CODE END PV */
 
@@ -298,10 +247,6 @@ int main(void)
     &motor_control.speed_loop_enable, false);
   DebugConsole_RegisterBool("just_float",
     &just_float_on_off, false);
-  DebugConsole_RegisterCommand("rs_identify", Main_CommandRsIdentify,
-    "单相电阻辨识；stop 可中止");
-  DebugConsole_RegisterCommand("ls_identify", Main_CommandLsIdentify,
-    "先运行 rs_identify，再进行单脉冲电感辨识");
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -394,8 +339,6 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
-    MotorCalibration_Process();
-    MotorCalibration_LsProcess();
 
     if ((HAL_GetTick() - led_task_tick) >= 500U) {
       led_task_tick = HAL_GetTick();
@@ -526,11 +469,6 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
     FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
 
-    if (MotorCalibration_IsActive() != 0U) {
-      MotorCalibration_AdcStep();
-      return;
-    }
-
     FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
 
    
@@ -653,20 +591,15 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
       break;
     }
 
-    case FOC_MOTOR_CALIBRATION:
-      /* Rs 辨识期间独占 CCR1，不再执行 FOC 的 SVPWM 写回。 */
-      break;
     }
 
     /* FOC实时估算母线电流；100 Hz CAN反馈读取低通滤波后的快照。 */
     FOC_UpdateBusCurrentEstimate(&foc);
 
     
-    if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
-      TIM1->CCR1 = foc.svpwm.ccr_a;
-      TIM1->CCR2 = foc.svpwm.ccr_b;
-      TIM1->CCR3 = foc.svpwm.ccr_c;
-    }
+    TIM1->CCR1 = foc.svpwm.ccr_a;
+    TIM1->CCR2 = foc.svpwm.ccr_b;
+    TIM1->CCR3 = foc.svpwm.ccr_c;
 
 
 

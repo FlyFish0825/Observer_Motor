@@ -1,4 +1,4 @@
-#ifndef MOTOR_PROTOCOL_H
+﻿#ifndef MOTOR_PROTOCOL_H
 #define MOTOR_PROTOCOL_H
 
 /* 手写协议头定义总线ID、帧长度和入口；字段偏移由 motor_protocol.c 固化。 */
@@ -32,7 +32,6 @@ extern "C" {
 /* 0x100广播控制帧命令。 */
 #define MOTOR_PROTOCOL_CMD_SPEED_VECTOR     0x10U
 #define MOTOR_PROTOCOL_CMD_RUN_VECTOR       0x11U
-#define MOTOR_PROTOCOL_CMD_MOTOR_IDENTIFY   0x12U /* Byte3=1启动，0停止。 */
 #define MOTOR_PROTOCOL_CMD_DEBUG_SELECT     0x20U
 #define MOTOR_PROTOCOL_CMD_STATUS_ONCE      0x30U
 

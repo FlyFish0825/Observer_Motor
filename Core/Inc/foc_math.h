@@ -1,4 +1,4 @@
-#ifndef __FOC_MATH_H
+﻿#ifndef __FOC_MATH_H
 #define __FOC_MATH_H
 #include "main.h"
 #include <stdint.h>
@@ -83,7 +83,6 @@ typedef enum
     FOC_MOTOR_IDLE = 0, /* PWM关闭或电机未运行。 */
     FOC_MOTOR_OPEN_LOOP, /* 使用给定电压和角度。 */
     FOC_MOTOR_CLOSED_LOOP, /* 使用观测器和电流环闭环。 */
-    FOC_MOTOR_CALIBRATION, /* Rs辨识独占功率级和ADC回调。 */
 
 } FOC_Motor_State_t;
 

@@ -23,7 +23,6 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "foc_math.h"
-#include "motor_calibration.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -53,16 +52,6 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
-/* CH3 内部比较点只读取 MCU PWM 引脚电平，不改变高侧硬件限时。 */
-void TIM1_CC_IRQHandler(void)
-{
-  if (((TIM1->SR & TIM_SR_CC3IF) != 0U) &&
-      ((TIM1->DIER & TIM_DIER_CC3IE) != 0U)) {
-    TIM1->SR &= ~TIM_SR_CC3IF;
-    MotorCalibration_LsTim1Compare();
-  }
-}
 
 /* USER CODE END 0 */
 
@@ -418,19 +407,13 @@ void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
   switch (GPIO_Pin) {
   case GPIO_PIN_10:
   HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
-    foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-    FOC_PWM_Start();
-  }
+  foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+  FOC_PWM_Start();
     break;
   case GPIO_PIN_11:
   HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
-    MotorCalibration_Stop();
-  } else {
-    foc_motor_state = FOC_MOTOR_IDLE;
-    FOC_PWM_Stop();
-  }
+  foc_motor_state = FOC_MOTOR_IDLE;
+  FOC_PWM_Stop();
     break;
   case GPIO_PIN_13:
 
