@@ -70,6 +70,8 @@ static FOC_Control_t motor_control;
 
 /* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
 static volatile uint32_t just_float_on_off = 0U;
+/* 串口请求的速度环对称 Iq 限幅；主循环统一应用到 PI。 */
+static volatile float iq_max = FOC_SPEED_PI_OUTPUT_MAX_DEFAULT;
 
 /* DebugConsole 文本入队；USART2 TX DMA 由主循环统一调度。 */
 #define DEBUG_TX_SIZE 4096U
@@ -185,6 +187,36 @@ void JustFloat_Init(void);
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
+/* 串口状态查询只在主循环执行，不占用 25 kHz ADC 中断。 */
+static void MotorDebug_Status(int argc, char *argv[])
+{
+  (void)argc;
+  (void)argv;
+  DebugConsole_Printf("MOTOR state=%u cal=%u MOE=%u ARR=%lu CCR4=%lu\r\n",
+                      (unsigned)foc_motor_state, (unsigned)foc.calibration.calibrated,
+                      (unsigned)((TIM1->BDTR & TIM_BDTR_MOE) != 0U),
+                      (unsigned long)TIM1->ARR, (unsigned long)TIM1->CCR4);
+  DebugConsole_Printf("SPEED target=%.1f rpm=%.1f mode=%s iq_max=%.2fA\r\n",
+                      motor_control.speed_ref_rpm, foc.observer.state.speed_rpm,
+                      motor_control.speed_loop_enable ? "speed" : "current",
+                      motor_control.speed_pi.output_max);
+  DebugConsole_Printf("CURRENT Id=%.3f/%.3f Iq=%.3f/%.3f Ud=%.3f Uq=%.3f Vbus=%.2f\r\n",
+                      motor_control.id_ref, motor_control.id_feedback,
+                      motor_control.iq_ref_active, motor_control.iq_feedback,
+                      motor_control.ud_output, motor_control.uq_output, foc.state.vbus);
+  DebugConsole_Printf("PI speed=%.5g/%.5g id=%.5g/%.5g iq=%.5g/%.5g\r\n",
+                      motor_control.speed_pi.kp, motor_control.speed_pi.ki,
+                      motor_control.id_pi.kp, motor_control.id_pi.ki,
+                      motor_control.iq_pi.kp, motor_control.iq_pi.ki);
+  DebugConsole_Printf("SAT speed=%d id=%d iq=%d phase=%.3f flux=%.6f\r\n",
+                      (int)motor_control.speed_pi.saturation,
+                      (int)motor_control.id_pi.saturation,
+                      (int)motor_control.iq_pi.saturation,
+                      foc.observer.state.phase_raw, foc.observer.state.psi_mag);
+  DebugConsole_Printf("PWM CCR=%lu,%lu,%lu CCER=0x%08lX\r\n",
+                      (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
+                      (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER);
+}
 /* USER CODE END 0 */
 
 /**
@@ -250,8 +282,8 @@ int main(void)
   /*
    * 初始化电流环和速度环。
    * 电流环参数仍为当前已经跑通的参数：
-   * Id: Kp=0.2, Ki=100, 输出-7~7V
-   * Iq: Kp=0.5, Ki=300, 输出-8~8V
+   * Id: Kp=0.2, Ki=100, PI输出默认±20V
+   * Iq: Kp=0.5, Ki=300, PI输出默认±20V
    */
   FOC_Control_Init(&motor_control, foc.timer.Ts);
 
@@ -260,21 +292,35 @@ int main(void)
   }
 
 
-  DebugConsole_RegisterF32("id", &motor_control.id_ref,
-    -8.0f, 8.0f, false);
-  DebugConsole_RegisterF32("iq", &motor_control.iq_ref,
-    -8.0f, 8.0f, false);
-  /* 速度模式参数：speed单位rpm，speed_en为0/1。 */
+  /* 速度模式为主：Iq 命令和模式切换暂不暴露，电流模式留待后续。 */
   DebugConsole_RegisterF32("speed", &motor_control.speed_ref_rpm,
     -10000.0f, 10000.0f, false);
   DebugConsole_RegisterF32("speed_kp", &motor_control.speed_pi.kp,
     0.0f, 1.0f, false);
   DebugConsole_RegisterF32("speed_ki", &motor_control.speed_pi.ki,
     0.0f, 100.0f, false);
-  DebugConsole_RegisterBool("speed_en",
-    &motor_control.speed_loop_enable, false);
-  DebugConsole_RegisterBool("just_float",
-    &just_float_on_off, false);
+  DebugConsole_RegisterF32("iq_max", &iq_max, 0.0f, 10.0f, false);
+  DebugConsole_RegisterBool("just_float", &just_float_on_off, false);
+
+  DebugConsole_RegisterF32("id", &motor_control.id_ref,
+    -8.0f, 8.0f, false);
+  DebugConsole_RegisterF32("id_kp", &motor_control.id_pi.kp,
+    0.0f, 10.0f, false);
+  DebugConsole_RegisterF32("id_ki", &motor_control.id_pi.ki,
+    0.0f, 5000.0f, false);
+  DebugConsole_RegisterF32("iq_kp", &motor_control.iq_pi.kp,
+    0.0f, 10.0f, false);
+  DebugConsole_RegisterF32("iq_ki", &motor_control.iq_pi.ki,
+    0.0f, 5000.0f, false);
+
+  DebugConsole_RegisterF32("rpm", &foc.observer.state.speed_rpm,
+    -100000.0f, 100000.0f, true);
+  DebugConsole_RegisterF32("iq_target", &motor_control.iq_ref_active,
+    -10.0f, 10.0f, true);
+  DebugConsole_RegisterF32("vbus", &foc.state.vbus,
+    0.0f, 70.0f, true);
+  DebugConsole_RegisterCommand("status", MotorDebug_Status,
+    "status: show motor, PI and PWM state");
 
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
@@ -366,6 +412,13 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
+    /* 串口修改的单个正数限幅在这里一次性应用，保持正反转和积分限幅对称。 */
+    if (motor_control.speed_pi.output_max != iq_max) {
+      uint32_t primask = __get_PRIMASK();
+      __disable_irq();
+      PI_Controller_SetLimits(&motor_control.speed_pi, -iq_max, iq_max);
+      __set_PRIMASK(primask);
+    }
     DebugConsole_LogProcess(); // 主循环分批格式化各模块中断提交的数值。
     MotorCalibration_DebugProcess();
     DebugConsole_TxProcess(); // USART2 DMA 后台发送，不等待串口。
@@ -728,7 +781,7 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void) {
 void JustFloat_Init(void) {
   /* VOFA+ JustFloat 帧尾 */
   tx_frame.tail = 0x7F800000UL;
-  just_float_on_off = 1U;
+  just_float_on_off = 0U; /* 上电默认关闭，串口 set just_float 1 手动启用。 */
   /* 暂时关闭 USART DMA 发送请求 */
   CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
 
