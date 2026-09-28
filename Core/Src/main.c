@@ -34,7 +34,7 @@
 #include "bsp_dwt.h"
 #include "foc_math.h"
 #include "stdio.h"
-#include <math.h>
+
 #include <stdint.h>
 #include <string.h>
 #include "debug_console.h"
@@ -606,11 +606,10 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
     FOC_UpdateBusCurrentEstimate(&foc);
 
     
-    if (foc_motor_state != FOC_MOTOR_CALIBRATION) {
+    /* 辨识分支已提前 return，正常更新三相 PWM 比较值。 */
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
-}
 
 
 

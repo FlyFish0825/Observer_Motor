@@ -3,7 +3,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
-#include <math.h>
+#include "arm_math.h"
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -842,7 +842,7 @@ static bool DC_ParseF32(
         (end == NULL) ||
         (*end != '\0') ||
         (errno == ERANGE) ||
-        !isfinite(value))
+        !__builtin_isfinite(value))
     {
         return false;
     }
@@ -1013,8 +1013,8 @@ bool DebugConsole_RegisterF32(
         return false;
     }
 
-    if ((!isfinite(minimum)) ||
-        (!isfinite(maximum)) ||
+    if ((!__builtin_isfinite(minimum)) ||
+        (!__builtin_isfinite(maximum)) ||
         (minimum > maximum))
     {
         return false;

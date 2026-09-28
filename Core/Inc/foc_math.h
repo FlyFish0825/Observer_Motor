@@ -341,7 +341,7 @@ __STATIC_FORCEINLINE float FOC_atan2_Fast(
     float x)
 {
     const float abs_y =
-        fabsf(y) + 1.0e-20f;
+        __builtin_fabsf(y) + 1.0e-20f;
 
     float angle;
 
