@@ -213,7 +213,7 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
 {
     float current = Cal_LineCurrent(ia, ib, ic);
 
-    /* 瞬时硬保护。 */
+    /* 瞬时硬保护。 __builtin_fabsf();绝对值函数   */
     if ((__builtin_fabsf(ia) >= CAL_HARD_CURRENT) ||
         (__builtin_fabsf(ib) >= CAL_HARD_CURRENT) ||
         (__builtin_fabsf(ic) >= CAL_HARD_CURRENT)) {

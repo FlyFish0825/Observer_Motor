@@ -7,7 +7,7 @@
 /* ===== 可调参数 ===== */
 #define CAL_DUTY_START       0.010f   /* 1% */
 #define CAL_DUTY_STEP        0.005f   /* 每档 +0.5% */
-#define CAL_DUTY_MAX         0.200f   /* 最大 20% */
+#define CAL_DUTY_MAX         0.500f   /* 最大 50% */
 
 #define CAL_TARGET_CURRENT   5.0f     /* 平均线电流到 5A 正常结束 */
 #define CAL_HARD_CURRENT     5.5f     /* 瞬时硬保护 */

@@ -4,6 +4,16 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 
 当前为 CAN 链路测试版本：普通 CAN FD 基础反馈约 100 Hz，保留经典 CAN 上电 HELLO、每秒心跳和进入 Bootloader 命令。切换到8 Mbit/s前需同步打开BRS并修改数据段时序。
 
+## 源码结构
+
+- `Core/Inc`、`Core/Src`：CubeMX 生成的入口、外设初始化、中断及系统文件；`board_config.h` 因 HAL 配置依赖保留在 `Core/Inc`。
+- `App/Control`：FOC、观测器、电流/速度控制器。
+- `App/Calibration`：电机参数辨识。
+- `App/Communication`：CAN 电机协议、串口调试控制台。
+- `App/Platform`：DWT、AS5600 和应用存储布局配置。其中 `AS5600.c` 暂不参与固件构建，与整理前一致。
+
+手写模块的 `.c` 和 `.h` 放在同一功能目录，统一由根目录 `CMakeLists.txt` 管理，不修改 CubeMX 生成的 CMake 源文件列表。
+
 ## 文档索引
 
 - [参数辨识：定子电阻 Rs](docs/参数辨识.md)：三组线间测量、采样状态机、拟合公式、关键函数及外设恢复流程。

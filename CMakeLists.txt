@@ -113,22 +113,25 @@ target_link_options(${PROJECT_NAME} PRIVATE
 
 
 # Add sources to executable
+# 手写业务模块按功能分类；Core 保留 CubeMX 生成文件。
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/bsp_dwt.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/foc_math.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/observer.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/debug_console.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/controller.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_protocol.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/Core/Src/motor_calibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/foc_math.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/observer.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Calibration/motor_calibration.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Communication/motor_protocol.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Communication/debug_console.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Platform/bsp_dwt.c
 )
 
 
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Control
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Calibration
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Communication
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Platform
 )
 
 # Add project symbols (macros)
