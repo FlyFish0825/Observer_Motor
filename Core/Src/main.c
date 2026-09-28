@@ -71,49 +71,80 @@ static FOC_Control_t motor_control;
 /* BOOL接口使用uint32_t，避免把uint8_t强转成uint32_t指针。 */
 static volatile uint32_t just_float_on_off = 0U;
 
-/**
- * @brief 通过调试串口发送控制台格式化后的数据。
- * @note 该回调由调试控制台调用，统一使用USART2阻塞发送，避免业务模块直接依赖串口句柄。
- */
+/* DebugConsole 文本入队；USART2 TX DMA 由主循环统一调度。 */
+#define DEBUG_TX_SIZE 4096U
+static uint8_t debug_tx_ring[DEBUG_TX_SIZE];
+static volatile uint16_t debug_tx_head, debug_tx_tail, debug_tx_dma_len;
+static volatile uint32_t debug_tx_dropped;
+
 static void DebugConsole_Tx(const uint8_t *data, uint16_t len)
 {
-    uint32_t just_float_was_enabled = just_float_on_off;
-    uint32_t start_tick;
-    uint16_t index;
+    if ((data == NULL) || (len == 0U))
+        return;
 
-    /* USART2 is shared by JustFloat DMA and text responses. */
-    just_float_on_off = 0U;
+    /* 预留一个空位，整条消息入队，禁止覆盖 DMA 正在发送的数据。 */
+    uint16_t used = (uint16_t)((debug_tx_head - debug_tx_tail) & (DEBUG_TX_SIZE - 1U));
+    if (len > (DEBUG_TX_SIZE - 1U - used)) {
+        debug_tx_dropped++;
+        return;
+    }
+
+    uint16_t first = (uint16_t)(DEBUG_TX_SIZE - debug_tx_head);
+    if (first > len)
+        first = len;
+    memcpy(&debug_tx_ring[debug_tx_head], data, first);
+    if (len > first)
+        memcpy(debug_tx_ring, data + first, len - first);
+    debug_tx_head = (uint16_t)((debug_tx_head + len) & (DEBUG_TX_SIZE - 1U));
+}
+
+/* 仅主循环调用：等上一段完全发送后，启动下一段连续内存的 DMA。 */
+static void DebugConsole_TxProcess(void)
+{
+    if (debug_tx_dma_len != 0U) {
+        /* 普通 DMA 完成后 EN 可能仍为 1；剩余计数为 0 且串口 TC=1 才是真正发完。 */
+        if ((hdma_usart2_tx.Instance->CNDTR != 0U) ||
+            ((USART2->ISR & USART_ISR_TC) == 0U))
+            return;
+        __HAL_DMA_DISABLE(&hdma_usart2_tx);
+        debug_tx_tail = (uint16_t)((debug_tx_tail + debug_tx_dma_len) & (DEBUG_TX_SIZE - 1U));
+        debug_tx_dma_len = 0U;
+    }
+
+    if (debug_tx_head == debug_tx_tail) {
+        if (debug_tx_dropped == 0U)
+            return;
+        debug_tx_dropped = 0U;
+        static const uint8_t warning[] = "WARN: USART2 TX queue overflow\r\n";
+        DebugConsole_Tx(warning, sizeof(warning) - 1U);
+    }
+
+    /* 与中断中的 JustFloat 共用 DMA，检查空闲和占用标志必须原子完成。 */
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    if (((USART2->ISR & USART_ISR_TC) == 0U) ||
+        (hdma_usart2_tx.Instance->CNDTR != 0U)) {
+        __set_PRIMASK(primask);
+        return;
+    }
+
+    debug_tx_dma_len = (debug_tx_head > debug_tx_tail) ?
+        (uint16_t)(debug_tx_head - debug_tx_tail) :
+        (uint16_t)(DEBUG_TX_SIZE - debug_tx_tail);
+
+    /* 禁止中断直到 DMA 配置完成，防止 JustFloat 中途改写同一通道。 */
     CLEAR_BIT(USART2->CR3, USART_CR3_DMAT);
-
-    /* Wait for the last DMA byte, then send the text directly through TDR. */
-    start_tick = HAL_GetTick();
-    while (((USART2->ISR & USART_ISR_TC) == 0U) &&
-           ((HAL_GetTick() - start_tick) < 10U)) {
-    }
-
+    __HAL_DMA_DISABLE(&hdma_usart2_tx);
+    __HAL_DMA_CLEAR_FLAG(&hdma_usart2_tx,
+                         __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart2_tx));
+    hdma_usart2_tx.Instance->CPAR = (uint32_t)&USART2->TDR;
+    hdma_usart2_tx.Instance->CMAR = (uint32_t)&debug_tx_ring[debug_tx_tail];
+    hdma_usart2_tx.Instance->CNDTR = debug_tx_dma_len;
     USART2->ICR = USART_ICR_TCCF;
-    for (index = 0U; index < len; ++index) {
-      start_tick = HAL_GetTick();
-      while ((USART2->ISR & USART_ISR_TXE_TXFNF) == 0U) {
-        if ((HAL_GetTick() - start_tick) >= 100U) {
-          goto debug_console_tx_done;
-        }
-      }
-      USART2->TDR = data[index];
-    }
-
-    start_tick = HAL_GetTick();
-    while ((USART2->ISR & USART_ISR_TC) == 0U) {
-      if ((HAL_GetTick() - start_tick) >= 100U) {
-        break;
-      }
-    }
-
-debug_console_tx_done:
-    if (just_float_was_enabled != 0U) {
-      SET_BIT(USART2->CR3, USART_CR3_DMAT);
-    }
-    just_float_on_off = just_float_was_enabled;
+    SET_BIT(USART2->CR3, USART_CR3_DMAT);
+    __DMB();
+    __HAL_DMA_ENABLE(&hdma_usart2_tx);
+    __set_PRIMASK(primask);
 }
 
 /* USER CODE END PM */
@@ -340,6 +371,7 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     MotorProtocol_Process();
     DebugConsole_Process();
     MotorCalibration_DebugProcess();
+    DebugConsole_TxProcess(); // USART2 DMA 后台发送，不等待串口。
 
     if ((HAL_GetTick() - led_task_tick) >= 500U) {
       led_task_tick = HAL_GetTick();
@@ -742,7 +774,12 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
    * TC=1 表示：
    * DMA、TDR、移位寄存器中的数据全部发送完成。
    */
-  if ((USART2->ISR & USART_ISR_TC) == 0U) {
+  /* 文本待发或 DMA 正在发送文本时，让出 USART2 TX 通道。 */
+  if ((just_float_on_off == 0U) ||
+      (debug_tx_dma_len != 0U) ||
+      (debug_tx_head != debug_tx_tail) ||
+      ((USART2->ISR & USART_ISR_TC) == 0U) ||
+      (hdma_usart2_tx.Instance->CNDTR != 0U)) {
     return -1;
   }
 
@@ -767,10 +804,8 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   __HAL_DMA_CLEAR_FLAG(&hdma_usart2_tx,
                        __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart2_tx));
 
-  /*
-   * CPAR和CMAR已在JustFloat_Init()中固定配置，
-   * 每次发送只需重新装载传输数量。
-   */
+  /* 文本 DMA 会修改 CMAR，发送 JustFloat 前必须恢复帧缓冲区地址。 */
+  hdma_usart2_tx.Instance->CMAR = (uint32_t)&tx_frame;
   hdma_usart2_tx.Instance->CNDTR = sizeof(JustFloatFrame_t);
 
   /*

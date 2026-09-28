@@ -8,6 +8,19 @@
 
 volatile MotorCalibration_t motor_cal;
 
+/* ADC 中断只写数值记录，主循环负责格式化；32 项环形队列。 */
+#define CAL_LOG_SIZE 32U
+typedef struct {
+    MotorCalPoint_t point;
+    float resistance;
+    uint8_t phase;
+    uint8_t index;
+    uint8_t is_result;
+} CalLog_t;
+static volatile CalLog_t cal_log[CAL_LOG_SIZE];
+static volatile uint8_t cal_log_head, cal_log_tail;
+static volatile uint16_t cal_log_dropped;
+
 typedef enum {
     MOTOR_AH = 1,
     MOTOR_AL,
@@ -211,6 +224,8 @@ void MotorCalibration_Start(void)
 {
     MotorCalibration_Stop(); // 先恢复安全停机状态，再配置辨识桥臂。
     memset((void *)&motor_cal, 0, sizeof(motor_cal));
+    cal_log_head = cal_log_tail = 0U;
+    cal_log_dropped = 0U;
 
     motor_cal.phase = CAL_PHASE_AB;
     motor_cal.duty = CAL_DUTY_START;
@@ -297,6 +312,18 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
             p->voltage = motor_cal.duty * avg_vbus;
             p->current = avg_i;
 
+            /* 将本档数值交给主循环，ISR 不格式化或等待串口。 */
+            uint8_t next = (uint8_t)((cal_log_head + 1U) & (CAL_LOG_SIZE - 1U));
+            if (next != cal_log_tail) {
+                cal_log[cal_log_head].point = *p;
+                cal_log[cal_log_head].phase = (uint8_t)motor_cal.phase;
+                cal_log[cal_log_head].index = (uint8_t)motor_cal.point_count;
+                cal_log[cal_log_head].is_result = 0U;
+                cal_log_head = next;
+            } else {
+                cal_log_dropped++;
+            }
+
             /* 电流未达目标且下一档不超限，继续增加占空比。 */
             if ((avg_i < CAL_TARGET_CURRENT) &&
                 (motor_cal.duty + CAL_DUTY_STEP <= CAL_DUTY_MAX)) {
@@ -313,30 +340,46 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
         TIM1->CCR3 = 0U;
 
         /* 按当前回路拟合电阻；AB、BC 依次换相，CA 完成后计算 Rs。 */
-        switch (motor_cal.phase) {
+        CalPhase_t finished_phase = motor_cal.phase;
+        float line_r = Cal_FitResistance();
+        switch (finished_phase) {
         case CAL_PHASE_AB:
-            motor_cal.r_ab = Cal_FitResistance();
+            motor_cal.r_ab = line_r;
             motor_cal.phase = CAL_PHASE_BC;
             Cal_ConfigPhaseB();
             break;
 
         case CAL_PHASE_BC:
-            motor_cal.r_bc = Cal_FitResistance();
+            motor_cal.r_bc = line_r;
             motor_cal.phase = CAL_PHASE_CA;
             Cal_ConfigPhaseC();
             break;
 
         case CAL_PHASE_CA:
         default:
-            motor_cal.r_ca = Cal_FitResistance();
+            motor_cal.r_ca = line_r;
             motor_cal.r_a = (motor_cal.r_ab + motor_cal.r_ca - motor_cal.r_bc) * 0.5f;
             motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
             motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
             motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
             MotorCalibration_Stop();
             motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
-            return;
+            break;
         }
+
+        /* 每相结束单独入队电阻结果，避免等三相全部完成。 */
+        uint8_t next = (uint8_t)((cal_log_head + 1U) & (CAL_LOG_SIZE - 1U));
+        if (next != cal_log_tail) {
+            cal_log[cal_log_head].phase = (uint8_t)finished_phase;
+            cal_log[cal_log_head].resistance = line_r;
+            cal_log[cal_log_head].is_result = 1U;
+            cal_log_head = next;
+        } else {
+            cal_log_dropped++;
+        }
+
+        if (finished_phase == CAL_PHASE_CA)
+            return;
 
         /* 换相后从初始占空比重新采样，并复用测量点缓存。 */
         motor_cal.duty = CAL_DUTY_START;
@@ -356,35 +399,47 @@ void MotorCalibration_DebugProcess(void)
 {
     static MotorCalState_t last_state = CAL_IDLE;
 
-    if ((motor_cal.state == CAL_DONE) && (last_state != CAL_DONE)) {
-        DebugConsole_Printf("\r\n===== Rs Calibration Result =====\r\n");
+    /* 每轮最多处理 4 条数值记录，不在 ADC 中断里格式化文本。 */
+    for (uint8_t n = 0U; (n < 4U) && (cal_log_tail != cal_log_head); n++) {
+        CalLog_t item = cal_log[cal_log_tail];
+        cal_log_tail = (uint8_t)((cal_log_tail + 1U) & (CAL_LOG_SIZE - 1U));
+        const char *phase = (item.phase == CAL_PHASE_AB) ? "AB" :
+                            (item.phase == CAL_PHASE_BC) ? "BC" : "CA";
 
-        for (uint16_t i = 0U; i < motor_cal.point_count; i++) {
+        if (item.is_result) {
+            DebugConsole_Printf("R_%s = %.6f ohm\r\n", phase, item.resistance);
+        } else {
             DebugConsole_Printf(
-                "%02u: duty=%.2f%%  V=%.4fV  I=%.4fA\r\n",
-                (unsigned)(i + 1U),
-                motor_cal.point[i].duty * 100.0f,
-                motor_cal.point[i].voltage,
-                motor_cal.point[i].current);
+                "%s %02u: duty=%.2f%%  V=%.4fV  I=%.4fA\r\n",
+                phase, (unsigned)item.index, item.point.duty * 100.0f,
+                item.point.voltage, item.point.current);
         }
-
-        DebugConsole_Printf("R_AB = %.6f ohm\r\n"
-                           "R_BC = %.6f ohm\r\n"
-                           "R_CA = %.6f ohm\r\n"
-                           "R_A  = %.6f ohm\r\n"
-                           "R_B  = %.6f ohm\r\n"
-                           "R_C  = %.6f ohm\r\n"
-                           "R_S  = %.6f ohm\r\n",
-                           motor_cal.r_ab, motor_cal.r_bc, motor_cal.r_ca,
-                           motor_cal.r_a, motor_cal.r_b, motor_cal.r_c,
-                           motor_cal.rs);
     }
 
-    if ((motor_cal.state == CAL_ERROR) && (last_state != CAL_ERROR)) {
-        DebugConsole_Printf(
-            "\r\nRs calibration ERROR: duty=%.2f%%\r\n",
-            motor_cal.duty * 100.0f);
+    /* 排空测量记录后再打印最终汇总，确保输出先后顺序。 */
+    if (cal_log_tail == cal_log_head) {
+        if ((motor_cal.state == CAL_DONE) && (last_state != CAL_DONE)) {
+            DebugConsole_Printf("\r\n===== Rs Calibration Result =====\r\n"
+                                "R_A  = %.6f ohm\r\n"
+                                "R_B  = %.6f ohm\r\n"
+                                "R_C  = %.6f ohm\r\n"
+                                "R_S  = %.6f ohm\r\n",
+                                motor_cal.r_a, motor_cal.r_b,
+                                motor_cal.r_c, motor_cal.rs);
+            if (cal_log_dropped)
+                DebugConsole_Printf("WARN: %u calibration logs dropped\r\n",
+                                    (unsigned)cal_log_dropped);
+            last_state = CAL_DONE;
+        } else if ((motor_cal.state == CAL_ERROR) && (last_state != CAL_ERROR)) {
+            DebugConsole_Printf("\r\nRs calibration ERROR: duty=%.2f%%\r\n",
+                                motor_cal.duty * 100.0f);
+            if (cal_log_dropped)
+                DebugConsole_Printf("WARN: %u calibration logs dropped\r\n",
+                                    (unsigned)cal_log_dropped);
+            last_state = CAL_ERROR;
+        }
     }
 
-    last_state = motor_cal.state;
+    if ((motor_cal.state != CAL_DONE) && (motor_cal.state != CAL_ERROR))
+        last_state = motor_cal.state;
 }

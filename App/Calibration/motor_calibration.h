@@ -73,7 +73,7 @@ void MotorCalibration_Start(void);
 /* ADC 注入中断中调用：ia/ib 单位 A，vbus 单位 V。 */
 void MotorCalibration_Run(float ia, float ib, float ic, float vbus);
 
-/* 主循环调用；DONE/ERROR 时用 DebugConsole_Printf 打印一次。 */
+/* 主循环分批打印逐档记录；每相输出电阻，DONE/ERROR 时输出最终结果。 */
 void MotorCalibration_DebugProcess(void);
 
 /* 立即关功率输出并回到 IDLE。 */
