@@ -2,8 +2,9 @@
 
 #include "app_memory.h"
 #include "foc_math.h"
+#include "motor_calibration.h"
 #include "tim.h"
-#include <math.h>
+
 #include <string.h>
 
 #define MOTOR_PROTOCOL_BOOT_MAGIC       0x544F4F42UL /* Bootloader跳转魔数。 */
@@ -207,8 +208,13 @@ static void MotorProtocol_SendPowerOnHello(void)
 static void MotorProtocol_SetRun(uint8_t run)
 {
   if (run == 0U) {
+    /* CAN停机也必须关闭辨识中保持高电平的GPIO。 */
+    if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+      MotorCalibration_Stop();
+    } else {
+      FOC_PWM_Stop();
+    }
     foc_motor_state = FOC_MOTOR_IDLE;
-    FOC_PWM_Stop();
     FOC_Control_Reset(motor_protocol.control);
     return;
   }
@@ -347,8 +353,13 @@ static void MotorProtocol_HandleBoot(const uint8_t data[8])
   uint32_t tx_request;
   uint32_t start_tick;
 
+  /* 进入Bootloader前同样恢复辨识占用的功率引脚。 */
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    MotorCalibration_Stop();
+  } else {
+    FOC_PWM_Stop();
+  }
   foc_motor_state = FOC_MOTOR_IDLE;
-  FOC_PWM_Stop();
   /* 停止周期反馈，避免ACK排队期间继续占用发送FIFO。 */
   (void)HAL_TIM_Base_Stop_IT(&htim6);
 

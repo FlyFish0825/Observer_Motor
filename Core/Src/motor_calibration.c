@@ -1,8 +1,9 @@
 #include "motor_calibration.h"
 #include "debug_console.h"
+#include "foc_math.h"
 #include "tim.h"
 
-#include <math.h>
+#include "arm_math.h"
 #include <string.h>
 
 volatile MotorCalibration_t motor_cal;
@@ -116,26 +117,6 @@ static void Cal_ConfigPhaseC(void)
     Motor_PinMode(MOTOR_CL, MOTOR_PWM);
 }
 
-static void Cal_OutputOff(void)
-{
-    __HAL_TIM_MOE_DISABLE(&htim1);
-    TIM1->CCR1 = 0U;
-    TIM1->CCR2 = 0U;
-    TIM1->CCR3 = 0U;
-}
-
-static void Cal_AllOff(void)
-{
-    Cal_OutputOff();
-
-    Motor_PinMode(MOTOR_AH, MOTOR_GPIO_LOW);
-    Motor_PinMode(MOTOR_AL, MOTOR_GPIO_LOW);
-    Motor_PinMode(MOTOR_BH, MOTOR_GPIO_LOW);
-    Motor_PinMode(MOTOR_BL, MOTOR_GPIO_LOW);
-    Motor_PinMode(MOTOR_CH, MOTOR_GPIO_LOW);
-    Motor_PinMode(MOTOR_CL, MOTOR_GPIO_LOW);
-}
-
 static void Cal_SetDuty(float duty)
 {
     uint32_t ccr = (uint32_t)((float)TIM1->ARR * duty);
@@ -157,12 +138,12 @@ static void Cal_SetDuty(float duty)
 static float Cal_LineCurrent(float ia, float ib, float ic)
 {
     if (motor_cal.phase == CAL_PHASE_AB)
-        return 0.5f * (fabsf(ia) + fabsf(ib));
+        return 0.5f * (__builtin_fabsf(ia) + __builtin_fabsf(ib));
 
     if (motor_cal.phase == CAL_PHASE_BC)
-        return 0.5f * (fabsf(ib) + fabsf(ic));
+        return 0.5f * (__builtin_fabsf(ib) + __builtin_fabsf(ic));
 
-    return 0.5f * (fabsf(ic) + fabsf(ia));
+    return 0.5f * (__builtin_fabsf(ic) + __builtin_fabsf(ia));
 }
 
 /* 用最后几组点拟合 V = R*I + b，斜率就是 R_AB。 */
@@ -189,7 +170,7 @@ static float Cal_FitResistance(void)
     }
 
     float den = (float)n * sii - si * si;
-    if (fabsf(den) < 1e-6f)
+    if (__builtin_fabsf(den) < 1e-6f)
         return 0.0f;
 
     return ((float)n * siv - si * sv) / den;
@@ -197,7 +178,7 @@ static float Cal_FitResistance(void)
 
 void MotorCalibration_Start(void)
 {
-    Cal_AllOff();
+    MotorCalibration_Stop(); // 先恢复安全停机状态，再配置辨识桥臂。
     memset((void *)&motor_cal, 0, sizeof(motor_cal));
 
     motor_cal.phase = CAL_PHASE_AB;
@@ -206,10 +187,26 @@ void MotorCalibration_Start(void)
     motor_cal.state = CAL_SET_DUTY;
 }
 
+/* 统一退出：关闭驱动和ADC触发，恢复六路TIM1复用引脚，保持停机。 */
 void MotorCalibration_Stop(void)
 {
-    Cal_AllOff();
     motor_cal.state = CAL_IDLE;
+
+    __HAL_TIM_MOE_DISABLE(&htim1);
+    TIM1->CCR1 = 0U;
+    TIM1->CCR2 = 0U;
+    TIM1->CCR3 = 0U;
+
+    Motor_PinMode(MOTOR_AH, MOTOR_GPIO_LOW);
+    Motor_PinMode(MOTOR_AL, MOTOR_GPIO_LOW);
+    Motor_PinMode(MOTOR_BH, MOTOR_GPIO_LOW);
+    Motor_PinMode(MOTOR_BL, MOTOR_GPIO_LOW);
+    Motor_PinMode(MOTOR_CH, MOTOR_GPIO_LOW);
+    Motor_PinMode(MOTOR_CL, MOTOR_GPIO_LOW);
+
+    FOC_PWM_Stop();
+    HAL_TIM_MspPostInit(&htim1);
+    foc_motor_state = FOC_MOTOR_IDLE; // 硬件恢复后再切换状态。
 }
 
 void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
@@ -217,11 +214,11 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
     float current = Cal_LineCurrent(ia, ib, ic);
 
     /* 瞬时硬保护。 */
-    if ((fabsf(ia) >= CAL_HARD_CURRENT) ||
-        (fabsf(ib) >= CAL_HARD_CURRENT) ||
-        (fabsf(ic) >= CAL_HARD_CURRENT)) {
-        Cal_AllOff();
-        motor_cal.state = CAL_ERROR;
+    if ((__builtin_fabsf(ia) >= CAL_HARD_CURRENT) ||
+        (__builtin_fabsf(ib) >= CAL_HARD_CURRENT) ||
+        (__builtin_fabsf(ic) >= CAL_HARD_CURRENT)) {
+        MotorCalibration_Stop();
+        motor_cal.state = CAL_ERROR; // 保留错误状态供主循环打印。
         return;
     }
 
@@ -257,7 +254,11 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
             float avg_vbus = motor_cal.vbus_sum / (float)CAL_SAMPLE_COUNT;
 
             if (motor_cal.point_count >= CAL_MAX_POINTS) {
-                Cal_OutputOff();
+                /* 切换相别前只关PWM，不退出辨识或关闭ADC触发。 */
+                __HAL_TIM_MOE_DISABLE(&htim1);
+                TIM1->CCR1 = 0U;
+                TIM1->CCR2 = 0U;
+                TIM1->CCR3 = 0U;
                 if (motor_cal.phase == CAL_PHASE_AB) {
                     motor_cal.r_ab = Cal_FitResistance();
                     motor_cal.phase = CAL_PHASE_BC;
@@ -278,7 +279,8 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
                     motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
                     motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
                     motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
-                    motor_cal.state = CAL_DONE;
+                    MotorCalibration_Stop();
+                    motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
                 }
                 break;
             }
@@ -293,7 +295,11 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
             /* 到 5A，或 duty 到上限，停止并用最后几组点拟合。 */
             if ((avg_i >= CAL_TARGET_CURRENT) ||
                 (motor_cal.duty + CAL_DUTY_STEP > CAL_DUTY_MAX)) {
-                Cal_OutputOff();
+                /* 切换相别前只关PWM，不退出辨识或关闭ADC触发。 */
+                __HAL_TIM_MOE_DISABLE(&htim1);
+                TIM1->CCR1 = 0U;
+                TIM1->CCR2 = 0U;
+                TIM1->CCR3 = 0U;
                 if (motor_cal.phase == CAL_PHASE_AB) {
                     motor_cal.r_ab = Cal_FitResistance();
                     motor_cal.phase = CAL_PHASE_BC;
@@ -314,7 +320,8 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
                     motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
                     motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
                     motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
-                    motor_cal.state = CAL_DONE;
+                    MotorCalibration_Stop();
+                    motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
                 }
                 break;
             }
@@ -325,8 +332,8 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
         break;
 
     default:
-        Cal_AllOff();
-        motor_cal.state = CAL_ERROR;
+        MotorCalibration_Stop();
+        motor_cal.state = CAL_ERROR; // 保留错误状态供主循环打印。
         break;
     }
 }
