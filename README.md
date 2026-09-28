@@ -4,6 +4,10 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 
 当前为 CAN 链路测试版本：普通 CAN FD 基础反馈约 100 Hz，保留经典 CAN 上电 HELLO、每秒心跳和进入 Bootloader 命令。切换到8 Mbit/s前需同步打开BRS并修改数据段时序。
 
+## 文档索引
+
+- [参数辨识：定子电阻 Rs](docs/参数辨识.md)：三组线间测量、采样状态机、拟合公式、关键函数及外设恢复流程。
+
 ## CAN FD 协议
 
 网络中节点号固定为 Node1～Node8；上位机预先配置节点号，APP 不提供发现、注册或动态分配。FDCAN 接收使用环形缓冲区，反馈由 TIM6 硬件时隙调度。
@@ -130,8 +134,11 @@ cmake --build --preset Boot-Release
 
 `Debug`/`Release` 为独立 APP，向量表位于 `0x08000000`；`Boot-Debug`/`Boot-Release` 为配套 Bootloader 的 APP，向量表位于 `0x08005000`。当前板卡使用 24 MHz 外部晶振；16 MHz 板卡须先核对 `Core/Inc/board_config.h` 中的 `BOARD_HSE_HZ`。
 
-## Rs Identification
+## Rs Identification（定子电阻辨识）
 
+当前采用 AB → BC → CA 三组线间通电，PWM 从 1% 开始逐档增加；每档先等待电流稳定，再平均采样，使用最后最多 5 个测量点拟合线间电阻，换算得到平均相电阻 Rs。辨识由 ADC 注入回调驱动，结束后统一恢复安全停机配置。
+
+详细流程图、参数、关键函数与计算公式见 [docs/参数辨识.md](docs/参数辨识.md)。
 
 ### 改动记录
 
