@@ -95,8 +95,8 @@ add_subdirectory(cmake/stm32cubemx)
 # Release speed optimization for the high-frequency FOC control path.
 # The toolchain currently uses -Os for Release; -O3 below appears later
 # on the compiler command line and therefore takes precedence.
-# LTO allows GCC to inline and optimize across main.c/foc_math.c/
-# observer.c/controller.c without changing the source architecture.
+# LTO allows GCC to inline and optimize across motor_app.c/foc_math.c/
+# observer.c/controller.c after the application-layer split.
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
     "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C>>:-O3;-flto>"
 )
@@ -118,6 +118,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/foc_math.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/observer.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/controller.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/App/Control/motor_app.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Calibration/motor_calibration.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Communication/motor_protocol.c
     ${CMAKE_CURRENT_SOURCE_DIR}/App/Communication/debug_console.c

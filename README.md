@@ -7,7 +7,8 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 ## 源码结构
 
 - `Core/Inc`、`Core/Src`：CubeMX 生成的入口、外设初始化、中断及系统文件；`board_config.h` 因 HAL 配置依赖保留在 `Core/Inc`。
-- `App/Control`：FOC、观测器、电流/速度控制器。
+- `App/Control`：FOC、观测器、电流/速度控制器及 `motor_app.c/.h`（业务初始化、ADC 实时控制、调试与 DMA）。
+- `Core/Src/main.c`：保留向量表、CubeMX 外设初始化、CAN 启动、主循环入口及 HAL 回调转发。
 - `App/Calibration`：电机参数辨识。
 - `App/Communication`：CAN 电机协议、串口调试控制台。
 - `App/Platform`：DWT、AS5600 和应用存储布局配置。其中 `AS5600.c` 暂不参与固件构建，与整理前一致。
