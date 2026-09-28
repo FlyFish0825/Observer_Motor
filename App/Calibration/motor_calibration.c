@@ -146,35 +146,66 @@ static float Cal_LineCurrent(float ia, float ib, float ic)
     return 0.5f * (__builtin_fabsf(ic) + __builtin_fabsf(ia));
 }
 
-/* 用最后几组点拟合 V = R*I + b，斜率就是 R_AB。 */
+
+/**
+ * @brief 使用最后 CAL_FIT_POINTS 组数据拟合电机线间电阻 R_AB
+ *
+ * 拟合模型：
+ *      V = R * I + b
+ *
+ * 其中：
+ *      V：采样电压
+ *      I：采样电流
+ *      R：拟合直线斜率，即线间电阻 R_AB
+ *      b：电压偏置（截距）
+ *
+ * 最小二乘法计算斜率：
+ *
+ *           n*Σ(I*V) - ΣI*ΣV
+ *      R = --------------------
+ *             n*Σ(I²) - (ΣI)²
+ *
+ * n 为参与拟合的数据点数量。
+ *
+ * @return 拟合得到的线间电阻 R_AB，数据不足或分母过小时返回 0
+ */
 static float Cal_FitResistance(void)
 {
+    /* 选取最后 CAL_FIT_POINTS 组数据，不足时使用全部数据 */
     uint16_t end = motor_cal.point_count;
     uint16_t start = (end > CAL_FIT_POINTS) ? (end - CAL_FIT_POINTS) : 0U;
     uint16_t n = end - start;
 
-    float si = 0.0f, sv = 0.0f;
-    float sii = 0.0f, siv = 0.0f;
+    /* 最小二乘法所需的四个累加量 */
+    float si = 0.0f, sv = 0.0f;   // ΣI、ΣV
+    float sii = 0.0f, siv = 0.0f; // Σ(I²)、Σ(I*V)
 
+    /* 至少需要两个数据点才能拟合直线 */
     if (n < 2U)
         return 0.0f;
 
+    /* 累加参与拟合的电流、电压及其乘积 */
     for (uint16_t k = start; k < end; k++) {
         float i = motor_cal.point[k].current;
         float v = motor_cal.point[k].voltage;
 
-        si += i;
-        sv += v;
-        sii += i * i;
-        siv += i * v;
+        si += i;       // ΣI
+        sv += v;       // ΣV
+        sii += i * i;  // Σ(I²)
+        siv += i * v;  // Σ(I*V)
     }
 
+    /* 计算斜率分母：n*Σ(I²) - (ΣI)² */
     float den = (float)n * sii - si * si;
+
+    /* 分母过小意味着电流变化不足，无法可靠计算斜率 */
     if (__builtin_fabsf(den) < 1e-6f)
         return 0.0f;
 
+    /* 计算最小二乘斜率 R_AB */
     return ((float)n * siv - si * sv) / den;
 }
+
 
 void MotorCalibration_Start(void)
 {
