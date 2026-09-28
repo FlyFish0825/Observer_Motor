@@ -245,46 +245,20 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
         }
         break;
 
-    case CAL_SAMPLE:
+    case CAL_SAMPLE: {
+        /* 按 ADC 回调累加本档采样数据，未满窗口就等待下一次中断。 */
         motor_cal.current_sum += current;
         motor_cal.vbus_sum += vbus;
 
-        if (++motor_cal.count >= CAL_SAMPLE_COUNT) {
-            float avg_i = motor_cal.current_sum / (float)CAL_SAMPLE_COUNT;
-            float avg_vbus = motor_cal.vbus_sum / (float)CAL_SAMPLE_COUNT;
+        if (++motor_cal.count < CAL_SAMPLE_COUNT)
+            break;
 
-            if (motor_cal.point_count >= CAL_MAX_POINTS) {
-                /* 切换相别前只关PWM，不退出辨识或关闭ADC触发。 */
-                __HAL_TIM_MOE_DISABLE(&htim1);
-                TIM1->CCR1 = 0U;
-                TIM1->CCR2 = 0U;
-                TIM1->CCR3 = 0U;
-                if (motor_cal.phase == CAL_PHASE_AB) {
-                    motor_cal.r_ab = Cal_FitResistance();
-                    motor_cal.phase = CAL_PHASE_BC;
-                    motor_cal.duty = CAL_DUTY_START;
-                    motor_cal.point_count = 0U;
-                    Cal_ConfigPhaseB();
-                    motor_cal.state = CAL_SET_DUTY;
-                } else if (motor_cal.phase == CAL_PHASE_BC) {
-                    motor_cal.r_bc = Cal_FitResistance();
-                    motor_cal.phase = CAL_PHASE_CA;
-                    motor_cal.duty = CAL_DUTY_START;
-                    motor_cal.point_count = 0U;
-                    Cal_ConfigPhaseC();
-                    motor_cal.state = CAL_SET_DUTY;
-                } else {
-                    motor_cal.r_ca = Cal_FitResistance();
-                    motor_cal.r_a = (motor_cal.r_ab + motor_cal.r_ca - motor_cal.r_bc) * 0.5f;
-                    motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
-                    motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
-                    motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
-                    MotorCalibration_Stop();
-                    motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
-                }
-                break;
-            }
+        /* 采样窗口结束：计算本档平均线电流和平均母线电压。 */
+        float avg_i = motor_cal.current_sum / (float)CAL_SAMPLE_COUNT;
+        float avg_vbus = motor_cal.vbus_sum / (float)CAL_SAMPLE_COUNT;
 
+        /* 未达到点数上限时保存本档数据；未触发结束条件则继续升压。 */
+        if (motor_cal.point_count < CAL_MAX_POINTS) {
             volatile MotorCalPoint_t *p =
                 &motor_cal.point[motor_cal.point_count++];
 
@@ -292,44 +266,53 @@ void MotorCalibration_Run(float ia, float ib, float ic, float vbus)
             p->voltage = motor_cal.duty * avg_vbus;
             p->current = avg_i;
 
-            /* 到 5A，或 duty 到上限，停止并用最后几组点拟合。 */
-            if ((avg_i >= CAL_TARGET_CURRENT) ||
-                (motor_cal.duty + CAL_DUTY_STEP > CAL_DUTY_MAX)) {
-                /* 切换相别前只关PWM，不退出辨识或关闭ADC触发。 */
-                __HAL_TIM_MOE_DISABLE(&htim1);
-                TIM1->CCR1 = 0U;
-                TIM1->CCR2 = 0U;
-                TIM1->CCR3 = 0U;
-                if (motor_cal.phase == CAL_PHASE_AB) {
-                    motor_cal.r_ab = Cal_FitResistance();
-                    motor_cal.phase = CAL_PHASE_BC;
-                    motor_cal.duty = CAL_DUTY_START;
-                    motor_cal.point_count = 0U;
-                    Cal_ConfigPhaseB();
-                    motor_cal.state = CAL_SET_DUTY;
-                } else if (motor_cal.phase == CAL_PHASE_BC) {
-                    motor_cal.r_bc = Cal_FitResistance();
-                    motor_cal.phase = CAL_PHASE_CA;
-                    motor_cal.duty = CAL_DUTY_START;
-                    motor_cal.point_count = 0U;
-                    Cal_ConfigPhaseC();
-                    motor_cal.state = CAL_SET_DUTY;
-                } else {
-                    motor_cal.r_ca = Cal_FitResistance();
-                    motor_cal.r_a = (motor_cal.r_ab + motor_cal.r_ca - motor_cal.r_bc) * 0.5f;
-                    motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
-                    motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
-                    motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
-                    MotorCalibration_Stop();
-                    motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
-                }
+            /* 电流未达目标且下一档不超限，继续增加占空比。 */
+            if ((avg_i < CAL_TARGET_CURRENT) &&
+                (motor_cal.duty + CAL_DUTY_STEP <= CAL_DUTY_MAX)) {
+                motor_cal.duty += CAL_DUTY_STEP;
+                motor_cal.state = CAL_SET_DUTY;
                 break;
             }
-
-            motor_cal.duty += CAL_DUTY_STEP;
-            motor_cal.state = CAL_SET_DUTY;
         }
+
+        /* 达到电流、占空比或点数上限：只关 PWM，保留 ADC 触发用于下一相。 */
+        __HAL_TIM_MOE_DISABLE(&htim1);
+        TIM1->CCR1 = 0U;
+        TIM1->CCR2 = 0U;
+        TIM1->CCR3 = 0U;
+
+        /* 按当前回路拟合电阻；AB、BC 依次换相，CA 完成后计算 Rs。 */
+        switch (motor_cal.phase) {
+        case CAL_PHASE_AB:
+            motor_cal.r_ab = Cal_FitResistance();
+            motor_cal.phase = CAL_PHASE_BC;
+            Cal_ConfigPhaseB();
+            break;
+
+        case CAL_PHASE_BC:
+            motor_cal.r_bc = Cal_FitResistance();
+            motor_cal.phase = CAL_PHASE_CA;
+            Cal_ConfigPhaseC();
+            break;
+
+        case CAL_PHASE_CA:
+        default:
+            motor_cal.r_ca = Cal_FitResistance();
+            motor_cal.r_a = (motor_cal.r_ab + motor_cal.r_ca - motor_cal.r_bc) * 0.5f;
+            motor_cal.r_b = (motor_cal.r_ab + motor_cal.r_bc - motor_cal.r_ca) * 0.5f;
+            motor_cal.r_c = (motor_cal.r_bc + motor_cal.r_ca - motor_cal.r_ab) * 0.5f;
+            motor_cal.rs = (motor_cal.r_a + motor_cal.r_b + motor_cal.r_c) / 3.0f;
+            MotorCalibration_Stop();
+            motor_cal.state = CAL_DONE; // 保留结果状态供主循环打印。
+            return;
+        }
+
+        /* 换相后从初始占空比重新采样，并复用测量点缓存。 */
+        motor_cal.duty = CAL_DUTY_START;
+        motor_cal.point_count = 0U;
+        motor_cal.state = CAL_SET_DUTY;
         break;
+    }
 
     default:
         MotorCalibration_Stop();
