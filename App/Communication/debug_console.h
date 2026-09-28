@@ -115,9 +115,25 @@ bool DebugConsole_RegisterCommand(
     DebugConsole_CommandFn_t handler,
     const char *help);
 
-/**
- * @brief 由自定义命令输出文本
- */
+/* ISR 只提交数值；Rs 使用相别(高 8 位)+序号(低 8 位)，其他模块可用 VALUES。 */
+typedef enum {
+    DEBUG_LOG_VALUES = 0,       /* 通用：info + 三个 float。 */
+    DEBUG_LOG_RS_POINT,         /* Rs 每档测量点。 */
+    DEBUG_LOG_RS_RESISTANCE     /* Rs 单组线间电阻。 */
+} DebugLogType_t;
+
+/* 多中断安全入队；队列满时直接返回 false，不等待或格式化。 */
+bool DebugConsole_LogFromISR(uint8_t type, uint16_t info,
+                             float a, float b, float c);
+/* 主循环分批格式化日志；Pending 用于等待最终汇总和 JustFloat 让路。 */
+void DebugConsole_LogProcess(void);
+bool DebugConsole_LogPending(void);
+
+/* JustFloat 原始二进制：6 个 float + 0x7F800000 帧尾，DMA 忙时丢帧。 */
+int Fast_Send_6Floats(float f0, float f1, float f2,
+                      float f3, float f4, float f5);
+
+/** @brief 主循环文本格式化后入 TX 队列，DMA 后台发送。 */
 void DebugConsole_Printf(
     const char *format,
     ...);

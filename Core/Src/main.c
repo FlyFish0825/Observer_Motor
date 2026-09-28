@@ -161,6 +161,7 @@ typedef struct {
   float data[6];
   uint32_t tail;
 } JustFloatFrame_t;
+_Static_assert(sizeof(JustFloatFrame_t) == 28U, "VOFA JustFloat frame must be 28 bytes");
 
 // Cortex-M4 是小端模式： 0x7F800000 在内存中排列为 00 00 80 7F
 static JustFloatFrame_t tx_frame __attribute__((aligned(4)));
@@ -177,11 +178,6 @@ void FOC_ADC_AND_OPAMP_Calibration_Start(void);
 
 /** @brief 初始化VOFA+ JustFloat帧发送：配置USART2发送DMA通道指向帧缓冲区。 */
 void JustFloat_Init(void);
-/** @brief 非阻塞发送6个float的JustFloat帧，UART忙时立即返回-1避免中断内阻塞。 */
-int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
-                      float f5);
-
-
 
 /* ======================== 电流零偏校准 ======================== */
 
@@ -370,6 +366,7 @@ if (HAL_FDCAN_ConfigTxDelayCompensation(
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
+    DebugConsole_LogProcess(); // 主循环分批格式化各模块中断提交的数值。
     MotorCalibration_DebugProcess();
     DebugConsole_TxProcess(); // USART2 DMA 后台发送，不等待串口。
 
@@ -650,21 +647,21 @@ void HAL_ADCEx_InjectedConvCpltCallback(ADC_HandleTypeDef *hadc) {
 
 
 
-    /*
-     * UART忙时不要先计算6个实参再进入发送函数返回。
-     * 115200波特率下DMA绝大多数电流环周期都处于忙状态，
-     * 外层先判断TC可减少函数调用、周期差计算和浮点角度换算。
-     */
-    // if ((just_float_on_off != 0U) &&
-    //     ((USART2->ISR & USART_ISR_TC) != 0U)) {
-    //   Fast_Send_6Floats(
-    //       foc.state.i_dq.d,
-    //       foc.state.i_dq.q,
-    //       foc.observer.state.speed_rpm,
-    //       foc.observer.state.psi_mag,
-    //       foc.observer.state.phase_raw * RAD_TO_DEG_F,
-    //       foc.observer.state.pll_phase * RAD_TO_DEG_F);
-    // }
+    /* JustFloat 直接输出 6 个 float + 帧尾；文本/日志待发时不启动新帧。 */
+    if ((just_float_on_off != 0U) &&
+        !DebugConsole_LogPending() &&
+        (debug_tx_head == debug_tx_tail) &&
+        (debug_tx_dma_len == 0U) &&
+        ((USART2->ISR & USART_ISR_TC) != 0U) &&
+        (hdma_usart2_tx.Instance->CNDTR == 0U)) {
+      Fast_Send_6Floats(
+          foc.state.i_dq.d,
+          foc.state.i_dq.q,
+          foc.observer.state.speed_rpm,
+          foc.observer.state.psi_mag,
+          foc.observer.state.phase_raw * RAD_TO_DEG_F,
+          foc.observer.state.pll_phase * RAD_TO_DEG_F);
+    }
   }
 }
 
@@ -778,6 +775,7 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
   if ((just_float_on_off == 0U) ||
       (debug_tx_dma_len != 0U) ||
       (debug_tx_head != debug_tx_tail) ||
+      DebugConsole_LogPending() ||
       ((USART2->ISR & USART_ISR_TC) == 0U) ||
       (hdma_usart2_tx.Instance->CNDTR != 0U)) {
     return -1;

@@ -33,6 +33,17 @@
 /* DebugConsole_Printf 的格式化临时缓冲区大小。 */
 #define DC_TX_BUFFER_SIZE    192U
 
+/* 多中断写入、主循环读取的数值日志环形队列。 */
+#define DC_LOG_SIZE          32U
+typedef struct {
+    uint8_t type;
+    uint16_t info;
+    float a, b, c;
+} DC_Log_t;
+static volatile DC_Log_t dc_log[DC_LOG_SIZE];
+static volatile uint8_t dc_log_head, dc_log_tail;
+static volatile uint32_t dc_log_dropped;
+
 #if ((DC_RING_SIZE & (DC_RING_SIZE - 1U)) != 0U)
 #error "DC_RING_SIZE must be a power of two"
 #endif
@@ -156,6 +167,8 @@ HAL_StatusTypeDef DebugConsole_Init(
     dc_ring_head = 0U;
     dc_ring_tail = 0U;
     dc_overflow_count = 0U;
+    dc_log_head = dc_log_tail = 0U;
+    dc_log_dropped = 0U;
 
     dc_line_length = 0U;
     dc_line_overflow = false;
@@ -1280,6 +1293,78 @@ static bool DC_StringEqualIgnoreCase(
 
     return (*left == '\0') &&
            (*right == '\0');
+}
+
+/* ======================== 中断数值日志 ======================== */
+
+/* 多个不同优先级中断可共用队列；临界区内只复制数值，绝不格式化或等待。 */
+bool DebugConsole_LogFromISR(uint8_t type, uint16_t info,
+                             float a, float b, float c)
+{
+    uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    uint8_t next = (uint8_t)((dc_log_head + 1U) & (DC_LOG_SIZE - 1U));
+    if (next == dc_log_tail) {
+        dc_log_dropped++;
+        __set_PRIMASK(primask);
+        return false;
+    }
+
+    dc_log[dc_log_head].type = type;
+    dc_log[dc_log_head].info = info;
+    dc_log[dc_log_head].a = a;
+    dc_log[dc_log_head].b = b;
+    dc_log[dc_log_head].c = c;
+    dc_log_head = next;
+    __set_PRIMASK(primask);
+    return true;
+}
+
+bool DebugConsole_LogPending(void)
+{
+    return dc_log_head != dc_log_tail;
+}
+
+/* 主循环最多格式化 4 条，后续由现有 TX 环形缓冲区和 DMA 发送。 */
+void DebugConsole_LogProcess(void)
+{
+    static uint32_t last_dropped;
+
+    for (uint8_t n = 0U; (n < 4U) && DebugConsole_LogPending(); n++) {
+        DC_Log_t item = dc_log[dc_log_tail];
+        dc_log_tail = (uint8_t)((dc_log_tail + 1U) & (DC_LOG_SIZE - 1U));
+
+        uint8_t phase_id = (item.type == DEBUG_LOG_RS_POINT) ?
+                           (uint8_t)(item.info >> 8) : (uint8_t)item.info;
+        const char *phase = (phase_id == 0U) ? "AB" :
+                            (phase_id == 1U) ? "BC" : "CA";
+
+        switch (item.type) {
+        case DEBUG_LOG_RS_POINT:
+            DebugConsole_Printf(
+                "%s %02u: duty=%.2f%%  V=%.4fV  I=%.4fA\r\n",
+                phase, (unsigned)(item.info & 0xFFU),
+                item.a * 100.0f, item.b, item.c);
+            break;
+
+        case DEBUG_LOG_RS_RESISTANCE:
+            DebugConsole_Printf("R_%s = %.6f ohm\r\n", phase, item.a);
+            break;
+
+        case DEBUG_LOG_VALUES:
+        default:
+            /* 其他模块的通用三数值记录，info 是调用者指定的标识。 */
+            DebugConsole_Printf("LOG %u: %.4f %.4f %.4f\r\n",
+                                (unsigned)item.info, item.a, item.b, item.c);
+            break;
+        }
+    }
+
+    if (!DebugConsole_LogPending() && (dc_log_dropped != last_dropped)) {
+        DebugConsole_Printf("WARN: %lu debug logs dropped\r\n",
+                            (unsigned long)(dc_log_dropped - last_dropped));
+        last_dropped = dc_log_dropped;
+    }
 }
 
 /* ======================== 文本发送 ======================== */
