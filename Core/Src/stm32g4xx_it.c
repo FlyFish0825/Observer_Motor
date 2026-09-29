@@ -1,3 +1,4 @@
+
 /* USER CODE BEGIN Header */
 /**
   ******************************************************************************
@@ -22,9 +23,10 @@
 #include "stm32g4xx_it.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-#include "foc_math.h"
-#include "motor_calibration.h"
-#include "tim.h"
+#include "motor_app.h"
+#include "motor_calibration.h" /* TIM3中断转发给Ls安全时序处理。 */
+
+
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -341,6 +343,12 @@ void TIM1_UP_TIM16_IRQHandler(void)
   /* USER CODE END TIM1_UP_TIM16_IRQn 1 */
 }
 
+/* 电感辨识专用 TIM3：CC1 打开 AH，CC2 关闭 AH 并进入低侧续流。 */
+void TIM3_IRQHandler(void)
+{
+  MotorCalibration_LsTimerIRQ();
+}
+
 /**
   * @brief This function handles TIM6 global interrupt.
   */
@@ -398,38 +406,9 @@ void CORDIC_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-/*
- * 下面的GPIO回调是本文件唯一的应用集成逻辑；中断中只做状态切换、PWM启停和
- * 指示灯操作，不执行延时、串口发送或协议处理，确保按键中断可快速返回。
- * PC10/PC11必须与原理图和CubeMX引脚配置保持一致，修改前需同步检查硬件定义。
- */
-/** @brief GPIO外部中断回调：PC10按下启动开环，PC11按下停止并复位FOC状态机。 */
-void              HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
+/* EXTI只关功率级并置位，HAL启停及外设恢复放到主循环。 */
+void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
-  switch (GPIO_Pin) {
-  case GPIO_PIN_10:
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  MotorCalibration_Stop();
-  /* MotorCalibration_Stop已恢复六路TIM1复用引脚。 */
-  foc_motor_state = FOC_MOTOR_OPEN_LOOP;
-  FOC_PWM_Start();
-    break;
-  case GPIO_PIN_11:
-  HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  MotorCalibration_Stop();
-    break;
-  case GPIO_PIN_13:
-    HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
-  FOC_PWM_Stop();
-  MotorCalibration_Start();
-  foc_motor_state = FOC_MOTOR_CALIBRATION;
-  TIM1->CCR4 = foc.timer.adc_trigger;
-  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4);
-    break;
-  }
-
-
-
-
+  MotorApp_RequestButton(GPIO_Pin);
 }
 /* USER CODE END 1 */

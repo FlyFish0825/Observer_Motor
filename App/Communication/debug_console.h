@@ -115,11 +115,10 @@ bool DebugConsole_RegisterCommand(
     DebugConsole_CommandFn_t handler,
     const char *help);
 
-/* ISR 只提交数值；Rs 使用相别(高 8 位)+序号(低 8 位)，其他模块可用 VALUES。 */
+/* ISR只提交数值，Rs仅提交每组最终拟合结果。 */
 typedef enum {
-    DEBUG_LOG_VALUES = 0,       /* 通用：info + 三个 float。 */
-    DEBUG_LOG_RS_POINT,         /* Rs 每档测量点。 */
-    DEBUG_LOG_RS_RESISTANCE     /* Rs 单组线间电阻。 */
+    DEBUG_LOG_VALUES = 0,      /* 通用：info + 三个float。 */
+    DEBUG_LOG_RS_RESISTANCE    /* Rs线间电阻：info为相别。 */
 } DebugLogType_t;
 
 /* 多中断安全入队；队列满时直接返回 false，不等待或格式化。 */

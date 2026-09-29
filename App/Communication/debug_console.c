@@ -512,7 +512,7 @@ static int DC_Tokenize(
     }
 
     position = line;
-
+    //"注释"   : '\0' 表示字符串结束的标志
     while (*position != '\0')
     {
         /*
@@ -1334,21 +1334,11 @@ void DebugConsole_LogProcess(void)
         DC_Log_t item = dc_log[dc_log_tail];
         dc_log_tail = (uint8_t)((dc_log_tail + 1U) & (DC_LOG_SIZE - 1U));
 
-        uint8_t phase_id = (item.type == DEBUG_LOG_RS_POINT) ?
-                           (uint8_t)(item.info >> 8) : (uint8_t)item.info;
-        const char *phase = (phase_id == 0U) ? "AB" :
-                            (phase_id == 1U) ? "BC" : "CA";
-
         switch (item.type) {
-        case DEBUG_LOG_RS_POINT:
-            DebugConsole_Printf(
-                "%s %02u: duty=%.2f%%  V=%.4fV  I=%.4fA\r\n",
-                phase, (unsigned)(item.info & 0xFFU),
-                item.a * 100.0f, item.b, item.c);
-            break;
-
         case DEBUG_LOG_RS_RESISTANCE:
-            DebugConsole_Printf("R_%s = %.6f ohm\r\n", phase, item.a);
+            DebugConsole_Printf("R_%s = %.6f ohm\r\n",
+                (item.info == 0U) ? "AB" : (item.info == 1U) ? "BC" : "CA",
+                item.a);
             break;
 
         case DEBUG_LOG_VALUES:

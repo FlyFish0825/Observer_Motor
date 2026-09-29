@@ -3,6 +3,7 @@
 #include "bsp_dwt.h"
 #include "cordic.h"
 #include "main.h"
+#include "motor_calibration.h"
 #include "tim.h"
 #include <stdint.h>
 
@@ -207,11 +208,21 @@ static volatile uint8_t adc_regular_dma_busy = 0U; /* DMA进行中时阻止重�
 static uint8_t adc_regular_schedule_initialized = 0U; /* 首次调用的时间基准标志。 */
 static uint32_t adc_regular_last_start_ms = 0U; /* 上次启动规则组DMA的tick。 */
 
+void ADC_Regular_PauseForLs(void)
+{
+  /* CA占用ADC1前停原母线/温度DMA；结束后下一轮Service立即重新启动。 */
+  (void)HAL_ADC_Stop_DMA(&hadc1);
+  adc_regular_dma_busy = 0U;
+  adc_regular_schedule_initialized = 0U;
+  NVIC_ClearPendingIRQ(DMA1_Channel3_IRQn);
+}
+
 /**
  * @brief 按10 ms周期非阻塞启动ADC1规则组DMA。
  * @note DMA一次搬运Rank1母线电压和Rank2温度；注入组继续由TIM1以25 kHz触发。
  */
 void ADC_Regular_Service(uint32_t now_ms) {
+  if (MotorCalibration_LsUsesADC1()) return;
   if (adc_regular_dma_busy != 0U) {
     return;
   }
@@ -268,7 +279,14 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
   uint16_t adc_vbus;
   uint16_t adc_temperature;
 
-  if ((hadc == NULL) || (hadc->Instance != ADC1)) {
+  if (hadc == NULL) return;
+  if (hadc->Instance == ADC2) {
+    MotorCalibration_LsDmaComplete();
+    return;
+  }
+  if (hadc->Instance != ADC1) return;
+  if (MotorCalibration_LsUsesADC1()) {
+    MotorCalibration_LsDmaComplete();
     return;
   }
 
@@ -282,13 +300,30 @@ void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
   adc_regular_dma_busy = 0U;
 }
 
-/** @brief ADC1规则组DMA异常后释放忙标志，允许下一周期自动重试。 */
-void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc) {
-  if ((hadc != NULL) && (hadc->Instance == ADC1)) {
-    adc_regular_dma_busy = 0U;
-  }
+/* Ls采样到一半仍无TIM1结束事件时，立即关闭功率级。 */
+void HAL_ADC_ConvHalfCpltCallback(ADC_HandleTypeDef *hadc)
+{
+  if ((hadc != NULL) && ((hadc->Instance == ADC2) ||
+      ((hadc->Instance == ADC1) && MotorCalibration_LsUsesADC1())))
+    MotorCalibration_LsDmaHalf();
 }
 
+/** @brief ADC1规则组DMA异常后释放忙标志，允许下一周期自动重试。 */
+void HAL_ADC_ErrorCallback(ADC_HandleTypeDef *hadc) {
+  if (hadc == NULL) return;
+  if ((hadc->Instance == ADC1) && MotorCalibration_LsUsesADC1())
+    MotorCalibration_LsFault(2U);
+  else if (hadc->Instance == ADC1) adc_regular_dma_busy = 0U;
+  else if (hadc->Instance == ADC2) MotorCalibration_LsFault(2U);
+}
+
+/* ADC2 规则组模拟看门狗：电流超限立即关闭 TIM1 功率输出。 */
+void HAL_ADC_LevelOutOfWindowCallback(ADC_HandleTypeDef *hadc)
+{
+  if ((hadc != NULL) && ((hadc->Instance == ADC2) ||
+      ((hadc->Instance == ADC1) && MotorCalibration_LsUsesADC1())))
+    MotorCalibration_LsFault(1U);
+}
 
 /**
  * @brief 基于最大值/最小值公共模注入的SVPWM。

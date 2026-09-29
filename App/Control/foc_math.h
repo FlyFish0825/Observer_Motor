@@ -229,6 +229,7 @@ void FOC_PWM_Start(void);
 void FOC_PWM_Stop(void);
 
 void ADC_Regular_Service(uint32_t now_ms);
+void ADC_Regular_PauseForLs(void); /* CA辨识前停原ADC1 DMA，释放忙标志。 */
 void FOC_Iabc_Calibration(void);
 void FOC_Get_Iabc(FOC_Handle_t *handle, uint16_t adc1, uint16_t adc2,uint16_t adc3);
 void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle);

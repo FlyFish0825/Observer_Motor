@@ -17,7 +17,7 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 
 ## 文档索引
 
-- [参数辨识：定子电阻 Rs](docs/参数辨识.md)：三组线间测量、采样状态机、拟合公式、关键函数及外设恢复流程。
+- [参数辨识：Rs / Ls](docs/参数辨识.md)：三组线间电阻与电感、TIM3＋GPIO 脉冲及 ADC DMA；结果仅保留在 RAM，可用 `cal show` 查看。
 - [调试接口使用说明](docs/调试接口.md)：中断日志、USART2 DMA、JustFloat、速度/电流 PI 在线参数与 `status` 诊断。
 - [电机 CAN FD 协议](docs/电机协议.md)：节点、控制帧、反馈、心跳和 Bootloader 交互。
 

@@ -17,6 +17,7 @@
 #include "usart.h"
 #include "arm_math.h"
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 static FOC_Control_t motor_control;
@@ -25,6 +26,8 @@ static FOC_Control_t motor_control;
 static volatile uint32_t just_float_on_off = 0U;
 /* 串口请求的速度环对称 Iq 限幅；主循环统一应用到 PI。 */
 static volatile float iq_max = FOC_SPEED_PI_OUTPUT_MAX_DEFAULT;
+/* PC10/PC11/PC13事件位；EXTI只关MOE并置位，主循环完成HAL操作。 */
+static volatile uint16_t motor_button_pending;
 
 /* DebugConsole 文本入队；USART2 TX DMA 由主循环统一调度。 */
 #define DEBUG_TX_SIZE 4096U
@@ -147,6 +150,85 @@ static void MotorDebug_Status(int argc, char *argv[])
                       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER);
 }
 
+/* rs / rs stop：与PC13按键使用同一Rs启动顺序，便于COM27自动测试。 */
+static void MotorDebug_Rs(int argc, char *argv[])
+{
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("Rs stopped\r\n");
+    return;
+  }
+  if ((argc != 1) || (foc_motor_state != FOC_MOTOR_IDLE) ||
+      (foc.calibration.calibrated == 0U) ||
+      (foc.state.vbus < 5.0f) || (foc.state.vbus > 50.0f) ||
+      (TIM1->BDTR & TIM_BDTR_MOE)) {
+    DebugConsole_Printf("Rs rejected: use rs | rs stop; check idle, ADC, Vbus\r\n");
+    return;
+  }
+
+  /* 保持与PC13原入口完全一致：停止FOC、配置Rs桥臂，再启动CH4 ADC触发。 */
+  FOC_PWM_Stop();
+  MotorCalibration_Start();
+  foc_motor_state = FOC_MOTOR_CALIBRATION;
+  TIM1->CCR4 = foc.timer.adc_trigger;
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    MotorCalibration_Stop();
+    motor_cal.state = CAL_ERROR;
+    DebugConsole_Printf("Rs start FAILED: TIM1 CH4\r\n");
+    return;
+  }
+  DebugConsole_Printf("Rs started\r\n");
+}
+
+/* ls [ab|bc|ca] [Rs]：依次选择回路，统一用2×Rs补偿。 */
+static void MotorDebug_Ls(int argc, char *argv[])
+{
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("Ls stopped\r\n");
+    return;
+  }
+  CalPhase_t phase = CAL_PHASE_AB;
+  int pos = 1;
+  if (argc > 1) {
+    if (strcmp(argv[1], "ab") == 0) { phase = CAL_PHASE_AB; pos = 2; }
+    else if (strcmp(argv[1], "bc") == 0) { phase = CAL_PHASE_BC; pos = 2; }
+    else if (strcmp(argv[1], "ca") == 0) { phase = CAL_PHASE_CA; pos = 2; }
+  }
+  if (argc > pos + 1) {
+    DebugConsole_Printf("Usage: ls [ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+    return;
+  }
+  if (argc == pos + 1) {
+    char *end;
+    float rs = strtof(argv[pos], &end);
+    if ((*end != '\0') || !(rs >= 0.1f && rs <= 2.0f) ||
+        (foc_motor_state != FOC_MOTOR_IDLE)) {
+      DebugConsole_Printf("Usage: ls [ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+      return;
+    }
+    motor_cal.rs = rs;
+    DebugConsole_Printf("Ls using supplied Rs=%.6fohm\r\n", rs);
+  }
+  if (MotorCalibration_LsStart(phase))
+    DebugConsole_Printf("Ls %s started\r\n",
+      phase == CAL_PHASE_AB ? "AB" : phase == CAL_PHASE_BC ? "BC" : "CA");
+  else
+    DebugConsole_Printf("Ls rejected: stop motor, measure Rs, check Vbus\r\n");
+}
+
+/* 只显示本次上电后 RAM 中的标定结果，不读取或写入 Flash。 */
+static void MotorDebug_Cal(int argc, char *argv[])
+{
+  if ((argc != 2) || (strcmp(argv[1], "show") != 0)) {
+    DebugConsole_Printf("Usage: cal show\r\n");
+    return;
+  }
+  DebugConsole_Printf("Rs=%.6fohm Ls AB/BC/CA=%.3f/%.3f/%.3fuH\r\n",
+                      motor_cal.rs, motor_cal.ls_ab * 1e6f,
+                      motor_cal.ls_bc * 1e6f, motor_cal.ls_ca * 1e6f);
+}
+
 /* 调试变量直接绑定已有控制器；维持当前串口接口和设定范围。 */
 static void MotorDebug_Register(void)
 {
@@ -179,6 +261,12 @@ static void MotorDebug_Register(void)
     0.0f, 70.0f, true);
   DebugConsole_RegisterCommand("status", MotorDebug_Status,
     "status: show motor, PI and PWM state");
+  DebugConsole_RegisterCommand("rs", MotorDebug_Rs,
+    "rs: identify AB/BC/CA resistance; rs stop: abort");
+  DebugConsole_RegisterCommand("ls", MotorDebug_Ls,
+    "ls [ab|bc|ca] [Rs_ohm], ls stop: abort");
+  DebugConsole_RegisterCommand("cal", MotorDebug_Cal,
+    "cal show (RAM calibration only)");
 
 }
 
@@ -338,17 +426,28 @@ int Fast_Send_6Floats(float f0, float f1, float f2, float f3, float f4,
 /** @brief 初始化电机业务，保留原始电流零偏、ADC触发和输出安全时序。 */
 HAL_StatusTypeDef MotorApp_Init(void)
 {
+  // 初始化DWT计数器，便于后续精确延时
   DWT_Delay_Init();
+  // 初始化CORDIC，便于后续正余弦计算
   CORDIC_SinCos_RegisterConfig();
+  // 初始化浮点数发送功能
   JustFloat_Init();
+  // 初始化FOC控制器
   FOC_Control_Init(&motor_control, foc.timer.Ts);
 
+  // 初始化串口调试控制台，绑定USART2和发送函数
   if (DebugConsole_Init(&huart2, DebugConsole_Tx) != HAL_OK) {
     return HAL_ERROR;
   }
+
+  // 注册调试命令和变量
   MotorDebug_Register();
+
+  // 初始化ADC和运放的自校准，确保电流采样准确
   FOC_ADC_AND_OPAMP_Calibration_Start();
 
+
+  // 启动ADC注入转换中断，便于FOC实时控制
   if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK) {
     Error_Handler();
   }
@@ -364,10 +463,16 @@ HAL_StatusTypeDef MotorApp_Init(void)
                       TIM_CCER_CC3E | TIM_CCER_CC3NE)) != 0U) {
     Error_Handler();
   }
+
+  // 设置TIM1 CH4为ADC触发输出，保持电机停机
   TIM1->CCR4 = foc.timer.adc_trigger;
+
+  // 启动TIM1 CH4 PWM输出，触发ADC注入采样
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
     Error_Handler();
   }
+
+  // 设置FOC状态为校准阶段，等待零偏采样完成
   {
     uint32_t calibration_start_tick = HAL_GetTick();
     while (foc.calibration.calibrated == 0U) {
@@ -377,6 +482,8 @@ HAL_StatusTypeDef MotorApp_Init(void)
       }
     }
   }
+
+  // 校准完成后停止TIM1 CH4 PWM输出，保持电机停机
   if (HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4) != HAL_OK) {
     Error_Handler();
   }
@@ -384,9 +491,49 @@ HAL_StatusTypeDef MotorApp_Init(void)
   return HAL_OK;
 }
 
-/** @brief 主循环业务；保留规则组采样、CAN、命令、日志和TX原始先后顺序。 */
+/* EXTI入口：关MOE后只投递按键位，决不在中断中调用HAL初始化。 */
+void MotorApp_RequestButton(uint16_t pin)
+{
+    if ((pin == GPIO_PIN_10) || (pin == GPIO_PIN_11) || (pin == GPIO_PIN_13)) {
+        __HAL_TIM_MOE_DISABLE(&htim1);
+        MotorCalibration_LsFault(3U); /* GPIO脉冲不受MOE控制，必须同步停止TIM2/3。 */
+        motor_cal.state = CAL_IDLE;    /* 禁止Rs ADC中断重新打开MOE。 */
+        motor_button_pending |= pin;
+    }
+}
+
+/** @brief 主循环业务：先处理按键，再运行原有ADC/CAN/串口任务。 */
 void MotorApp_Process(void)
 {
+    if (motor_button_pending != 0U) {
+        uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+        uint16_t buttons = motor_button_pending; /* 一次取走事件，停机优先。 */
+        motor_button_pending = 0U;
+        __set_PRIMASK(primask);
+
+        HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
+
+        switch (buttons & (GPIO_PIN_11 | GPIO_PIN_13 | GPIO_PIN_10)) {
+        case GPIO_PIN_11:
+          MotorCalibration_Stop();
+          break;
+
+        case GPIO_PIN_13:
+          MotorCalibration_Stop();
+          MotorDebug_Rs(1, NULL);
+          break;
+
+        case GPIO_PIN_10:
+          MotorCalibration_Stop();
+          foc_motor_state = FOC_MOTOR_OPEN_LOOP;
+          FOC_PWM_Start();
+          break;
+
+        default:
+          break;
+        }
+    }
     ADC_Regular_Service(HAL_GetTick());
     MotorProtocol_Process();
     DebugConsole_Process();
@@ -398,6 +545,7 @@ void MotorApp_Process(void)
       __set_PRIMASK(primask);
     }
     DebugConsole_LogProcess(); // 主循环分批格式化各模块中断提交的数值。
+    MotorCalibration_LsProcess();
     MotorCalibration_DebugProcess();
     DebugConsole_TxProcess(); // USART2 DMA 后台发送，不等待串口。
 }
@@ -423,6 +571,9 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   if (hadc->Instance != ADC1) {
     return; // 只处理 ADC1 的注入转换完成事件
   }
+  /* Ls使用ADC2规则组DMA，禁止ADC1残余注入中断覆盖TIM1的CCR1。 */
+  if ((foc_motor_state == FOC_MOTOR_CALIBRATION) &&
+      (motor_cal.state == CAL_IDLE)) return;
 
   if (foc.calibration.calibrated == 0) {
 

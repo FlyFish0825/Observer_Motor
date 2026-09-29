@@ -56,8 +56,8 @@ ENTRY(Reset_Handler)
 MEMORY
 {
 RAM (xrw)      : ORIGIN = 0x20000000, LENGTH = 32K
-/* 独立运行版本：占用完整的 128 KiB 内部 Flash。 */
-FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 128K
+/* 独立运行版本也保留最后 2 KiB，共享配置页 0x0801F800~0x0801FFFF。 */
+FLASH (rx)      : ORIGIN = 0x08000000, LENGTH = 126K
 }
 
 /* Highest address of the user mode stack */
