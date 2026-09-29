@@ -38,11 +38,12 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 | ID | 方向 | 含义 | 长度 |
 |---:|:---:|---|---:|
 | `0x000` | 上位机 → 节点 | APP 进入 Bootloader | 8 字节经典 CAN |
-| `0x100` | 上位机 → 全部节点 | 速度、运行、调试控制 | 24 字节 CAN FD |
+| `0x100` | 上位机 → 全部节点 | 速度、运行、调试及参数辨识控制 | 24 字节 CAN FD |
 | `0x180 + NodeID` | 节点 → 上位机 | ENTER_BOOT 接收确认 | 8 字节经典 CAN |
 | `0x200 + NodeID` | 节点 → 上位机 | 普通运行反馈 | 12 字节 CAN FD |
 | `0x280 + NodeID` | 节点 → 上位机 | 在线心跳 | 8 字节经典 CAN |
-| `0x300 + NodeID` | 节点 → 上位机 | 调试反馈 | 64 字节 CAN FD |
+| `0x300 + NodeID` | 节点 → 上位机 | 原高速调试反馈，不变 | 64 字节 CAN FD |
+| `0x340 + NodeID` | 节点 → 上位机 | 参数辨识事件与结果，按需发送 | 64 字节 CAN FD |
 | `0x380 + NodeID` | 节点 → 上位机 | APP 上电 HELLO（仅一次） | 8 字节经典 CAN |
 
 例如 Node1 的普通反馈为 `0x201`，Node8 为 `0x208`。
@@ -56,7 +57,7 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 | 0 | Version | 固定为 `0x01` |
 | 1 | Command | 命令码 |
 | 2 | NodeMask | bit0～bit7 对应 Node1～Node8 |
-| 3 | RunMask | `SPEED_VECTOR` 中 bit=1 请求启动；`RUN_VECTOR` 中 bit=1 启动、bit=0 停止 |
+| 3 | RunMask / Action | `0x10/0x11`为RunMask；只有`0x40`为参数辨识Action |
 | 4～5 | Sequence | 上位机递增序号，固件不强制连续 |
 | 6～7 | Flags | 保留，必须为 `0` |
 | 8～23 | Speed1～Speed8 | 每节点一个小端 `int16_t`，单位 rpm |
@@ -69,6 +70,7 @@ STM32G431CBT6 无位置传感器 FOC 电机控制工程。当前 CAN FD 测试�
 | `0x11` | `RUN_VECTOR` | 使用 `RunMask` 同时启停选中的节点 |
 | `0x20` | `DEBUG_SELECT` | 仅能选择一个调试节点；Byte3 非零启用，Byte3 为零关闭 |
 | `0x30` | `STATUS_ONCE` | `NodeMask` 选中的节点立即发送一帧普通反馈 |
+| `0x40` | `CALIBRATION` | Byte3 Action：1=Rs、2=三路Ls、3/4/5=单路Ls、6=停止、7=读结果、8=连续Rs→Ls |
 
 未选中的节点忽略 `0x10`、`0x11`、`0x30`；所有节点都会执行 `0x20`。`DEBUG_SELECT` 的掩码必须为单 bit，空掩码、多 bit 掩码或 Byte3=0 都会退出调试并恢复普通反馈。
 
@@ -116,6 +118,12 @@ ID 0x100，DLC 24
 | 25～27 | 状态标志 | 校准、速度环、电压限幅 |
 | 28 | 反馈序号 | 递增 |
 | 29～63 | 保留 | 固定为 `0` |
+
+### 参数辨识反馈 `0x340 + NodeID`
+
+沿用原`0x100` 24字节控制帧：`Command=0x40`、Byte2=`NodeMask`、Byte3=`Action`、Byte4～5=`Sequence`，其余字节必须为0。启动类操作只允许单节点，`0x08`在Rs完成且恢复外设后自动继续三路Ls；错误立即停止。Node1发送`01 40 01 08 01 00`后补18个零字节即可发起连续辨识。
+
+返回为独立64字节CAN FD帧，不需要`DEBUG_SELECT`：Byte2区分受理/完成/拒绝/失败/停止/快照/Rs阶段完成，Byte7指示Rs及三组Ls有效位，Byte8～9原样返回请求序号；Byte12～39依次为Rs、R_AB/R_BC/R_CA、R_A/R_B/R_C（Ω），Byte40～51为三组Ls（μH），均为小端float32。**受理不等于测量成功**；原`0x300+NodeID`实时调试反馈格式完全保留。完整Action、事件、错误码和字节偏移以[电机协议说明](docs/电机协议.md)为准。
 
 ### 心跳、HELLO 与 Bootloader
 
