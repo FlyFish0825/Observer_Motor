@@ -36,13 +36,13 @@ typedef struct {
     float current;    /* 本档平均线电流(A)。 */
 } MotorCalPoint_t;
 
-/* 电阻辨识状态机，由 ADC 注入转换回调逐次推进。 */
+/* Rs由主循环推进流程；ADC中断只等待、采样、快速关断并发布READY。 */
 typedef enum {
     CAL_IDLE = 0,     /* 空闲，未进行辨识。 */
     CAL_SET_DUTY,     /* 设置本档占空比并开启 PWM。 */
     CAL_SETTLE,       /* 等待电流稳定，不累计测量值。 */
-    CAL_SAMPLE,       /* 累计电流与母线电压，形成平均测量点。 */
-    CAL_PHASE_SWITCH, /* 已快速关断，主循环负责GPIO换相。 */
+    CAL_SAMPLE,       /* 累计电流与母线电压。 */
+    CAL_READY,        /* 本档250点就绪，PWM已关闭，主循环计算并升档/换相。 */
     CAL_DONE,         /* 已快速关断，主循环恢复外设并输出结果。 */
     CAL_ERROR         /* 已快速关断，主循环恢复外设并输出错误。 */
 } MotorCalState_t;
@@ -61,8 +61,8 @@ typedef enum {
 /* Rs/Ls共享的唯一全局结果实例；不增加新的全局数据结构。 */
 typedef struct {
     /* ------------------- Rs：状态、采样与拟合结果 ------------------- */
-    volatile MotorCalState_t state; /* Rs状态机由ADC中断推进，主循环读取终态。 */
-    CalPhase_t phase;               /* Rs当前测量回路：AB、BC或CA。 */
+    volatile MotorCalState_t state; /* Rs中断采样并通知就绪，主循环计算和推进。 */
+    CalPhase_t phase;               /* Rs/Ls共用当前测量回路：AB、BC或CA。 */
 
     float duty;         /* 当前 PWM 占空比，范围 0~1。 */
     uint32_t count;     /* 当前稳定等待或采样阶段的 ADC 回调计数。 */
@@ -90,14 +90,14 @@ extern volatile MotorCalibration_t motor_cal;
 
 /* ======================== Rs：电阻辨识接口 ======================== */
 
-/* 开始 A-B 电阻测试。调用前确保 ADC 注入采样已经正常运行。 */
+/* 启动完整AB→BC→CA电阻辨识；调用前确保ADC注入采样正常。 */
 void MotorCalibration_Start(void);
 
 /* ADC注入中断调用：ia/ib/ic 为三相电流(A)，vbus为母线电压(V)。 */
 void MotorCalibration_Run(float ia, float ib, float ic, float vbus);
 
-/* 主循环：处理Rs的GPIO换相和完整Stop，日志排空后输出DONE/ERROR。 */
-void MotorCalibration_DebugProcess(void);
+/* 主循环统一入口：Rs处理档位/拟合，Ls处理DMA结果；两者共用Stop。 */
+void MotorCalibration_Process(void);
 
 /* ======================== 共同使用：安全停止 ======================== */
 
@@ -108,12 +108,12 @@ void MotorCalibration_Stop(void);
 
 /* 启动指定回路的单次Ls辨识：AB/BC采ADC2-B相，CA采ADC1-A相；
  * 用2×平均Rs补偿线间电阻；若电机忙、未校零、母线异常或定时器被占用则返回false。 */
-bool MotorCalibration_LsStart(CalPhase_t phase);
+bool MotorCalibration_LsStart(CalPhase_t phase); /* 单回路调试入口。 */
+bool MotorCalibration_LsStartAll(void);         /* ls命令：自动AB→BC→CA。 */
 bool MotorCalibration_LsUsesADC1(void);   /* 告知ADC回调：CA期间ADC1 DMA数据属于Ls。 */
 void MotorCalibration_LsDmaComplete(void); /* DMA完成：立即关输出。 */
 void MotorCalibration_LsDmaHalf(void);     /* 半传输：检查60us关断事件。 */
 void MotorCalibration_LsTimerIRQ(void);    /* TIM3比较中断：切换GPIO并校验时序。 */
 void MotorCalibration_LsFault(uint8_t reason); /* 故障关桥：1过流、2 ADC/DMA、3超时、5时序。 */
-void MotorCalibration_LsProcess(void);     /* 主循环：拟合上升/下降沿并输出结果。 */
 
 #endif

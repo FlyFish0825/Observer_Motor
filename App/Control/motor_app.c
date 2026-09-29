@@ -180,7 +180,7 @@ static void MotorDebug_Rs(int argc, char *argv[])
   DebugConsole_Printf("Rs started\r\n");
 }
 
-/* ls [ab|bc|ca] [Rs]：依次选择回路，统一用2×Rs补偿。 */
+/* ls默认自动辨识AB→BC→CA；指定相别时仍可单独诊断，均用2×Rs补偿。 */
 static void MotorDebug_Ls(int argc, char *argv[])
 {
   if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
@@ -189,14 +189,16 @@ static void MotorDebug_Ls(int argc, char *argv[])
     return;
   }
   CalPhase_t phase = CAL_PHASE_AB;
+  uint8_t all = 1U;
   int pos = 1;
   if (argc > 1) {
-    if (strcmp(argv[1], "ab") == 0) { phase = CAL_PHASE_AB; pos = 2; }
-    else if (strcmp(argv[1], "bc") == 0) { phase = CAL_PHASE_BC; pos = 2; }
-    else if (strcmp(argv[1], "ca") == 0) { phase = CAL_PHASE_CA; pos = 2; }
+    if (strcmp(argv[1], "ab") == 0) { phase = CAL_PHASE_AB; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "bc") == 0) { phase = CAL_PHASE_BC; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "ca") == 0) { phase = CAL_PHASE_CA; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "all") == 0) { pos = 2; }
   }
   if (argc > pos + 1) {
-    DebugConsole_Printf("Usage: ls [ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+    DebugConsole_Printf("Usage: ls [all|ab|bc|ca] [Rs_ohm] | ls stop\r\n");
     return;
   }
   if (argc == pos + 1) {
@@ -204,17 +206,23 @@ static void MotorDebug_Ls(int argc, char *argv[])
     float rs = strtof(argv[pos], &end);
     if ((*end != '\0') || !(rs >= 0.1f && rs <= 2.0f) ||
         (foc_motor_state != FOC_MOTOR_IDLE)) {
-      DebugConsole_Printf("Usage: ls [ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+      DebugConsole_Printf("Usage: ls [all|ab|bc|ca] [Rs_ohm] | ls stop\r\n");
       return;
     }
     motor_cal.rs = rs;
     DebugConsole_Printf("Ls using supplied Rs=%.6fohm\r\n", rs);
   }
-  if (MotorCalibration_LsStart(phase))
+  if (all) {
+    if (MotorCalibration_LsStartAll())
+      DebugConsole_Printf("Ls sequence started: AB -> BC -> CA\r\n");
+    else
+      DebugConsole_Printf("Ls rejected: stop motor, measure Rs, check Vbus\r\n");
+  } else if (MotorCalibration_LsStart(phase)) {
     DebugConsole_Printf("Ls %s started\r\n",
       phase == CAL_PHASE_AB ? "AB" : phase == CAL_PHASE_BC ? "BC" : "CA");
-  else
+  } else {
     DebugConsole_Printf("Ls rejected: stop motor, measure Rs, check Vbus\r\n");
+  }
 }
 
 /* 只显示本次上电后 RAM 中的标定结果，不读取或写入 Flash。 */
@@ -264,7 +272,7 @@ static void MotorDebug_Register(void)
   DebugConsole_RegisterCommand("rs", MotorDebug_Rs,
     "rs: identify AB/BC/CA resistance; rs stop: abort");
   DebugConsole_RegisterCommand("ls", MotorDebug_Ls,
-    "ls [ab|bc|ca] [Rs_ohm], ls stop: abort");
+    "ls: AB->BC->CA; ls [all|ab|bc|ca] [Rs_ohm]; ls stop: abort");
   DebugConsole_RegisterCommand("cal", MotorDebug_Cal,
     "cal show (RAM calibration only)");
 
@@ -545,8 +553,7 @@ void MotorApp_Process(void)
       __set_PRIMASK(primask);
     }
     DebugConsole_LogProcess(); // 主循环分批格式化各模块中断提交的数值。
-    MotorCalibration_LsProcess();
-    MotorCalibration_DebugProcess();
+    MotorCalibration_Process(); /* Rs/Ls统一主循环入口：计算、推进及安全恢复。 */
     DebugConsole_TxProcess(); // USART2 DMA 后台发送，不等待串口。
 }
 

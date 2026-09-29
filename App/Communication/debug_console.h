@@ -115,10 +115,9 @@ bool DebugConsole_RegisterCommand(
     DebugConsole_CommandFn_t handler,
     const char *help);
 
-/* ISR只提交数值，Rs仅提交每组最终拟合结果。 */
+/* ISR通用数值日志；Rs结果已改为主循环直接打印。 */
 typedef enum {
-    DEBUG_LOG_VALUES = 0,      /* 通用：info + 三个float。 */
-    DEBUG_LOG_RS_RESISTANCE    /* Rs线间电阻：info为相别。 */
+    DEBUG_LOG_VALUES = 0 /* info + 三个float。 */
 } DebugLogType_t;
 
 /* 多中断安全入队；队列满时直接返回 false，不等待或格式化。 */

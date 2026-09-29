@@ -1334,20 +1334,9 @@ void DebugConsole_LogProcess(void)
         DC_Log_t item = dc_log[dc_log_tail];
         dc_log_tail = (uint8_t)((dc_log_tail + 1U) & (DC_LOG_SIZE - 1U));
 
-        switch (item.type) {
-        case DEBUG_LOG_RS_RESISTANCE:
-            DebugConsole_Printf("R_%s = %.6f ohm\r\n",
-                (item.info == 0U) ? "AB" : (item.info == 1U) ? "BC" : "CA",
-                item.a);
-            break;
-
-        case DEBUG_LOG_VALUES:
-        default:
-            /* 其他模块的通用三数值记录，info 是调用者指定的标识。 */
-            DebugConsole_Printf("LOG %u: %.4f %.4f %.4f\r\n",
-                                (unsigned)item.info, item.a, item.b, item.c);
-            break;
-        }
+        /* Rs不再从中断入队；此队列只承载通用数值日志。 */
+        DebugConsole_Printf("LOG %u: %.4f %.4f %.4f\r\n",
+                            (unsigned)item.info, item.a, item.b, item.c);
     }
 
     if (!DebugConsole_LogPending() && (dc_log_dropped != last_dropped)) {
