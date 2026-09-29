@@ -329,6 +329,18 @@ bool MotorCalibration_LsUsesADC1(void)
     return (ls_state != LS_IDLE) && (motor_cal.phase == CAL_PHASE_CA);
 }
 
+/* CAN等主循环调用者必须同时考虑Ls自动换相间隙：此时ls_state为IDLE但ls_auto仍为1。 */
+bool MotorCalibration_LsBusy(void)
+{
+    return (ls_state != LS_IDLE) || (ls_auto != 0U);
+}
+
+/* LsFault记录中断故障；主循环双沿拟合无效记6，0表示正常或主动停止。 */
+uint8_t MotorCalibration_LsLastError(void)
+{
+    return ls_error;
+}
+
 /**
  * @brief 配置并启动指定 AB/BC/CA 回路的一次 Ls 测量。
  * 步骤1：检查待机、ADC校零、Rs、母线范围及 TIM2/TIM3占用情况。
@@ -766,6 +778,7 @@ static void MotorCalibration_LsProcess(void)
           fall_l > 0.000001f && fall_l < 0.1f)) {
         DebugConsole_Printf("Ls %s invalid: rise=%.3f fall=%.3fuH\r\n",
                             name, rise_l * 5e5f, fall_l * 5e5f);
+        ls_error = 6U; /* 双沿拟合无效，供CAN异步结果监控区分故障与主动停止。 */
         if (auto_run)
             DebugConsole_Printf("Ls sequence stopped at %s\r\n", name);
         return;

@@ -150,23 +150,16 @@ static void MotorDebug_Status(int argc, char *argv[])
                       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER);
 }
 
-/* rs / rs stop：与PC13按键使用同一Rs启动顺序，便于COM27自动测试。 */
-static void MotorDebug_Rs(int argc, char *argv[])
+/* Rs单一启动入口：串口、CAN和按键均走同一套安全检查与CH4触发配置。 */
+bool MotorApp_StartRsCalibration(void)
 {
-  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
-    MotorCalibration_Stop();
-    DebugConsole_Printf("Rs stopped\r\n");
-    return;
-  }
-  if ((argc != 1) || (foc_motor_state != FOC_MOTOR_IDLE) ||
+  if ((foc_motor_state != FOC_MOTOR_IDLE) ||
+      MotorCalibration_LsBusy() ||
       (foc.calibration.calibrated == 0U) ||
       (foc.state.vbus < 5.0f) || (foc.state.vbus > 50.0f) ||
-      (TIM1->BDTR & TIM_BDTR_MOE)) {
-    DebugConsole_Printf("Rs rejected: use rs | rs stop; check idle, ADC, Vbus\r\n");
-    return;
-  }
+      (TIM1->BDTR & TIM_BDTR_MOE))
+    return false;
 
-  /* 保持与PC13原入口完全一致：停止FOC、配置Rs桥臂，再启动CH4 ADC触发。 */
   FOC_PWM_Stop();
   MotorCalibration_Start();
   foc_motor_state = FOC_MOTOR_CALIBRATION;
@@ -174,7 +167,21 @@ static void MotorDebug_Rs(int argc, char *argv[])
   if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
     MotorCalibration_Stop();
     motor_cal.state = CAL_ERROR;
-    DebugConsole_Printf("Rs start FAILED: TIM1 CH4\r\n");
+    return false;
+  }
+  return true;
+}
+
+/* rs / rs stop：沿用原串口交互，不再复制启动流程。 */
+static void MotorDebug_Rs(int argc, char *argv[])
+{
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("Rs stopped\r\n");
+    return;
+  }
+  if ((argc != 1) || !MotorApp_StartRsCalibration()) {
+    DebugConsole_Printf("Rs rejected: use rs | rs stop; check idle, ADC, Vbus\r\n");
     return;
   }
   DebugConsole_Printf("Rs started\r\n");
@@ -186,6 +193,10 @@ static void MotorDebug_Ls(int argc, char *argv[])
   if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
     MotorCalibration_Stop();
     DebugConsole_Printf("Ls stopped\r\n");
+    return;
+  }
+  if (MotorCalibration_LsBusy()) { /* 自动换相的LS_IDLE待续窗口也不允许插入第二个Ls。 */
+    DebugConsole_Printf("Ls rejected: calibration already active\r\n");
     return;
   }
   CalPhase_t phase = CAL_PHASE_AB;
@@ -521,6 +532,7 @@ void MotorApp_Process(void)
         __set_PRIMASK(primask);
 
         HAL_GPIO_TogglePin(GPIOC, GPIO_PIN_6);
+        MotorProtocol_CalibrationCancel(); /* 按键优先；取消旧CAN序号，不能把按键新辨识误归属旧任务。 */
 
         switch (buttons & (GPIO_PIN_11 | GPIO_PIN_13 | GPIO_PIN_10)) {
         case GPIO_PIN_11:

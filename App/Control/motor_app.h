@@ -3,6 +3,7 @@
 
 #include "stm32g4xx_hal.h"
 #include "controller.h"
+#include <stdbool.h>
 
 /* 初始化控制器、调试、模拟前端和零偏校准。 */
 HAL_StatusTypeDef MotorApp_Init(void);
@@ -10,6 +11,8 @@ HAL_StatusTypeDef MotorApp_Init(void);
 void MotorApp_RequestButton(uint16_t pin);
 /* 主循环低优先级业务，不在实时中断中调用。 */
 void MotorApp_Process(void);
+/* 串口/CAN/按键共用Rs安全启动，成功后由统一辨识主循环推进。 */
+bool MotorApp_StartRsCalibration(void);
 /* ADC1注入回调的25kHz实时入口，保留Rs辨识分支。 */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc);
 /* CAN协议共用同一个控制器，不建立参数副本。 */

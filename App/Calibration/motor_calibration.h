@@ -110,6 +110,8 @@ void MotorCalibration_Stop(void);
  * 用2×平均Rs补偿线间电阻；若电机忙、未校零、母线异常或定时器被占用则返回false。 */
 bool MotorCalibration_LsStart(CalPhase_t phase); /* 单回路调试入口。 */
 bool MotorCalibration_LsStartAll(void);         /* ls命令：自动AB→BC→CA。 */
+bool MotorCalibration_LsBusy(void);             /* 包括自动序列排队的下一组。 */
+uint8_t MotorCalibration_LsLastError(void);     /* 0正常/主动停止，1/2/3/5故障，6拟合无效。 */
 bool MotorCalibration_LsUsesADC1(void);   /* 告知ADC回调：CA期间ADC1 DMA数据属于Ls。 */
 void MotorCalibration_LsDmaComplete(void); /* DMA完成：立即关输出。 */
 void MotorCalibration_LsDmaHalf(void);     /* 半传输：检查60us关断事件。 */
