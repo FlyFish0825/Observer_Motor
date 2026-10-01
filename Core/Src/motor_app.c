@@ -55,24 +55,40 @@
 
 /* I/F：虚拟电角度按受限电角加速度爬升，只给定Iq。 */
 #define MOTOR_APP_IF_IQ_A 1.5f
-#define MOTOR_APP_IF_ACCEL_RAD_S2 200.0f /* 电角加速度，rad/s^2；必须与J_eq和可用电流匹配 */
+/*
+ * 电角加速度，rad/s^2。必须满足 J_eq*alpha_m + T_load < Kt*I*cos(delta)，
+ * 也就是"能不能被拖动"由可用转矩决定，调快本身不产生转矩。
+ * 取值越大，虚拟角越领先转子（负载角越大）；若转子跟不上而失速，
+ * 判据会拦在MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE，并在观测转速停止上升
+ * MOTOR_APP_IF_VERIFY_TIME_MS后以fail=1安全退流，不会静默拖死。
+ */
+#define MOTOR_APP_IF_ACCEL_RAD_S2 600.0f
 
 /*
- * 拖动电角速度上限＝首轮检查速度1000rpm机械转速：
- * 1000 * 2pi/60 * 7极对 = 733 rad/s。低于该速度时BEMF太小（300rpm约38个ADC计数、
- * 1000rpm约125个），观测器角度容易被死区与噪声支配，因此先拖到这里再判断接管。
+ * 拖动电角速度上限：比接管转速判据留约10%余量。
+ * 接管要求观测转速达到1000rpm（733rad/s），若拖动目标也只到733rad/s，判据就压在
+ * 刀口上——观测器转速只要有百分之几的标定偏差，判据永远不成立，每次启动都会以
+ * fail=1结束。因此拖动目标取1100rpm（806rad/s），让转速判据必然被越过。
  */
-#define MOTOR_APP_IF_MAX_SPEED_RAD_S 733.0f
+#define MOTOR_APP_IF_MAX_SPEED_RAD_S 806.0f
 /* 到达检查速度后仍不可信的验证窗口；超时则判为启动失败并退流。 */
 #define MOTOR_APP_IF_VERIFY_TIME_MS 300U
+/*
+ * 拖动"仍有进展"的判据：观测转速（按拖动方向归一后）比历史最好值高出该值就认为
+ * 转子仍在加速，重新计时。它确保拖动一直持续到转速真的上不去为止，而不是在虚拟角
+ * 到顶后固定等一段时间——虚拟角领先转子时，转子可能仍在追赶。
+ */
+#define MOTOR_APP_IF_PROGRESS_RPM 20.0f
 
 /*
  * ObserverReady判据（接管前置条件）。每条判据写入motor_ready_fail_mask的独立位，
- * 便于现场定位是哪一条不成立。转速下限300rpm对应BEMF约0.62V（约38个ADC计数），
- * 是本硬件上实测端电压明显高于噪声与死区模型误差的量级；该值是第一标定旋钮。
+ * 便于现场定位是哪一条不成立。
+ * 接管转速下限取1000rpm：对应BEMF约2.08V、约125个ADC计数，是实测端电压明显高于
+ * 死区/管压降模型误差（约0.5V）与ADC噪声的量级；低于该速度观测器角度容易被这些
+ * 误差支配，因此不在低速交接。
  */
 #define MOTOR_APP_OBSERVER_READY_TIME_MS 5U
-#define MOTOR_APP_OBSERVER_READY_MIN_RPM 300.0f
+#define MOTOR_APP_OBSERVER_READY_MIN_RPM 500.0f
 #define MOTOR_APP_OBSERVER_READY_SPAN_RAD 1.04719755f      /* 至少覆盖60°电角度 */
 #define MOTOR_APP_OBSERVER_READY_MAX_ANGLE_STEP 0.35f      /* 单拍角度跳变上限，rad */
 #define MOTOR_APP_OBSERVER_READY_MAX_SPEED_STEP 100.0f     /* 单拍转速跳变上限，rpm */
@@ -154,6 +170,8 @@ typedef struct {
 
   /* 检查速度处的验证计数与闭环健康计数。 */
   uint32_t verify_count;
+  /* 验证期间观测转速（已按拖动方向归一）的历史最好值，用于判断是否还有进展。 */
+  float verify_best_rpm;
   uint32_t fault_count;
 
   /* 接管：初始角偏置、已运行拍数与总拍数。 */
@@ -194,8 +212,13 @@ static volatile uint8_t motor_idle_reset_done = 0U;
 static volatile uint8_t motor_console_tx_active = 0U;
 /* ADC注入中断累计次数，仅用于状态诊断和校准进度观察。 */
 static volatile uint32_t motor_adc_irq_count = 0U;
-/* ADC注入序列自检结果：0表示与adc.c不一致，run请求会被拒绝；由status的adc_cfg显示。 */
+/* ADC注入序列自检结果：0表示与adc.c不一致；由status的adc_cfg显示。 */
 static volatile uint32_t motor_adc_cfg_ok = 0U;
+/*
+ * 自检门控开关：1=配置不一致时拒绝run（默认）；0=忽略自检照常启动。
+ * 只在现场需要临时验证时用set adc_chk 0绕过，此时采样通道是否可信由观察者判断。
+ */
+static volatile uint32_t motor_adc_check_enable = 1U;
 /* 本拍实际用于Park/逆Park的控制角（rad），只供上位机与Live Watch观察。 */
 static volatile float motor_control_angle_rad = 0.0f;
 /* ObserverReady最近一次失败的判据位，0表示无失败项。 */
@@ -552,14 +575,30 @@ static void MotorApp_UpdateStateTransition(void) {
       MotorApp_BeginObserverHandover();
       foc_motor_state = FOC_MOTOR_OBSERVER_HANDOVER;
     } else if (startup.if_speed_rad_s >= startup.if_speed_target_rad_s) {
-      /* 已拖到检查速度仍不可信：有界验证窗口后判为启动失败并退流。 */
-      startup.verify_count++;
+      /*
+       * 虚拟角已到顶：只要观测转速还在上升就继续拖动（虚拟角领先转子时，转子可能
+       * 仍在追赶），只有转速停止上升并持续MOTOR_APP_IF_VERIFY_TIME_MS才判失败。
+       */
+      if (startup.verify_best_rpm <
+          (foc.observer.state.speed_rpm * startup.if_direction -
+           MOTOR_APP_IF_PROGRESS_RPM)) {
+        startup.verify_best_rpm =
+            foc.observer.state.speed_rpm * startup.if_direction;
+        startup.verify_count = 0U;
+      } else {
+        startup.verify_count++;
+      }
       if (startup.verify_count >=
           MOTOR_APP_MS_TO_TICKS(MOTOR_APP_IF_VERIFY_TIME_MS)) {
         motor_start_fail_reason = MOTOR_APP_FAIL_OBSERVER_NOT_READY;
         motor_run_requested = 0U;
       }
     } else {
+      /* 虚拟角还在爬升：跟住历史最好转速，超时从虚拟角到顶之后才开始计。 */
+      float speed_signed = foc.observer.state.speed_rpm * startup.if_direction;
+      if (speed_signed > startup.verify_best_rpm) {
+        startup.verify_best_rpm = speed_signed;
+      }
       startup.verify_count = 0U;
     }
     break;
@@ -696,6 +735,7 @@ static void MotorApp_StartControlSequence(void) {
   startup.ready_sustain_count = 0U;
   startup.ready_fail_mask = 0U;
   startup.verify_count = 0U;
+  startup.verify_best_rpm = 0.0f;
   startup.fault_count = 0U;
   startup.handover_offset_rad = 0.0f;
   startup.handover_ticks = 0U;
@@ -799,6 +839,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
   DebugConsole_Printf("ADC JDR1=%lu JDR2=%lu JSQR=0x%08lX adc_cfg=%lu\r\n",
       (unsigned long)ADC2->JDR1, (unsigned long)ADC2->JDR2,
       (unsigned long)ADC2->JSQR, (unsigned long)motor_adc_cfg_ok);
+  /* 自检不通过时把"为什么起不来"直接写进status：上电那条报错很容易被漏看。 */
+  if (motor_adc_cfg_ok == 0U) {
+    DebugConsole_Printf("ADC INJ MISMATCH expect ADC1 JL=3 JSQ=3,12,11,14 ; ADC2 JL=1 JSQ=3,17 ; adc_chk=%lu\r\n",
+        (unsigned long)motor_adc_check_enable);
+  }
 }
 
 /**
@@ -851,6 +896,8 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
   /* 启动期诊断：ADC注入自检结果与本拍控制角。 */
   success &= DebugConsole_RegisterU32("adc_cfg", &motor_adc_cfg_ok, 0U, 1U,
                                       true);
+  success &= DebugConsole_RegisterU32("adc_chk", &motor_adc_check_enable, 0U,
+                                      1U, false);
   success &= DebugConsole_RegisterF32("ctrl_rad", &motor_control_angle_rad,
                                       -4.0f, 4.0f, true);
   /* 接管判据与启动失败的观察点。 */
@@ -1163,18 +1210,22 @@ void MotorApp_Process(void) {
     foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
   }
 
-  /* ADC注入配置不匹配时拒绝启动：采样通道不可信时闭环没有意义。 */
+  /* ADC注入配置不匹配时拒绝启动：采样通道不可信时闭环没有意义。
+   * 每次新的run请求只提示一次；set adc_chk 0 可临时绕过该门控。 */
+  if (motor_run_requested == 0U) {
+    adc_cfg_reported = 0U;
+  }
   if ((motor_run_requested != 0U) && (motor_adc_cfg_ok == 0U) &&
-      (adc_cfg_reported == 0U)) {
+      (motor_adc_check_enable != 0U) && (adc_cfg_reported == 0U)) {
     adc_cfg_reported = 1U;
-    DebugConsole_Printf("run ignored: ADC injected config invalid\r\n");
+    DebugConsole_Printf("run ignored: ADC injected config mismatch, see status adc_cfg (set adc_chk 0 to bypass)\r\n");
   }
 
-  /* 校准完成、IDLE复位完成且ADC注入配置正确才能启动，重复run 1不会重新初始化运行电机。
+  /* 校准完成、IDLE复位完成且ADC注入配置通过才能启动，重复run 1不会重新初始化运行电机。
    * 校准期间收到run 1则等待校准结束；run 0可以取消该请求。
    */
   if ((motor_run_requested != 0U) &&
-      (motor_adc_cfg_ok != 0U) &&
+      ((motor_adc_cfg_ok != 0U) || (motor_adc_check_enable == 0U)) &&
       (foc.calibration.calibrated != 0U) &&
       (motor_idle_reset_done != 0U) &&
       (foc_motor_state == FOC_MOTOR_IDLE)) {

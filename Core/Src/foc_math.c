@@ -80,7 +80,7 @@ void FOC_Data_Init(void) {
 
   Observer_Config_t observer_cfg = { /* 磁链观测器与 SRF-PLL 的运行参数。 */
       /* 磁链观测器保持现有增益和25 kHz更新周期。 */
-      .gain = 1e8f,
+      .gain = 3e7f,
       .Ts = 0.00004f,
       .psi_min = motor.flux_linkage * 0.5f,
       .psi_max = motor.flux_linkage * 3.0f,
