@@ -503,10 +503,10 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
     if (speed_enabled != 0U) {
       /*
        * 电流模式 -> 速度模式：
-       * 启动接管时直接同步目标转速，不经过运行调速斜坡；
-       * 速度PI第一拍输出保持当前有效Iq参考值。
+       * 速度斜坡从"当前实测转速"起步，再由斜坡限速逼近目标转速，避免接管瞬间
+       * 参考直接跳到目标使Iq立即饱和；速度PI第一拍输出保持当前有效Iq参考值。
        */
-      control->speed_ref_active_rpm = control->speed_ref_rpm;
+      control->speed_ref_active_rpm = speed_feedback_rpm;
       PI_Controller_PreloadOutput(&control->speed_pi, control->iq_ref_active,
                                   control->speed_ref_active_rpm,
                                   speed_feedback_rpm);

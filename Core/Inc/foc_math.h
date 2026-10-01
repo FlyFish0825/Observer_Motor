@@ -85,8 +85,8 @@ typedef enum {
  * @brief 电机运行状态
  *
  * 控制中断内切换，正常启动路径为：
- * IDLE -> ALIGN -> OPEN_LOOP_IF -> CLOSED_LOOP。
- * IDLE关闭功率桥，其余三个状态都由MotorApp_IsControlState判定为主动控制状态。
+ * IDLE -> ALIGN -> OPEN_LOOP_IF -> OBSERVER_HANDOVER -> CLOSED_LOOP。
+ * IDLE关闭功率桥，其余四个状态都由MotorApp_IsControlState判定为主动控制状态。
  * 各状态只决定控制角和dq电流参考，公共的电流环与SVPWM统一由应用层执行。
  */
 typedef enum
@@ -95,6 +95,7 @@ typedef enum
     FOC_MOTOR_CLOSED_LOOP,  /**< 闭环：观测器磁链角 + 电流/速度双闭环 */
     FOC_MOTOR_ALIGN,        /**< 静止定位：固定电角度，只给定Id */
     FOC_MOTOR_OPEN_LOOP_IF, /**< I/F开环拖动：虚拟电角度，只给定Iq */
+    FOC_MOTOR_OBSERVER_HANDOVER, /**< 接管：控制角=观测器角+渐消偏置，仍为电流模式 */
 
 } FOC_Motor_State_t;
 

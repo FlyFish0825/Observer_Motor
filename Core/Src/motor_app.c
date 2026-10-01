@@ -55,12 +55,54 @@
 
 /* I/F：虚拟电角度按受限电角加速度爬升，只给定Iq。 */
 #define MOTOR_APP_IF_IQ_A 1.5f
-#define MOTOR_APP_IF_ACCEL_RAD_S2 200.0f    /* 电角加速度，rad/s^2 */
-#define MOTOR_APP_IF_MAX_SPEED_RAD_S 150.0f /* 拖动电角速度上限，rad/s */
+#define MOTOR_APP_IF_ACCEL_RAD_S2 200.0f /* 电角加速度，rad/s^2；必须与J_eq和可用电流匹配 */
 
-/* ObserverReady第一版判据：磁链有效、转速下限和初始化标志同时成立一段时间。 */
+/*
+ * 拖动电角速度上限＝首轮检查速度1000rpm机械转速：
+ * 1000 * 2pi/60 * 7极对 = 733 rad/s。低于该速度时BEMF太小（300rpm约38个ADC计数、
+ * 1000rpm约125个），观测器角度容易被死区与噪声支配，因此先拖到这里再判断接管。
+ */
+#define MOTOR_APP_IF_MAX_SPEED_RAD_S 733.0f
+/* 到达检查速度后仍不可信的验证窗口；超时则判为启动失败并退流。 */
+#define MOTOR_APP_IF_VERIFY_TIME_MS 300U
+
+/*
+ * ObserverReady判据（接管前置条件）。每条判据写入motor_ready_fail_mask的独立位，
+ * 便于现场定位是哪一条不成立。转速下限300rpm对应BEMF约0.62V（约38个ADC计数），
+ * 是本硬件上实测端电压明显高于噪声与死区模型误差的量级；该值是第一标定旋钮。
+ */
 #define MOTOR_APP_OBSERVER_READY_TIME_MS 5U
-#define MOTOR_APP_OBSERVER_READY_MIN_RPM 50.0f
+#define MOTOR_APP_OBSERVER_READY_MIN_RPM 300.0f
+#define MOTOR_APP_OBSERVER_READY_SPAN_RAD 1.04719755f      /* 至少覆盖60°电角度 */
+#define MOTOR_APP_OBSERVER_READY_MAX_ANGLE_STEP 0.35f      /* 单拍角度跳变上限，rad */
+#define MOTOR_APP_OBSERVER_READY_MAX_SPEED_STEP 100.0f     /* 单拍转速跳变上限，rpm */
+#define MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE 1.57079633f/* I/F与观测角允许角差，90° */
+#define MOTOR_APP_OBSERVER_READY_MAX_ID_A 0.8f             /* 电流跟踪：|Id|上限，A */
+#define MOTOR_APP_OBSERVER_READY_SUSTAIN_MS 2U             /* "持续失跟/饱和"去抖时间 */
+
+/* 判据失败位。 */
+#define MOTOR_APP_READY_FAIL_PSI (1UL << 0)
+#define MOTOR_APP_READY_FAIL_INIT (1UL << 1)
+#define MOTOR_APP_READY_FAIL_SPEED (1UL << 2)
+#define MOTOR_APP_READY_FAIL_DIR (1UL << 3)
+#define MOTOR_APP_READY_FAIL_ANGLE_STEP (1UL << 4)
+#define MOTOR_APP_READY_FAIL_SPEED_STEP (1UL << 5)
+#define MOTOR_APP_READY_FAIL_SYNC (1UL << 6)
+#define MOTOR_APP_READY_FAIL_TRACK (1UL << 7)
+
+/* 接管：角偏置渐消的最大角速度与时间上下限（首轮值，按角差与电流裕量标定）。 */
+#define MOTOR_APP_HANDOVER_RATE_RAD_S 20.0f
+#define MOTOR_APP_HANDOVER_MIN_TIME_MS 20U
+#define MOTOR_APP_HANDOVER_MAX_TIME_MS 150U
+
+/* 闭环健康：|Id|持续偏大或磁链出界视为失步，退流并报告。 */
+#define MOTOR_APP_CLOSED_LOOP_MAX_ID_A 1.5f
+#define MOTOR_APP_CLOSED_LOOP_FAULT_TIME_MS 20U
+
+/* 启动失败原因，供status的fail字段显示。 */
+#define MOTOR_APP_FAIL_NONE 0UL
+#define MOTOR_APP_FAIL_OBSERVER_NOT_READY 1UL
+#define MOTOR_APP_FAIL_LOST_SYNC 2UL
 
 /*
  * ADC注入序列期望值，与adc.c的MX_ADC1_Init/MX_ADC2_Init保持一致，只用于上电回读自检。
@@ -85,16 +127,32 @@ typedef struct {
   volatile float measured_weight;      /* 实测端电压在融合结果中的权重0~1 */
 } MotorApp_VoltageSource_t;
 
-/* 启动时序中间状态：只保存角度和计数，不参与电流环计算。 */
+/* 启动时序中间状态：只保存角度、判据中间量和计数，不参与电流环计算。 */
 typedef struct {
-  float align_angle;             /* 定位固定电角度，rad */
-  uint32_t align_count;          /* 已运行的定位拍数 */
-  float if_angle;                /* I/F虚拟电角度，rad */
-  float if_speed_rad_s;          /* I/F当前电角速度，rad/s */
-  float if_speed_target_rad_s;   /* I/F目标电角速度，rad/s */
-  float if_direction;            /* I/F拖动方向，+1或-1 */
-  uint16_t observer_ready_count; /* 可信判据连续成立的拍数 */
-  uint8_t observer_ready;        /* 1=观测器可信；当前只观察，不切换控制角 */
+  float align_angle;           /* 定位固定电角度，rad */
+  uint32_t align_count;        /* 已运行的定位拍数 */
+  float if_angle;              /* I/F虚拟电角度，rad */
+  float if_speed_rad_s;        /* I/F当前电角速度，rad/s */
+  float if_speed_target_rad_s; /* I/F目标电角速度，rad/s */
+  float if_direction;          /* I/F拖动方向，+1或-1 */
+
+  /* ObserverReady判据的中间量。 */
+  float ready_last_phase_rad;   /* 上一拍观测磁链角，用于单拍跳变判据 */
+  float ready_last_speed_rpm;   /* 上一拍观测转速 */
+  float ready_span_rad;         /* 判据连续成立期间累计覆盖的电角度 */
+  uint32_t ready_count;         /* 判据连续成立的拍数 */
+  uint32_t ready_sustain_count; /* "持续失跟/饱和"连续失败的拍数 */
+  uint32_t ready_fail_mask;     /* 最近一次判据失败位 */
+  uint8_t observer_ready;       /* 1=观测器可信，准许进入接管 */
+
+  /* 检查速度处的验证计数与闭环健康计数。 */
+  uint32_t verify_count;
+  uint32_t fault_count;
+
+  /* 接管：初始角偏置、已运行拍数与总拍数。 */
+  float handover_offset_rad;
+  uint32_t handover_ticks;
+  uint32_t handover_ticks_total;
 } MotorApp_Startup_t;
 
 /* 小端float六通道加4字节帧尾，共28字节，直接交给DMA发送。 */
@@ -133,6 +191,10 @@ static volatile uint32_t motor_adc_irq_count = 0U;
 static volatile uint32_t motor_adc_cfg_ok = 0U;
 /* 本拍实际用于Park/逆Park的控制角（rad），只供上位机与Live Watch观察。 */
 static volatile float motor_control_angle_rad = 0.0f;
+/* ObserverReady最近一次失败的判据位，0表示无失败项。 */
+static volatile uint32_t motor_ready_fail_mask = 0U;
+/* 启动失败原因（MOTOR_APP_FAIL_*），由status的fail字段显示，下一次启动时清零。 */
+static volatile uint32_t motor_start_fail_reason = MOTOR_APP_FAIL_NONE;
 
 /* ======================== 控制参考仲裁与电流环 ======================== */
 
@@ -145,7 +207,8 @@ static volatile float motor_control_angle_rad = 0.0f;
 static uint8_t MotorApp_IsControlState(FOC_Motor_State_t state) {
   return ((state == FOC_MOTOR_CLOSED_LOOP) ||
           (state == FOC_MOTOR_ALIGN) ||
-          (state == FOC_MOTOR_OPEN_LOOP_IF)) ? 1U : 0U;
+          (state == FOC_MOTOR_OPEN_LOOP_IF) ||
+          (state == FOC_MOTOR_OBSERVER_HANDOVER)) ? 1U : 0U;
 }
 
 /**
@@ -167,6 +230,20 @@ static void MotorApp_ResolveControlReference(void) {
     FOC_Control_SubmitReference(&motor_control, startup.if_angle, 0.0f,
                                 MOTOR_APP_IF_IQ_A, 0U);
     break;
+
+  case FOC_MOTOR_OBSERVER_HANDOVER: {
+    /* 接管：控制角=观测磁链角+按拍数线性渐消的初始偏置，电流参考保持I/f值。 */
+    float blend = 0.0f;
+    if (startup.handover_ticks_total > 0U) {
+      blend = 1.0f - (float)startup.handover_ticks /
+                         (float)startup.handover_ticks_total;
+    }
+    FOC_Control_SubmitReference(
+        &motor_control,
+        foc.observer.state.phase_raw + startup.handover_offset_rad * blend,
+        0.0f, MOTOR_APP_IF_IQ_A, 0U);
+    break;
+  }
 
   case FOC_MOTOR_CLOSED_LOOP:
     /* 外部阶跃先复制到斜坡输入，实际限速由控制器内部的速度斜坡完成。 */
@@ -232,33 +309,178 @@ static void MotorApp_UpdateIfAngle(void) {
 }
 
 /**
- * @brief 第一版ObserverReady判据，只做判断，不切换控制角。
+ * @brief 评估ObserverReady判据（接管前置条件）。
  *
- * 判据刻意只使用已有观测量：磁链幅值达到PLL可信下限、转速超过可观测下限、
- * 观测器已初始化。三者连续成立MOTOR_APP_OBSERVER_READY_TIME_MS后才置位。
- * 后续接管步骤需要在此基础上再补充相位残差、电流跟踪和饱和判据。
+ * 判据只用已有观测量，每条失败都写入motor_ready_fail_mask的独立位，便于现场定位：
+ * 磁链幅值范围、初始化、转速下限、方向一致、角度与转速单拍跳变、I/F与观测角差、
+ * 电流跟踪（|Id|与电流PI饱和）。
+ * 其中"电流跟踪"按MOTOR_APP_OBSERVER_READY_SUSTAIN_MS去抖（瞬时失跟不算失败），
+ * 其余条件必须本拍成立；全部成立且连续满足时间与累计电角度跨度后才置位ready。
+ *
+ * @note 本函数只做判断，不切换控制角；切换由接管状态完成。
  */
 static void MotorApp_UpdateObserverReady(void) {
-  /* ready_ticks是判据连续成立所需的拍数。 */
-  uint16_t ready_ticks;
-  /* speed_abs_rpm是观测器转速绝对值，正反转共用同一门槛。 */
-  float speed_abs_rpm;
+  /* angle_step/speed_step是相对上一拍的变化量，用于排除无法解释的跳变。 */
+  float angle_step;
+  float speed_step;
+  /* load_angle是I/F虚拟角与观测磁链角之差，即允许存在的负载角。 */
+  float load_angle;
+  /* speed_rpm为本拍观测转速，正反转共用同一组判据。 */
+  float speed_rpm;
+  /* track_failed表示本拍出现"失跟或电压饱和"征兆。 */
+  uint8_t track_failed;
+  /* fail为本拍全部失败位的集合。 */
+  uint32_t fail = 0U;
 
-  ready_ticks = (uint16_t)MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_TIME_MS);
-  speed_abs_rpm = fabsf(foc.observer.state.speed_rpm);
+  speed_rpm = foc.observer.state.speed_rpm;
 
-  if ((foc.observer.state.psi_mag > foc.observer.config.psi_min) &&
-      (speed_abs_rpm > MOTOR_APP_OBSERVER_READY_MIN_RPM) &&
-      (foc.observer.state.initialized != 0U)) {
-    if (startup.observer_ready_count < ready_ticks) {
-      startup.observer_ready_count++;
-    }
-    if (startup.observer_ready_count >= ready_ticks) {
-      startup.observer_ready = 1U;
+  /* 1) 磁链幅值在标定范围内（仅必要条件）。 */
+  if ((foc.observer.state.psi_mag < foc.observer.config.psi_min) ||
+      ((foc.observer.config.psi_max > 0.0f) &&
+       (foc.observer.state.psi_mag > foc.observer.config.psi_max))) {
+    fail |= MOTOR_APP_READY_FAIL_PSI;
+  }
+
+  /* 2) 观测器已初始化。 */
+  if (foc.observer.state.initialized == 0U) {
+    fail |= MOTOR_APP_READY_FAIL_INIT;
+  }
+
+  /* 3) 转速达到可观测下限：对应BEMF明显高于噪声与死区模型误差。 */
+  if (fabsf(speed_rpm) < MOTOR_APP_OBSERVER_READY_MIN_RPM) {
+    fail |= MOTOR_APP_READY_FAIL_SPEED;
+  }
+
+  /* 4) 观测方向必须与I/F拖动方向一致。 */
+  if ((speed_rpm * startup.if_direction) <= 0.0f) {
+    fail |= MOTOR_APP_READY_FAIL_DIR;
+  }
+
+  /* 5) 角度与转速的单拍变化有界。 */
+  angle_step = FOC_WrapToPiFast(foc.observer.state.phase_raw -
+                                startup.ready_last_phase_rad);
+  speed_step = speed_rpm - startup.ready_last_speed_rpm;
+  if (fabsf(angle_step) > MOTOR_APP_OBSERVER_READY_MAX_ANGLE_STEP) {
+    fail |= MOTOR_APP_READY_FAIL_ANGLE_STEP;
+  }
+  if (fabsf(speed_step) > MOTOR_APP_OBSERVER_READY_MAX_SPEED_STEP) {
+    fail |= MOTOR_APP_READY_FAIL_SPEED_STEP;
+  }
+
+  /* 6) I/F与观测角差在同步窗口内：允许非零负载角，不允许失控增长。 */
+  load_angle = FOC_WrapToPiFast(startup.if_angle -
+                                foc.observer.state.phase_raw);
+  if (fabsf(load_angle) > MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE) {
+    fail |= MOTOR_APP_READY_FAIL_SYNC;
+  }
+
+  /* 7) 电流跟踪：|Id|不持续偏大，且两个电流PI不持续饱和（去抖后判定）。 */
+  track_failed = 0U;
+  if ((fabsf(foc.state.i_dq.d) > MOTOR_APP_OBSERVER_READY_MAX_ID_A) ||
+      (motor_control.id_pi.saturation != PI_SATURATION_NONE) ||
+      (motor_control.iq_pi.saturation != PI_SATURATION_NONE)) {
+    track_failed = 1U;
+  }
+  if (track_failed != 0U) {
+    if (startup.ready_sustain_count <
+        MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_SUSTAIN_MS)) {
+      startup.ready_sustain_count++;
     }
   } else {
-    startup.observer_ready_count = 0U;
+    startup.ready_sustain_count = 0U;
+  }
+  if (startup.ready_sustain_count >=
+      MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_SUSTAIN_MS)) {
+    fail |= MOTOR_APP_READY_FAIL_TRACK;
+  }
+
+  motor_ready_fail_mask = fail;
+
+  /* 无论本拍是否失败都要更新历史值，下一拍的跳变判据以本拍为基准。 */
+  startup.ready_last_phase_rad = foc.observer.state.phase_raw;
+  startup.ready_last_speed_rpm = speed_rpm;
+
+  if (fail != 0U) {
+    startup.ready_count = 0U;
+    startup.ready_span_rad = 0.0f;
     startup.observer_ready = 0U;
+    return;
+  }
+
+  /* 条件成立：累计持续时间与累计电角度跨度，两者都满足才准许接管。 */
+  if (startup.ready_count <
+      MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_TIME_MS)) {
+    startup.ready_count++;
+  }
+  startup.ready_span_rad += fabsf(angle_step);
+
+  if ((startup.ready_count >=
+       MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_TIME_MS)) &&
+      (startup.ready_span_rad >= MOTOR_APP_OBSERVER_READY_SPAN_RAD)) {
+    startup.observer_ready = 1U;
+  }
+}
+
+/**
+ * @brief 记录接管起点：初始角偏置与按允许角速度折算出的渐消拍数。
+ *
+ * @note 渐消时间由角差决定（上下限夹紧），不是固定值：角差越大渐消越慢，
+ *       避免控制角相对观测角快速旋转导致电流矢量跳变。
+ */
+static void MotorApp_BeginObserverHandover(void) {
+  /* offset为当前I/F虚拟角相对观测磁链角的偏置。 */
+  float offset = FOC_WrapToPiFast(startup.if_angle -
+                                  foc.observer.state.phase_raw);
+  /* ticks为按最大角速度折算出的渐消拍数。 */
+  uint32_t ticks;
+
+  if (MOTOR_APP_HANDOVER_RATE_RAD_S > 0.0f) {
+    ticks = (uint32_t)(fabsf(offset) /
+                       (MOTOR_APP_HANDOVER_RATE_RAD_S * foc.timer.Ts));
+  } else {
+    ticks = 0U;
+  }
+  if (ticks < MOTOR_APP_MS_TO_TICKS(MOTOR_APP_HANDOVER_MIN_TIME_MS)) {
+    ticks = MOTOR_APP_MS_TO_TICKS(MOTOR_APP_HANDOVER_MIN_TIME_MS);
+  }
+  if (ticks > MOTOR_APP_MS_TO_TICKS(MOTOR_APP_HANDOVER_MAX_TIME_MS)) {
+    ticks = MOTOR_APP_MS_TO_TICKS(MOTOR_APP_HANDOVER_MAX_TIME_MS);
+  }
+
+  startup.handover_offset_rad = offset;
+  startup.handover_ticks_total = ticks;
+  startup.handover_ticks = 0U;
+}
+
+/**
+ * @brief 闭环健康检查：角度失步或磁链出界持续存在时退流并报告。
+ *
+ * @note 判据只用|Id|与磁链幅值：闭环下dq坐标即转子坐标，Id持续偏大说明控制角
+ *       已经跟不上转子。这是第一版安全网，不是完整的失步检测。
+ */
+static void MotorApp_CheckClosedLoopHealth(void) {
+  /* unhealthy为1表示本拍检测到失步征兆。 */
+  uint8_t unhealthy = 0U;
+
+  if (fabsf(foc.state.i_dq.d) > MOTOR_APP_CLOSED_LOOP_MAX_ID_A) {
+    unhealthy = 1U;
+  }
+  if ((foc.observer.state.psi_mag < foc.observer.config.psi_min) ||
+      ((foc.observer.config.psi_max > 0.0f) &&
+       (foc.observer.state.psi_mag > foc.observer.config.psi_max))) {
+    unhealthy = 1U;
+  }
+
+  if (unhealthy != 0U) {
+    startup.fault_count++;
+  } else {
+    startup.fault_count = 0U;
+  }
+
+  if (startup.fault_count >=
+      MOTOR_APP_MS_TO_TICKS(MOTOR_APP_CLOSED_LOOP_FAULT_TIME_MS)) {
+    motor_start_fail_reason = MOTOR_APP_FAIL_LOST_SYNC;
+    motor_run_requested = 0U;
   }
 }
 
@@ -276,15 +498,22 @@ static void MotorApp_AdvanceStateMachine(const Observer_Input_t *input) {
     break;
 
   case FOC_MOTOR_OPEN_LOOP_IF:
-    /* I/F期间观测器只做后台可信度判断，不参与控制角。 */
+    /* I/F期间观测器后台运行，只用于可信判据；控制角仍是虚拟角。 */
     Observer_Run(&foc.observer, input);
     MotorApp_UpdateObserverReady();
     MotorApp_UpdateIfAngle();
     break;
 
+  case FOC_MOTOR_OBSERVER_HANDOVER:
+    /* 接管期间观测器必须继续运行：控制角以本拍磁链角为基准。 */
+    Observer_Run(&foc.observer, input);
+    startup.handover_ticks++;
+    break;
+
   case FOC_MOTOR_CLOSED_LOOP:
     /* 闭环使用本拍刚更新的观测器状态，控制角与速度反馈同拍。 */
     Observer_Run(&foc.observer, input);
+    MotorApp_CheckClosedLoopHealth();
     break;
 
   default:
@@ -300,12 +529,44 @@ static void MotorApp_AdvanceStateMachine(const Observer_Input_t *input) {
  *       控制角和参考，新状态从下一拍生效，避免边界拍出现参考跳变。
  */
 static void MotorApp_UpdateStateTransition(void) {
-  if ((foc_motor_state == FOC_MOTOR_ALIGN) &&
-      (startup.align_count >= MOTOR_APP_MS_TO_TICKS(MOTOR_APP_ALIGN_TIME_MS))) {
-    /* 定位角作为虚拟角初值，I/F从零速重新加速。 */
-    startup.if_angle = startup.align_angle;
-    startup.if_speed_rad_s = 0.0f;
-    foc_motor_state = FOC_MOTOR_OPEN_LOOP_IF;
+  switch (foc_motor_state) {
+  case FOC_MOTOR_ALIGN:
+    if (startup.align_count >= MOTOR_APP_MS_TO_TICKS(MOTOR_APP_ALIGN_TIME_MS)) {
+      /* 定位角作为虚拟角初值，I/F从零速重新加速。 */
+      startup.if_angle = startup.align_angle;
+      startup.if_speed_rad_s = 0.0f;
+      foc_motor_state = FOC_MOTOR_OPEN_LOOP_IF;
+    }
+    break;
+
+  case FOC_MOTOR_OPEN_LOOP_IF:
+    if (startup.observer_ready != 0U) {
+      /* 观测器已可信：记录角偏置并进入接管，不再继续加速虚拟角。 */
+      MotorApp_BeginObserverHandover();
+      foc_motor_state = FOC_MOTOR_OBSERVER_HANDOVER;
+    } else if (startup.if_speed_rad_s >= startup.if_speed_target_rad_s) {
+      /* 已拖到检查速度仍不可信：有界验证窗口后判为启动失败并退流。 */
+      startup.verify_count++;
+      if (startup.verify_count >=
+          MOTOR_APP_MS_TO_TICKS(MOTOR_APP_IF_VERIFY_TIME_MS)) {
+        motor_start_fail_reason = MOTOR_APP_FAIL_OBSERVER_NOT_READY;
+        motor_run_requested = 0U;
+      }
+    } else {
+      startup.verify_count = 0U;
+    }
+    break;
+
+  case FOC_MOTOR_OBSERVER_HANDOVER:
+    if ((startup.handover_ticks_total > 0U) &&
+        (startup.handover_ticks >= startup.handover_ticks_total)) {
+      /* 偏置已渐消到0，控制角与闭环路径连续，可以进入闭环。 */
+      foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
+    }
+    break;
+
+  default:
+    break;
   }
 }
 
@@ -419,8 +680,21 @@ static void MotorApp_StartControlSequence(void) {
   startup.align_count = 0U;
   startup.if_angle = startup.align_angle;
   startup.if_speed_rad_s = 0.0f;
+  /* 清零判据、接管与失败计数，避免上一次运行的历史影响本次启动。 */
   startup.observer_ready = 0U;
-  startup.observer_ready_count = 0U;
+  startup.ready_count = 0U;
+  startup.ready_span_rad = 0.0f;
+  startup.ready_last_phase_rad = 0.0f;
+  startup.ready_last_speed_rpm = 0.0f;
+  startup.ready_sustain_count = 0U;
+  startup.ready_fail_mask = 0U;
+  startup.verify_count = 0U;
+  startup.fault_count = 0U;
+  startup.handover_offset_rad = 0.0f;
+  startup.handover_ticks = 0U;
+  startup.handover_ticks_total = 0U;
+  motor_ready_fail_mask = 0U;
+  motor_start_fail_reason = MOTOR_APP_FAIL_NONE;
 
   /* 机械转速换算为电角速度：omega_e = rpm * 2pi/60 * pole_pairs。 */
   pole_pairs = (float)foc.observer.motor.pole_pairs;
@@ -434,7 +708,8 @@ static void MotorApp_StartControlSequence(void) {
   startup.if_speed_target_rad_s = if_target_rad_s;
 
   motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
-  motor_control.speed_ref_active_rpm = motor_control.speed_ref_rpm;
+  /* 速度环的斜坡起点不在这里：速度PI使能那一拍由控制器用当前观测转速播种，
+     使接管后从I/f转速平滑过渡到目标转速，而不是把参考直接设到目标。 */
   motor_control.speed_loop_enable = 1U;
   /* 模式切换历史对齐到"未使能"，使闭环第一拍必定执行一次无扰预加载。 */
   motor_control.speed_loop_enable_last = 0U;
@@ -479,12 +754,15 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
   (void)argv;
 
   DebugConsole_Printf(
-      "STATUS run=%lu state=%u cal=%u idle_reset=%u adc_irq=%lu ARR=%lu CCR4=%lu MOE=%u\r\n",
+      "STATUS run=%lu state=%u cal=%u idle_reset=%u adc_irq=%lu ARR=%lu CCR4=%lu MOE=%u rdy=%lu rdy_fail=0x%02lX fail=%lu\r\n",
       (unsigned long)motor_run_requested, (unsigned int)foc_motor_state,
       (unsigned int)foc.calibration.calibrated,
       (unsigned int)motor_idle_reset_done, (unsigned long)motor_adc_irq_count,
       (unsigned long)TIM1->ARR, (unsigned long)TIM1->CCR4,
-      (unsigned int)((TIM1->BDTR & TIM_BDTR_MOE) != 0U));
+      (unsigned int)((TIM1->BDTR & TIM_BDTR_MOE) != 0U),
+      (unsigned long)startup.observer_ready,
+      (unsigned long)motor_ready_fail_mask,
+      (unsigned long)motor_start_fail_reason);
   DebugConsole_Printf("DRIVE Vbus=%.3f cmd=%.1f ref=%.1f rpm=%.1f speed_en=%lu\r\n",
       (double)foc.state.vbus, (double)motor_control.speed_command_rpm,
       (double)motor_control.speed_ref_active_rpm,
@@ -498,13 +776,15 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER,
       (unsigned long)TIM1->CR1);
-  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f U=%.2f V=%.2f W=%.2f ctrl=%.3f\r\n",
+  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f U=%.2f V=%.2f W=%.2f ctrl=%.3f dtheta=%.3f\r\n",
       (double)foc.observer.state.phase_raw, (double)foc.observer.state.psi_mag,
       (double)voltage_source.measured_weight,
       (double)foc.state.u_abc_measured.a,
       (double)foc.state.u_abc_measured.b,
       (double)foc.state.u_abc_measured.c,
-      (double)motor_control_angle_rad);
+      (double)motor_control_angle_rad,
+      (double)FOC_WrapToPiFast(motor_control_angle_rad -
+                               foc.observer.state.phase_raw));
   /* ADC2注入组原始码诊断：JDR1为V相电流(Ib)，JDR2为V相端电压。
    * JSQR的JL字段决定注入序列长度，用于区分"V相没有被转换(JDR2恒为0)"
    * 和"V相实测确实为0V"两种情况。adc_cfg为上电回读自检结果，0时拒绝启动。
@@ -566,6 +846,11 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
                                       true);
   success &= DebugConsole_RegisterF32("ctrl_rad", &motor_control_angle_rad,
                                       -4.0f, 4.0f, true);
+  /* 接管判据与启动失败的观察点。 */
+  success &= DebugConsole_RegisterU32("rdy_fail", &motor_ready_fail_mask, 0U,
+                                      0xFFU, true);
+  success &= DebugConsole_RegisterU32("fail", &motor_start_fail_reason, 0U, 2U,
+                                      true);
 
   return (success != 0U) ? HAL_OK : HAL_ERROR;
 }
