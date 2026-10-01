@@ -191,6 +191,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (double)foc.state.u_abc_measured.a,
       (double)foc.state.u_abc_measured.b,
       (double)foc.state.u_abc_measured.c);
+  /* ADC原始注入结果诊断：确认V相在ADC2 JDR2进入软件前是否已经为0。 */
+  DebugConsole_Printf("ADC_V raw=%lu ADC2_JDR1=%lu JDR2=%lu\r\n",
+      (unsigned long)ADC2->JDR2,
+      (unsigned long)ADC2->JDR1,
+      (unsigned long)ADC2->JDR2);
 }
 
 /**
