@@ -172,7 +172,21 @@ void MX_ADC2_Init(void)
   hadc2.Init.Resolution = ADC_RESOLUTION_12B;
   hadc2.Init.DataAlign = ADC_DATAALIGN_RIGHT;
   hadc2.Init.GainCompensation = 0;
-  hadc2.Init.ScanConvMode = ADC_SCAN_DISABLE;
+  /*
+   * ADC2规则组只有1个通道，CubeMX据此生成ADC_SCAN_DISABLE；但HAL的
+   * HAL_ADCEx_InjectedConfigChannel()在ScanConvMode为DISABLE时会走
+   * "InjectedNbrOfConversion被丢弃"的分支：只把Rank1写进JSQR(JL=0)，
+   * Rank2的配置调用是空操作。结果是V相端电压(IN17)从未进入注入序列，
+   * JDR2保持复位值0，看起来就像V相恒为0V。
+   *
+   * 这里必须显式打开，与ADC1保持一致的写法。它只影响HAL组装注入序列的
+   * 分支判断，规则组仍然只有1个转换（ScanConvMode=ENABLE时SQR1_L写成
+   * NbrOfConversion-1=0，与DISABLE等价）。
+   *
+   * 注意：该字段不由Observer.ioc保存，CubeMX每次重新生成都会按规则组通道数
+   * 写回DISABLE，重新生成后必须重新检查这一行。
+   */
+  hadc2.Init.ScanConvMode = ADC_SCAN_ENABLE;
   hadc2.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc2.Init.LowPowerAutoWait = DISABLE;
   hadc2.Init.ContinuousConvMode = DISABLE;
