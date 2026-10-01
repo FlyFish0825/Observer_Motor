@@ -84,12 +84,16 @@ typedef enum {
 /**
  * @brief 电机运行状态
  *
- * 控制中断内切换：IDLE时功率桥关闭，CLOSED_LOOP时执行FOC闭环。
+ * 控制中断内切换：安全状态关闭功率桥，主动控制状态允许执行FOC。
+ * Step 2先扩展状态框架，不启用新增状态；后续ALIGN/I-F/反转流程复用此入口。
  */
 typedef enum
 {
-    FOC_MOTOR_IDLE = 0,      /**< 空闲状态，功率桥关闭，仅保留ADC采样触发 */
-    FOC_MOTOR_CLOSED_LOOP,   /**< 闭环运行，执行观测器+双闭环+SVPWM */
+    FOC_MOTOR_IDLE = 0,          /**< 空闲状态，功率桥关闭，仅保留ADC采样触发 */
+    FOC_MOTOR_CLOSED_LOOP,       /**< 闭环运行，执行观测器+双闭环+SVPWM */
+    FOC_MOTOR_ALIGN,             /**< 预留：转子定位状态 */
+    FOC_MOTOR_OPEN_LOOP_IF,      /**< 预留：I/F开环启动状态 */
+    FOC_MOTOR_OBSERVER_HANDOVER, /**< 预留：观测器接管状态 */
 
 } FOC_Motor_State_t;
 

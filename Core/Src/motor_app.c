@@ -69,6 +69,16 @@ static volatile uint8_t motor_console_tx_active = 0U;
 /* ADC注入中断累计次数，仅用于状态诊断和校准进度观察。 */
 static volatile uint32_t motor_adc_irq_count = 0U;
 
+/**
+ * @brief 判断当前状态是否允许进入FOC实时控制。
+ *
+ * Step 2仅建立统一入口；当前实际可运行状态仍只有CLOSED_LOOP。
+ * 后续ALIGN、I/F和反转状态接入时只需扩展此处，不再修改ADC ISR主结构。
+ */
+static uint8_t MotorApp_IsControlState(FOC_Motor_State_t state) {
+  return (state == FOC_MOTOR_CLOSED_LOOP) ? 1U : 0U;
+}
+
 /** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
 FOC_Control_t *MotorApp_GetControl(void) {
   return &motor_control;
@@ -609,8 +619,11 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
     foc_motor_state = FOC_MOTOR_IDLE;
   }
 
-  /* 状态不是闭环时先关桥，包含零偏校准期间及无效状态值。 */
-  if (foc_motor_state != FOC_MOTOR_CLOSED_LOOP) {
+  /*
+   * Step 2：安全状态关闭功率桥，主动控制状态进入FOC执行路径。
+   * 当前只有CLOSED_LOOP实际启用，其余新增状态先保持安全退出。
+   */
+  if (MotorApp_IsControlState(foc_motor_state) == 0U) {
     foc_motor_state = FOC_MOTOR_IDLE;
     MotorApp_ResetIdle();
   } else {
