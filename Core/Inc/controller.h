@@ -88,6 +88,19 @@ typedef struct {
 
 
 /**
+ * @brief FOC控制参考仲裁结果。
+ *
+ * 后续启动、观测器接管和反转状态只允许生成参考，不直接修改控制器内部状态。
+ * 当前阶段仅接入现有速度/电流参考，保持原闭环行为不变。
+ */
+typedef struct {
+  float theta_ctrl;                 /* 当前控制角，后续由状态机仲裁。 */
+  float id_ref;                     /* 最终d轴电流参考。 */
+  float iq_ref;                     /* 最终q轴电流参考。 */
+  uint8_t speed_loop_enable;        /* 是否允许速度环产生Iq参考。 */
+} FOC_Control_Reference_t;
+
+/**
  * @brief FOC电流环和速度环总控制器
  *
  * 工作方式：
@@ -101,6 +114,9 @@ typedef struct {
   PI_Controller_t id_pi;
   PI_Controller_t iq_pi;
   PI_Controller_t speed_pi;
+
+  /* 控制参考唯一入口。当前仅同步已有参考，后续状态机从这里接入。 */
+  FOC_Control_Reference_t reference;
 
   /* 外部命令，可由串口实时修改。
    * id_ref/iq_ref单位A；speed_command_rpm为控制台目标，应用层复制给
