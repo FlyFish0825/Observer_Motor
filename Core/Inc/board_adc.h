@@ -8,28 +8,26 @@ extern "C" {
 #include "stm32g4xx_hal.h"
 #include <stdint.h>
 
+/* 12位ADC计数恢复到100kΩ/5.1kΩ分压输入侧电压的比例，单位V/count。 */
+#define BOARD_ADC_COUNT_TO_VOLTAGE \
+  (3.3f / 4096.0f * ((100.0f + 5.1f) / 5.1f))
+
 /**
  * @brief PCB规则组ADC测量结果
  *
- * 引脚对应关系：
+ * 规则组现在只保留慢速量：
  * - PA0：母线电压
- * - PB12：U相端电压
- * - PA4：V相端电压
- * - PB11：W相端电压
+ * - ADC1内部温度传感器
+ *
+ * U/V/W三相端电压已迁移到TIM1同步Injected序列。
  */
 typedef struct {
   /* 单次12位转换原始计数，正常范围0~4095。 */
   uint16_t vbus_raw;
-  uint16_t phase_u_raw;
-  uint16_t phase_v_raw;
-  uint16_t phase_w_raw;
   uint16_t temperature_raw;
 
-  /* 已恢复100k/5.1k分压倍率，单位V；端电压为对地测量值。 */
+  /* 母线电压已恢复100k/5.1k分压倍率，单位V。 */
   float vbus_voltage;
-  float phase_u_voltage;
-  float phase_v_voltage;
-  float phase_w_voltage;
   /* MCU内部温度传感器的换算结果，单位摄氏度。 */
   float temperature_c;
 } BoardAdcMeasurements_t;
@@ -42,20 +40,9 @@ typedef struct {
 HAL_StatusTypeDef BoardAdc_Update(void);
 
 /**
- * @brief 无阻塞读取一份完整测量快照
- * @param snapshot [out] 接收完整测量快照的输出缓冲区。
- * @param sequence [out] 接收本次快照的发布批次序号（用于判断是否为新数据）。
- * @return 1成功获取一致快照；0主循环正在写入或数据未就绪，输出不被修改。
- * @note  若主循环正在更新，函数返回0，调用方应沿用上一份有效数据。
+ * @brief 获取最近一次规则组测量结果，供主循环和调试读取。
+ * @return 指向共享测量结构体的指针（非NULL）。
  */
-uint8_t BoardAdc_GetSnapshot(BoardAdcMeasurements_t *snapshot,
-                             uint32_t *sequence);
-
-/**
- * @brief 获取测量结构地址，供调试控制台观察
- * @note 指针指向共享数据；控制中断需要完整一组数据时使用GetSnapshot。
- */
-/** @return 指向共享测量结构体的指针（非NULL），调用者须自行保证读取一致性。 */
 BoardAdcMeasurements_t *BoardAdc_GetMeasurements(void);
 
 #ifdef __cplusplus

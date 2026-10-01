@@ -4,7 +4,8 @@
  *
  * 主循环负责规则组电压采样、启动请求和串口命令；ADC1注入完成中断
  * 负责电流换算、磁链观测、双闭环计算及PWM更新。控制周期按40us配置。
- * voltage_source由控制中断维护，规则组数据通过BoardAdc快照交接。
+ * voltage_source由控制中断维护；Iabc与三相端电压均由TIM1同步Injected采样，
+ * 规则组仅负责母线电压和温度等慢速量。
  */
 #include "motor_app.h"
 
@@ -32,16 +33,9 @@
 #define MOTOR_APP_MEASURED_VOLTAGE_RETURN_RPM   900.0f
 #define MOTOR_APP_VOLTAGE_BLEND_TIME_S            0.020f
 
-/* 25kHz控制周期下250次为10ms，超时后不再使用陈旧端电压。 */
-#define MOTOR_APP_PHASE_VOLTAGE_STALE_COUNT       250U
-
 /* 上述阈值采用迟滞和渐变，防止速度在切换边界附近抖动电压来源。 */
 
 typedef struct {
-  /* 实测电压保存在foc.state中；此处仅记录新数据序号与切换状态。 */
-  uint32_t sequence;
-  /* 未取得新数据的控制周期数；达到超时条件后选择重构电压。 */
-  uint32_t stale_count;
   /* 选择目标与实际融合权重分开保存，使切换过程可以逐拍渐变。 */
   volatile uint32_t measured_selected;
   volatile float measured_weight;
@@ -57,7 +51,6 @@ typedef struct {
 static FOC_Control_t motor_control;
 
 static MotorApp_VoltageSource_t voltage_source = {
-    .stale_count = MOTOR_APP_PHASE_VOLTAGE_STALE_COUNT + 1U,
     .measured_selected = 1U,
     .measured_weight = 1.0f,
 };
@@ -162,10 +155,12 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER,
       (unsigned long)TIM1->CR1);
-  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f stale=%lu\r\n",
+  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f U=%.2f V=%.2f W=%.2f\r\n",
       (double)foc.observer.state.phase_raw, (double)foc.observer.state.psi_mag,
       (double)voltage_source.measured_weight,
-      (unsigned long)voltage_source.stale_count);
+      (double)foc.state.u_abc_measured.a,
+      (double)foc.state.u_abc_measured.b,
+      (double)foc.state.u_abc_measured.c);
 }
 
 /**
@@ -338,51 +333,24 @@ static void MotorApp_StartClosedLoop(void) {
 
 /**
  * @brief 每个控制周期更新观测器电压输入和实测权重。
- * 快照读取失败时沿用缓存；连续无更新超过10ms后目标切向重构电压。
- * 1200/900rpm构成迟滞区间，区间内保持上次选择；正反转均按绝对值判断。
- * 包括超时切换在内，实际权重都按20ms渐变，不会立即跳到目标值。
+ * 三相端电压已改为与TIM1同步的Injected采样，当前拍在ADC中断中完成Clarke变换；
+ * 1200/900rpm构成迟滞区间，低速优先实测端电压，高速逐步切到PWM重构电压。
+ * 包括切换在内，实际权重都按20ms渐变，不会立即跳到目标值。
  */
 static void MotorApp_UpdateObserverVoltage(Observer_Input_t *input) {
-  /* snapshot是规则组ADC的完整快照，避免逐通道读取造成撕裂。 */
-  BoardAdcMeasurements_t snapshot;
   /* blend_step为本控制周期的权重增量。 */
   float blend_step;
   /* speed_abs_rpm用于按转速迟滞选择电压源，正反转共用阈值。 */
   float speed_abs_rpm;
-  /* sequence用于判断快照是否比上次控制周期更新。 */
-  uint32_t sequence;
-  /* snapshot_valid表示本次或缓存快照是否仍在允许的有效时间内。 */
-  uint8_t snapshot_valid;
 
-  snapshot_valid = BoardAdc_GetSnapshot(&snapshot, &sequence);
-
-  if ((snapshot_valid != 0U) && (sequence != voltage_source.sequence)) {
-    /* 仅接受完整快照，主循环不直接逐相改写控制中断正在使用的状态。 */
-    foc.state.u_abc_measured.a = snapshot.phase_u_voltage;
-    foc.state.u_abc_measured.b = snapshot.phase_v_voltage;
-    foc.state.u_abc_measured.c = snapshot.phase_w_voltage;
-    FOC_Clarke(&foc.state.u_abc_measured, &foc.state.u_alpha_beta_measured);
-    voltage_source.sequence = sequence;
-    voltage_source.stale_count = 0U;
-  } else if (voltage_source.stale_count < UINT32_MAX) {
-    voltage_source.stale_count++;
-  }
-
-  snapshot_valid =
-      (voltage_source.stale_count <= MOTOR_APP_PHASE_VOLTAGE_STALE_COUNT)
-          ? 1U
-          : 0U;
-
-  /* 三端电压均为对地电压；完整Clarke变换会消去三相共有的零序分量。 */
+  /* 三端电压均为对地电压；Clarke变换会消去三相共有的零序分量。 */
   input->measured_u_alpha = foc.state.u_alpha_beta_measured.alpha;
   input->measured_u_beta = foc.state.u_alpha_beta_measured.beta;
 
   /* 标量fabsf可直接生成FPU的VABS指令，无需调用面向数组的arm_abs_f32。 */
   speed_abs_rpm = fabsf(foc.observer.state.speed_rpm);
 
-  if (snapshot_valid == 0U) {
-    voltage_source.measured_selected = 0U;
-  } else if (speed_abs_rpm >= MOTOR_APP_CALCULATED_VOLTAGE_ENTER_RPM) {
+  if (speed_abs_rpm >= MOTOR_APP_CALCULATED_VOLTAGE_ENTER_RPM) {
     voltage_source.measured_selected = 0U;
   } else if (speed_abs_rpm <= MOTOR_APP_MEASURED_VOLTAGE_RETURN_RPM) {
     voltage_source.measured_selected = 1U;
@@ -593,11 +561,8 @@ void MotorApp_Process(void) {
   /* 优先解析命令，避免规则组的轮询等待增加启停请求延迟。 */
   DebugConsole_Process();
   /*
-   * 轮询 ADC 规则组，采集母线电压及三相端电压。
-   * 采样成功后更新 FOC 使用的母线电压。
-   *
-   * 规则组采用软件触发，与 25 kHz PWM/电流采样不同步，
-   * 主要用于母线电压监测以及低速时的端电压观测。
+   * 轮询ADC规则组，仅采集母线电压和MCU温度。
+   * U/V/W三相端电压已进入TIM1同步Injected序列，不再从主循环规则组读取。
    */
   if (BoardAdc_Update() == HAL_OK) {
     foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
@@ -616,9 +581,9 @@ void MotorApp_Process(void) {
 }
 /**
  * @brief 注入转换完成后的实时入口，只有ADC1回调执行完整控制流程。
- * ADC1 rank1/rank2对应U/W，ADC2 rank1对应V；ADC1的两路顺序转换，
- * 三相并非严格同时采样。ADC2不打开注入中断，控制入口仅由ADC1的
- * 注入序列结束JEOS产生，因此读到JDR2时本拍的两个Rank都已完成。
+ * ADC1依次采Ia、Ic、U端电压、W端电压，ADC2依次采Ib、V端电压；
+ * 两个ADC由同一个TIM1 TRGO触发。ADC2不打开注入中断，控制入口仅由
+ * ADC1四个Injected Rank全部完成后的JEOS产生，此时两路ADC结果均已就绪。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   /* 校准计数器只在ADC注入中断上下文中递增，达到样本数后锁定零偏。 */
@@ -629,6 +594,10 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   uint16_t adc_a;
   uint16_t adc_b;
   uint16_t adc_c;
+  /* 三相端电压Injected原始码：ADC1 JDR3/JDR4为U/W，ADC2 JDR2为V。 */
+  uint16_t phase_u_raw;
+  uint16_t phase_v_raw;
+  uint16_t phase_w_raw;
 
   if ((hadc == NULL) || (hadc->Instance != ADC1)) {
     return;
@@ -675,6 +644,22 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
 
   FOC_Get_Iabc(&foc, adc_a, adc_b, adc_c);
   FOC_Clarke(&foc.state.i_abc, &foc.state.i_alpha_beta);
+
+  /*
+   * 端电压与电流来自同一次TIM1触发：
+   * ADC2的V相在第二个Rank完成，ADC1随后完成U/W两个Rank并产生JEOS。
+   * 三路均使用板上100kΩ/5.1kΩ分压比例恢复为端子对地实际电压。
+   */
+  phase_u_raw = (uint16_t)ADC1->JDR3;
+  phase_v_raw = (uint16_t)ADC2->JDR2;
+  phase_w_raw = (uint16_t)ADC1->JDR4;
+  foc.state.u_abc_measured.a =
+      (float)phase_u_raw * BOARD_ADC_COUNT_TO_VOLTAGE;
+  foc.state.u_abc_measured.b =
+      (float)phase_v_raw * BOARD_ADC_COUNT_TO_VOLTAGE;
+  foc.state.u_abc_measured.c =
+      (float)phase_w_raw * BOARD_ADC_COUNT_TO_VOLTAGE;
+  FOC_Clarke(&foc.state.u_abc_measured, &foc.state.u_alpha_beta_measured);
 
   /* 先用上次计算的占空比与本拍电流观测，再计算新的电压命令。 */
   observer_input.duty_a = foc.svpwm.duty_a;
