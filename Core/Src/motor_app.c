@@ -985,19 +985,25 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   MotorApp_UpdateObserverVoltage(&observer_input);
 
   /*
-   * 控制顺序固定为：推进状态内部量 -> 仲裁参考 -> 执行电流环 -> 写PWM
-   * -> 提交状态切换。切换放在最后，保证边界拍仍使用原状态的控制量。
+   * 只有主动控制状态才推进状态机、执行电流环并写入功率PWM比较值。
+   * IDLE下必须完全跳过：否则电流PI会在关桥期间积分饱和，下一次run进入ALIGN时
+   * 从饱和积分起步，造成启动电流冲击。
    */
-  MotorApp_AdvanceStateMachine(&observer_input);
-  MotorApp_ResolveControlReference();
-  MotorApp_RunCurrentLoop(&motor_control);
+  if (MotorApp_IsControlState(foc_motor_state) != 0U) {
+    /*
+     * 控制顺序固定为：推进状态内部量 -> 仲裁参考 -> 执行电流环 -> 写PWM
+     * -> 提交状态切换。切换放在最后，保证边界拍仍使用原状态的控制量。
+     */
+    MotorApp_AdvanceStateMachine(&observer_input);
+    MotorApp_ResolveControlReference();
+    MotorApp_RunCurrentLoop(&motor_control);
 
-  /* 只有主动控制状态允许写入新的功率PWM比较值。 */
-  TIM1->CCR1 = foc.svpwm.ccr_a;
-  TIM1->CCR2 = foc.svpwm.ccr_b;
-  TIM1->CCR3 = foc.svpwm.ccr_c;
+    TIM1->CCR1 = foc.svpwm.ccr_a;
+    TIM1->CCR2 = foc.svpwm.ccr_b;
+    TIM1->CCR3 = foc.svpwm.ccr_c;
 
-  MotorApp_UpdateStateTransition();
+    MotorApp_UpdateStateTransition();
+  }
 
   /* 高频更新估算值，供低频CAN反馈使用；IDLE时函数会同步清零。 */
   FOC_UpdateBusCurrentEstimate(&foc);
