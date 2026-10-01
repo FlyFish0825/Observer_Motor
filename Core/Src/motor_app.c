@@ -76,7 +76,14 @@
 #define MOTOR_APP_OBSERVER_READY_SPAN_RAD 1.04719755f      /* 至少覆盖60°电角度 */
 #define MOTOR_APP_OBSERVER_READY_MAX_ANGLE_STEP 0.35f      /* 单拍角度跳变上限，rad */
 #define MOTOR_APP_OBSERVER_READY_MAX_SPEED_STEP 100.0f     /* 单拍转速跳变上限，rpm */
-#define MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE 1.57079633f/* I/F与观测角允许角差，90° */
+/*
+ * I/F与观测角的允许角差，即允许的负载角delta。
+ * I/F把电流矢量压在虚拟坐标的q轴上，转子滞后delta，因此实际转矩为
+ * Kt*I*cos(delta)；接管后坐标对到转子，转矩变为Kt*I。取60°意为仍保留
+ * 50%转矩裕量：delta接近90°时cos(delta)→0，说明I/F已接近失步，此时接管
+ * 会造成数倍转矩阶跃，必须判为不可信。
+ */
+#define MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE 1.04719755f/* 60° */
 #define MOTOR_APP_OBSERVER_READY_MAX_ID_A 0.8f             /* 电流跟踪：|Id|上限，A */
 #define MOTOR_APP_OBSERVER_READY_SUSTAIN_MS 2U             /* "持续失跟/饱和"去抖时间 */
 
