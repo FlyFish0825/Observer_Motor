@@ -392,7 +392,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
   control->id_ref = 0.0f;
   control->iq_ref = 0.20f;
 
-  /* Step 1：建立统一控制参考入口，初期内容与原始变量保持一致。 */
+  /* 上电默认仲裁结果：电流参考直接取命令值，速度环使能。 */
   control->reference.theta_ctrl = 0.0f;
   control->reference.id_ref = control->id_ref;
   control->reference.iq_ref = control->iq_ref;
@@ -448,6 +448,20 @@ void FOC_Control_Reset(FOC_Control_t *control) {
   control->voltage_limit = 0.0f;
 }
 
+/* 提交本周期仲裁结果；reference是控制器的唯一参考入口。 */
+void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
+                                 float id_ref, float iq_ref,
+                                 uint8_t speed_loop_enable) {
+  if (control == NULL) {
+    return;
+  }
+
+  control->reference.theta_ctrl = theta_ctrl;
+  control->reference.id_ref = id_ref;
+  control->reference.iq_ref = iq_ref;
+  control->reference.speed_loop_enable = (speed_loop_enable != 0U) ? 1U : 0U;
+}
+
 /* 执行一次电流环控制，并按分频条件更新速度环输出。 */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
                      float iq_feedback, float speed_feedback_rpm,
@@ -475,17 +489,13 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
   control->iq_feedback = iq_feedback;
   control->speed_feedback_rpm = speed_feedback_rpm;
 
-  /* Step 1：当前仍由原有速度/电流命令产生参考，保留唯一仲裁出口。 */
-  control->reference.id_ref = control->id_ref;
-  control->reference.iq_ref = control->iq_ref;
-  control->reference.speed_loop_enable =
-      (control->speed_loop_enable != 0U) ? 1U : 0U;
-
-  speed_enabled = control->reference.speed_loop_enable;
+  /* 仲裁结果由应用层在调用本函数前提交，这里只读取并规范化使能标志。 */
+  speed_enabled = (control->reference.speed_loop_enable != 0U) ? 1U : 0U;
 
   /*
-   * 自动识别串口或代码直接修改speed_loop_enable的情况，
-   * 并完成无扰模式切换。
+   * 仲裁后的使能状态发生跳变时执行无扰模式切换：
+   * 进入速度模式前按当前有效Iq预装速度PI，退出速度模式时把速度环输出
+   * 保存回直接Iq命令。
    */
   if (speed_enabled != control->speed_loop_enable_last) {
     control->speed_loop_counter = 0U;
@@ -534,7 +544,8 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
           speed_feedback_rpm);
     }
   } else {
-    control->iq_ref_active = control->iq_ref;
+    /* 电流模式：直接用仲裁后的Iq参考，速度PI不参与输出。 */
+    control->iq_ref_active = control->reference.iq_ref;
   }
 
   /*
@@ -553,10 +564,11 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
    * 优先保证d轴电流调节，再把圆形电压矢量中剩余的幅值分配给q轴。
    * 两个PI直接使用最终可实现的限幅，饱和时条件积分能够及时停止，
    * 不再依赖SVPWM末端缩放来掩盖固定正负20 V造成的积分饱和。
+   * dq参考分别取仲裁结果的id_ref和速度环/电流模式产生的iq_ref_active。
    */
   PI_Controller_SetLimits(&control->id_pi, -voltage_limit, voltage_limit);
   control->ud_output =
-      PI_Controller_Run(&control->id_pi, control->id_ref, id_feedback);
+      PI_Controller_Run(&control->id_pi, control->reference.id_ref, id_feedback);
 
   uq_limit_squared = voltage_limit * voltage_limit -
                      control->ud_output * control->ud_output;

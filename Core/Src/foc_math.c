@@ -19,8 +19,8 @@
  */
 
 FOC_Handle_t foc = {0}; /* 全局 FOC 运行状态、采样值和观测器实例。 */
-FOC_SIN_COS_t foc_sin_cos = {0}; /* FOC 角度对应的正余弦缓存。 */
-FOC_SIN_COS_t observer_sin_cos = {0}; /* 观测器角度对应的正余弦缓存。 */
+FOC_SIN_COS_t foc_sin_cos = {0}; /* 控制角对应的正余弦缓存。 */
+FOC_SIN_COS_t observer_sin_cos = {0}; /* 观测器PLL角对应的正余弦缓存。 */
 FOC_Motor_State_t foc_motor_state = FOC_MOTOR_IDLE; /* 电机当前运行状态。 */
 
 /* 95%占空比对应的电流重构阈值，在初始化时计算一次。 */

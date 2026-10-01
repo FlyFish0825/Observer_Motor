@@ -1,11 +1,18 @@
 /**
  * @file motor_app.c
- * @brief 电机应用调度：初始化、零偏校准、闭环控制和波形发送。
+ * @brief 电机应用层：启动时序状态机、控制参考仲裁、端电压融合和调试接口。
  *
- * 主循环负责规则组电压采样、启动请求和串口命令；ADC1注入完成中断
- * 负责电流换算、磁链观测、双闭环计算及PWM更新。控制周期按40us配置。
- * voltage_source由控制中断维护；Iabc与三相端电压均由TIM1同步Injected采样，
- * 规则组仅负责母线电压和温度等慢速量。
+ * 分层约定：
+ * - 实时层：ADC1注入中断MotorApp_OnInjectedConversion()按40us运行，负责电流
+ *   换算、磁链观测、状态机推进、电流环计算和PWM比较值写入。
+ * - 非实时层：主循环MotorApp_Process()负责规则组母线/温度采样、串口命令解析和
+ *   run启停请求；两层之间只通过volatile标志和控制器命令字段交互。
+ * - 状态机只产生控制参考FOC_Control_Reference_t，公共的Park/逆Park/电流PI/
+ *   SVPWM统一由MotorApp_RunCurrentLoop()执行，不随状态复制实现。
+ *
+ * 启动路径：IDLE -> ALIGN(固定电角度定位) -> OPEN_LOOP_IF(虚拟电角度拖动)
+ * -> CLOSED_LOOP。I/F期间只做观测器可信判断，控制角接管属于后续步骤。
+ * 电流与三相端电压都由TIM1同步Injected采样，规则组只保留母线电压和温度。
  */
 #include "motor_app.h"
 
@@ -13,7 +20,6 @@
 #include "board_adc.h"
 #include "bsp_dwt.h"
 #include "controller.h"
-#include "cordic.h"
 #include "debug_console.h"
 #include "foc_math.h"
 #include "main.h"
@@ -25,39 +31,79 @@
 #include <stddef.h>
 #include <stdint.h>
 
+/* ======================== 应用层参数 ======================== */
+
+/* ADC注入中断频率，与PWM载波频率一致；所有时间量都折算成该节拍的拍数。 */
+#define MOTOR_APP_CONTROL_HZ 25000U
+
+/* 毫秒折算为控制拍数：用于定位时长和可信判据的持续时间。 */
+#define MOTOR_APP_MS_TO_TICKS(ms) \
+  (((uint32_t)(ms) * MOTOR_APP_CONTROL_HZ) / 1000U)
+
 /*
- * 端电压RC：100kΩ / 5.1kΩ / 68nF，截止频率约482Hz。
- * 7极对电机在1200rpm时电频约140Hz，低速使用实测端电压。
+ * 端电压RC：100kΩ/5.1kΩ/68nF，截止频率约482Hz。
+ * 7极对电机在1200rpm时电频约140Hz，因此低速用实测端电压、高速切到占空比重构
+ * 电压；两个阈值之间构成迟滞区间，避免切换点附近反复抖动。
  */
 #define MOTOR_APP_CALCULATED_VOLTAGE_ENTER_RPM 1200.0f
 #define MOTOR_APP_MEASURED_VOLTAGE_RETURN_RPM   900.0f
 #define MOTOR_APP_VOLTAGE_BLEND_TIME_S            0.020f
 
-/* 上述阈值采用迟滞和渐变，防止速度在切换边界附近抖动电压来源。 */
+/* ALIGN：固定电角度只给定Id建立磁场；时长和电流都是待标定量。 */
+#define MOTOR_APP_ALIGN_TIME_MS 30U
+#define MOTOR_APP_ALIGN_ID_A 1.0f
 
+/* I/F：虚拟电角度按受限电角加速度爬升，只给定Iq。 */
+#define MOTOR_APP_IF_IQ_A 1.5f
+#define MOTOR_APP_IF_ACCEL_RAD_S2 200.0f    /* 电角加速度，rad/s^2 */
+#define MOTOR_APP_IF_MAX_SPEED_RAD_S 150.0f /* 拖动电角速度上限，rad/s */
+
+/* ObserverReady第一版判据：磁链有效、转速下限和初始化标志同时成立一段时间。 */
+#define MOTOR_APP_OBSERVER_READY_TIME_MS 5U
+#define MOTOR_APP_OBSERVER_READY_MIN_RPM 50.0f
+
+/* ======================== 应用层数据结构 ======================== */
+
+/* 实测/重构端电压融合状态：选择目标与渐变权重分开保存，切换过程逐拍渐变。 */
 typedef struct {
-  /* 选择目标与实际融合权重分开保存，使切换过程可以逐拍渐变。 */
-  volatile uint32_t measured_selected;
-  volatile float measured_weight;
+  volatile uint32_t measured_selected; /* 1=选定实测端电压，0=选定占空比重构 */
+  volatile float measured_weight;      /* 实测端电压在融合结果中的权重0~1 */
 } MotorApp_VoltageSource_t;
 
+/* 启动时序中间状态：只保存角度和计数，不参与电流环计算。 */
 typedef struct {
-  /* 小端float六通道，加4字节帧尾，总计28字节，直接交给DMA发送。 */
+  float align_angle;             /* 定位固定电角度，rad */
+  uint32_t align_count;          /* 已运行的定位拍数 */
+  float if_angle;                /* I/F虚拟电角度，rad */
+  float if_speed_rad_s;          /* I/F当前电角速度，rad/s */
+  float if_speed_target_rad_s;   /* I/F目标电角速度，rad/s */
+  float if_direction;            /* I/F拖动方向，+1或-1 */
+  uint16_t observer_ready_count; /* 可信判据连续成立的拍数 */
+  uint8_t observer_ready;        /* 1=观测器可信；当前只观察，不切换控制角 */
+} MotorApp_Startup_t;
+
+/* 小端float六通道加4字节帧尾，共28字节，直接交给DMA发送。 */
+typedef struct {
   float data[6];
   uint32_t tail;
 } MotorApp_JustFloatFrame_t;
 
-/* 应用层唯一的FOC控制器实例；调试控制台和CAN协议均通过它修改目标。 */
+/* ======================== 应用层状态变量 ======================== */
+
+/* 应用层唯一的FOC控制器实例；调试控制台和CAN协议都通过它修改外部命令。 */
 static FOC_Control_t motor_control;
 
+/* 端电压融合状态；由控制中断逐拍更新，启动流程只做复位。 */
 static MotorApp_VoltageSource_t voltage_source = {
     .measured_selected = 1U,
     .measured_weight = 1.0f,
 };
 
+/* 启动时序状态；由主循环启动流程初始化，由控制中断推进。 */
+static MotorApp_Startup_t startup = {0};
+
 /* DMA直接读取的波形帧，必须保持4字节对齐以满足外设访问要求。 */
-static MotorApp_JustFloatFrame_t just_float_frame
-    __attribute__((aligned(4)));
+static MotorApp_JustFloatFrame_t just_float_frame __attribute__((aligned(4)));
 /* JustFloat波形开关：非零时允许控制中断尝试提交诊断帧。 */
 static volatile uint32_t just_float_enabled = 1U;
 /* 串口set run 1请求启动，set run 0请求停止；上电默认不运行。 */
@@ -69,29 +115,13 @@ static volatile uint8_t motor_console_tx_active = 0U;
 /* ADC注入中断累计次数，仅用于状态诊断和校准进度观察。 */
 static volatile uint32_t motor_adc_irq_count = 0U;
 
-/* Step 3：静止定位参数，仅用于首次验证，不进入I/F。 */
-static float motor_align_angle = 0.0f;
-static uint32_t motor_align_count = 0U;
-/* Step 4：I/F开环启动参数，先采用低速验证，后续再标定。 */
-static float motor_if_angle = 0.0f;
-static float motor_if_speed_rad_s = 0.0f;
-static float motor_if_speed_target_rad_s = 20.0f;
-static float motor_if_direction = 1.0f;
-/* Step 5：观测器后台运行与可信判据，仅用于观察，不切换控制角。 */
-static uint8_t motor_observer_ready = 0U;
-static uint16_t motor_observer_ready_count = 0U;
-#define MOTOR_OBSERVER_READY_COUNT_MS 5U
-#define MOTOR_ALIGN_TIME_MS 30U
-#define MOTOR_ALIGN_ID_A 1.0f
-#define MOTOR_IF_IQ_A 1.5f
-#define MOTOR_IF_ACCEL_RAD_S2 200.0f
-#define MOTOR_IF_MAX_SPEED_RAD_S 150.0f
+/* ======================== 控制参考仲裁与电流环 ======================== */
 
 /**
  * @brief 判断当前状态是否允许进入FOC实时控制。
  *
- * Step 2仅建立统一入口；当前实际可运行状态仍只有CLOSED_LOOP。
- * 后续ALIGN、I/F和反转状态接入时只需扩展此处，不再修改ADC ISR主结构。
+ * 这里是"主动控制状态"的唯一判定点：后续新增状态只需扩展本函数，
+ * 不再修改ADC中断的主结构。
  */
 static uint8_t MotorApp_IsControlState(FOC_Motor_State_t state) {
   return ((state == FOC_MOTOR_CLOSED_LOOP) ||
@@ -99,18 +129,218 @@ static uint8_t MotorApp_IsControlState(FOC_Motor_State_t state) {
           (state == FOC_MOTOR_OPEN_LOOP_IF)) ? 1U : 0U;
 }
 
-/** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
-FOC_Control_t *MotorApp_GetControl(void) {
-  return &motor_control;
-}
+/**
+ * @brief 按当前状态仲裁本拍的控制角和dq电流参考。
+ *
+ * 唯一规则：状态只写参考，不写控制器内部状态。
+ * - ALIGN：固定电角度，只给Id建立磁场。
+ * - OPEN_LOOP_IF：虚拟电角度，只给Iq拖动。
+ * - CLOSED_LOOP：观测器磁链角，参考直接取外部命令。
+ */
+static void MotorApp_ResolveControlReference(void) {
+  switch (foc_motor_state) {
+  case FOC_MOTOR_ALIGN:
+    FOC_Control_SubmitReference(&motor_control, startup.align_angle,
+                                MOTOR_APP_ALIGN_ID_A, 0.0f, 0U);
+    break;
 
-/** @brief 写入运行请求，实际启停仍由现有MotorApp控制节拍执行。 */
-void MotorApp_RequestRun(uint8_t run) {
-  motor_run_requested = (run != 0U) ? 1U : 0U;
+  case FOC_MOTOR_OPEN_LOOP_IF:
+    FOC_Control_SubmitReference(&motor_control, startup.if_angle, 0.0f,
+                                MOTOR_APP_IF_IQ_A, 0U);
+    break;
+
+  case FOC_MOTOR_CLOSED_LOOP:
+    /* 外部阶跃先复制到斜坡输入，实际限速由控制器内部的速度斜坡完成。 */
+    motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
+    FOC_Control_SubmitReference(
+        &motor_control, foc.observer.state.phase_raw, motor_control.id_ref,
+        motor_control.iq_ref,
+        (uint8_t)((motor_control.speed_loop_enable != 0U) ? 1U : 0U));
+    break;
+
+  default:
+    /* IDLE在进入中断主体时已被拦截，不会到达这里。 */
+    break;
+  }
 }
 
 /**
+ * @brief 公共电流环执行体：Park -> 电流PI -> 逆Park -> 逆Clarke -> SVPWM。
+ *
+ * 角度和电流参考全部取自控制器内的仲裁结果，所有运行状态共用这一条路径，
+ * 状态之间的差别只体现在MotorApp_ResolveControlReference()给出的参考上。
+ */
+static void MotorApp_RunCurrentLoop(FOC_Control_t *control) {
+  /* 控制角先做单步归一化，再交给CORDIC求正余弦。 */
+  float theta_ctrl;
+  uint32_t theta_q31;
+
+  theta_ctrl = FOC_WrapToPiFast(control->reference.theta_ctrl);
+  theta_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(theta_ctrl);
+
+  CORDIC_SinCos_FastF32((int32_t)theta_q31, &foc_sin_cos.sin,
+                        &foc_sin_cos.cos);
+
+  FOC_Park(&foc.state.i_alpha_beta, &foc_sin_cos, &foc.state.i_dq);
+
+  FOC_Control_Run(control, foc.state.i_dq.d, foc.state.i_dq.q,
+                  foc.observer.state.speed_rpm, foc.state.vbus,
+                  &foc.state.u_dq.d, &foc.state.u_dq.q);
+
+  FOC_InvPark(&foc.state.u_dq, &foc_sin_cos, &foc.state.u_alpha_beta);
+  FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
+  (void)FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer,
+                      &foc.svpwm);
+}
+
+/* ======================== 启动时序状态机 ======================== */
+
+/**
+ * @brief I/F虚拟角积分：电角速度受限爬升，再积分成虚拟电角度。
+ */
+static void MotorApp_UpdateIfAngle(void) {
+  if (startup.if_speed_rad_s < startup.if_speed_target_rad_s) {
+    startup.if_speed_rad_s += MOTOR_APP_IF_ACCEL_RAD_S2 * foc.timer.Ts;
+    if (startup.if_speed_rad_s > startup.if_speed_target_rad_s) {
+      startup.if_speed_rad_s = startup.if_speed_target_rad_s;
+    }
+  }
+
+  startup.if_angle += startup.if_speed_rad_s * startup.if_direction * foc.timer.Ts;
+  startup.if_angle = FOC_WrapToPiFast(startup.if_angle);
+}
+
+/**
+ * @brief 第一版ObserverReady判据，只做判断，不切换控制角。
+ *
+ * 判据刻意只使用已有观测量：磁链幅值达到PLL可信下限、转速超过可观测下限、
+ * 观测器已初始化。三者连续成立MOTOR_APP_OBSERVER_READY_TIME_MS后才置位。
+ * 后续接管步骤需要在此基础上再补充相位残差、电流跟踪和饱和判据。
+ */
+static void MotorApp_UpdateObserverReady(void) {
+  /* ready_ticks是判据连续成立所需的拍数。 */
+  uint16_t ready_ticks;
+  /* speed_abs_rpm是观测器转速绝对值，正反转共用同一门槛。 */
+  float speed_abs_rpm;
+
+  ready_ticks = (uint16_t)MOTOR_APP_MS_TO_TICKS(MOTOR_APP_OBSERVER_READY_TIME_MS);
+  speed_abs_rpm = fabsf(foc.observer.state.speed_rpm);
+
+  if ((foc.observer.state.psi_mag > foc.observer.config.psi_min) &&
+      (speed_abs_rpm > MOTOR_APP_OBSERVER_READY_MIN_RPM) &&
+      (foc.observer.state.initialized != 0U)) {
+    if (startup.observer_ready_count < ready_ticks) {
+      startup.observer_ready_count++;
+    }
+    if (startup.observer_ready_count >= ready_ticks) {
+      startup.observer_ready = 1U;
+    }
+  } else {
+    startup.observer_ready_count = 0U;
+    startup.observer_ready = 0U;
+  }
+}
+
+/**
+ * @brief 推进当前状态的内部量：观测器、虚拟角和定位计数。
+ *
+ * 本函数只更新状态自身的量，不产生控制参考，也不改变状态编号；
+ * 状态切换在控制量写入之后由MotorApp_UpdateStateTransition()提交。
+ */
+static void MotorApp_AdvanceStateMachine(const Observer_Input_t *input) {
+  switch (foc_motor_state) {
+  case FOC_MOTOR_ALIGN:
+    /* 定位段不运行观测器，只累加定位时间。 */
+    startup.align_count++;
+    break;
+
+  case FOC_MOTOR_OPEN_LOOP_IF:
+    /* I/F期间观测器只做后台可信度判断，不参与控制角。 */
+    Observer_Run(&foc.observer, input);
+    MotorApp_UpdateObserverReady();
+    MotorApp_UpdateIfAngle();
+    break;
+
+  case FOC_MOTOR_CLOSED_LOOP:
+    /* 闭环使用本拍刚更新的观测器状态，控制角与速度反馈同拍。 */
+    Observer_Run(&foc.observer, input);
+    break;
+
+  default:
+    /* IDLE在进入中断主体时已被拦截，不会到达这里。 */
+    break;
+  }
+}
+
+/**
+ * @brief 提交本拍结束时的状态切换。
+ *
+ * @note 必须在控制参考和PWM比较值都写入之后调用：切换拍仍然使用原状态的
+ *       控制角和参考，新状态从下一拍生效，避免边界拍出现参考跳变。
+ */
+static void MotorApp_UpdateStateTransition(void) {
+  if ((foc_motor_state == FOC_MOTOR_ALIGN) &&
+      (startup.align_count >= MOTOR_APP_MS_TO_TICKS(MOTOR_APP_ALIGN_TIME_MS))) {
+    /* 定位角作为虚拟角初值，I/F从零速重新加速。 */
+    startup.if_angle = startup.align_angle;
+    startup.if_speed_rad_s = 0.0f;
+    foc_motor_state = FOC_MOTOR_OPEN_LOOP_IF;
+  }
+}
+
+/* ======================== 端电压融合 ======================== */
+
+/**
+ * @brief 每个控制周期更新观测器电压输入和实测权重。
+ *
+ * 三相端电压与TIM1同步采样，本拍已在中断内完成Clarke变换；这里只做融合。
+ * 1200/900rpm构成迟滞区间，低速优先实测端电压，高速逐步切到PWM重构电压。
+ * 包括切换在内，实际权重都按20ms渐变，不会立即跳到目标值。
+ */
+static void MotorApp_UpdateObserverVoltage(Observer_Input_t *input) {
+  /* blend_step为本控制周期的权重增量。 */
+  float blend_step;
+  /* speed_abs_rpm用于按转速迟滞选择电压源，正反转共用阈值。 */
+  float speed_abs_rpm;
+
+  /* 三端电压均为对地电压；Clarke变换会消去三相共有的零序分量。 */
+  input->measured_u_alpha = foc.state.u_alpha_beta_measured.alpha;
+  input->measured_u_beta = foc.state.u_alpha_beta_measured.beta;
+
+  /* 标量fabsf可直接生成FPU的VABS指令，无需调用面向数组的arm_abs_f32。 */
+  speed_abs_rpm = fabsf(foc.observer.state.speed_rpm);
+
+  if (speed_abs_rpm >= MOTOR_APP_CALCULATED_VOLTAGE_ENTER_RPM) {
+    voltage_source.measured_selected = 0U;
+  } else if (speed_abs_rpm <= MOTOR_APP_MEASURED_VOLTAGE_RETURN_RPM) {
+    voltage_source.measured_selected = 1U;
+  }
+
+  blend_step = foc.timer.Ts / MOTOR_APP_VOLTAGE_BLEND_TIME_S;
+  if (blend_step > 1.0f) {
+    blend_step = 1.0f;
+  }
+
+  if (voltage_source.measured_selected != 0U) {
+    voltage_source.measured_weight += blend_step;
+    if (voltage_source.measured_weight > 1.0f) {
+      voltage_source.measured_weight = 1.0f;
+    }
+  } else {
+    voltage_source.measured_weight -= blend_step;
+    if (voltage_source.measured_weight < 0.0f) {
+      voltage_source.measured_weight = 0.0f;
+    }
+  }
+
+  input->measured_voltage_weight = voltage_source.measured_weight;
+}
+
+/* ======================== 功率桥安全状态与启动 ======================== */
+
+/**
  * @brief IDLE关闭功率输出，首次进入时清除闭环历史。
+ *
  * 直接关闭MOE立即撤销输出；停止六个功率通道使HAL通道状态回到READY。
  * 保留CH4及计数器，用于继续产生ADC触发。零偏与外部目标命令保留。
  */
@@ -135,6 +365,9 @@ static void MotorApp_ResetIdle(void) {
   foc.state.u_alpha_beta = (FOC_AlphaBeta_t){0};
   foc.state.u_abc = (FOC_ABC_t){0};
   foc.svpwm = (FOC_SVPWM_Output_t){0};
+  /* 观测器状态整体清零后重新初始化：电机和观测参数已在句柄内，这里只重置
+   * 积分状态、PLL和初始磁链，因此传回句柄自身的参数指针是安全的。
+   */
   foc.observer.state = (Observer_State_t){0};
   Observer_Init(&foc.observer, &foc.observer.motor, &foc.observer.config);
   voltage_source.measured_selected = 1U;
@@ -143,13 +376,68 @@ static void MotorApp_ResetIdle(void) {
   motor_idle_reset_done = 1U;
 }
 
+/**
+ * @brief 主循环响应run请求：初始化启动时序并打开功率桥。
+ *
+ * 目标速度和方向在本拍锁定：速度环内部参考同步到目标命令，避免启动瞬间经过
+ * 调速斜坡；I/F拖动方向与目标符号一致。速度环在整个ALIGN/I/F阶段由仲裁器
+ * 强制关闭，进入闭环后按键值使能。
+ */
+static void MotorApp_StartControlSequence(void) {
+  /* if_target_rad_s是本次I/F的目标电角速度。 */
+  float if_target_rad_s;
+  /* pole_pairs来自观测器句柄保存的电机参数，避免此处再写死极对数。 */
+  float pole_pairs;
+
+  /* 开启六路PWM前暂停CH4，避免中途插入一次控制中断。 */
+  if (HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    Error_Handler();
+  }
+
+  startup.align_angle = 0.0f;
+  startup.align_count = 0U;
+  startup.if_angle = startup.align_angle;
+  startup.if_speed_rad_s = 0.0f;
+  startup.observer_ready = 0U;
+  startup.observer_ready_count = 0U;
+
+  /* 机械转速换算为电角速度：omega_e = rpm * 2pi/60 * pole_pairs。 */
+  pole_pairs = (float)foc.observer.motor.pole_pairs;
+  startup.if_direction =
+      (motor_control.speed_command_rpm >= 0.0f) ? 1.0f : -1.0f;
+  if_target_rad_s = fabsf(motor_control.speed_command_rpm) *
+                    (CORDIC_TWO_PI_F / 60.0f) * pole_pairs;
+  if (if_target_rad_s > MOTOR_APP_IF_MAX_SPEED_RAD_S) {
+    if_target_rad_s = MOTOR_APP_IF_MAX_SPEED_RAD_S;
+  }
+  startup.if_speed_target_rad_s = if_target_rad_s;
+
+  motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
+  motor_control.speed_ref_active_rpm = motor_control.speed_ref_rpm;
+  motor_control.speed_loop_enable = 1U;
+  /* 模式切换历史对齐到"未使能"，使闭环第一拍必定执行一次无扰预加载。 */
+  motor_control.speed_loop_enable_last = 0U;
+
+  /* 每次启动均从实测端电压开始观测。 */
+  voltage_source.measured_selected = 1U;
+  voltage_source.measured_weight = 1.0f;
+
+  foc_motor_state = FOC_MOTOR_ALIGN;
+  motor_idle_reset_done = 0U;
+  FOC_PWM_Start();
+}
+
+/* ======================== 调试控制台 ======================== */
+
 /* 文本控制台的阻塞发送接口，由主循环命令处理调用。 */
 static void MotorApp_DebugConsoleTx(const uint8_t *data, uint16_t length) {
+  /* start记录等待发送器空闲的时间戳，用于限制阻塞时长。 */
+  uint32_t start;
+
   /* 先禁止中断发起下一帧，等待当前DMA帧完全发完，再发送文本。 */
   motor_console_tx_active = 1U;
   __DMB();
-  /* start记录等待发送器空闲的时间戳，用于限制阻塞时长。 */
-  uint32_t start = HAL_GetTick();
+  start = HAL_GetTick();
   while ((USART1->ISR & USART_ISR_TC) == 0U) {
     if ((HAL_GetTick() - start) >= 100U) {
       motor_console_tx_active = 0U;
@@ -160,10 +448,15 @@ static void MotorApp_DebugConsoleTx(const uint8_t *data, uint16_t length) {
   motor_console_tx_active = 0U;
 }
 
-/* 一条纯文本状态回复，用于区分命令接收、校准等待和功率启动。 */
+/**
+ * @brief 一条纯文本状态回复，用于区分命令接收、校准等待和功率启动。
+ *
+ * @note 分行输出避免超过控制台192字节缓冲；各读数用于诊断，不保证同一拍快照。
+ */
 static void MotorApp_DebugStatus(int argc, char *argv[]) {
   (void)argc;
   (void)argv;
+
   DebugConsole_Printf(
       "STATUS run=%lu state=%u cal=%u idle_reset=%u adc_irq=%lu ARR=%lu CCR4=%lu MOE=%u\r\n",
       (unsigned long)motor_run_requested, (unsigned int)foc_motor_state,
@@ -171,12 +464,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned int)motor_idle_reset_done, (unsigned long)motor_adc_irq_count,
       (unsigned long)TIM1->ARR, (unsigned long)TIM1->CCR4,
       (unsigned int)((TIM1->BDTR & TIM_BDTR_MOE) != 0U));
-  /* 分行输出避免超过控制台192字节缓冲；读数用于诊断，不保证同一拍快照。 */
   DebugConsole_Printf("DRIVE Vbus=%.3f cmd=%.1f ref=%.1f rpm=%.1f speed_en=%lu\r\n",
       (double)foc.state.vbus, (double)motor_control.speed_command_rpm,
       (double)motor_control.speed_ref_active_rpm,
       (double)foc.observer.state.speed_rpm,
-      (unsigned long)motor_control.speed_loop_enable);
+      (unsigned long)motor_control.reference.speed_loop_enable);
   DebugConsole_Printf("CURRENT Iq_ref=%.3f Id=%.3f Iq=%.3f Ud=%.3f Uq=%.3f Ulim=%.3f\r\n",
       (double)motor_control.iq_ref_active, (double)foc.state.i_dq.d,
       (double)foc.state.i_dq.q, (double)foc.state.u_dq.d,
@@ -191,17 +483,22 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (double)foc.state.u_abc_measured.a,
       (double)foc.state.u_abc_measured.b,
       (double)foc.state.u_abc_measured.c);
-  /* ADC原始注入结果诊断：确认V相在ADC2 JDR2进入软件前是否已经为0。 */
-  DebugConsole_Printf("ADC_V raw=%lu ADC2_JDR1=%lu JDR2=%lu\r\n",
-      (unsigned long)ADC2->JDR2,
-      (unsigned long)ADC2->JDR1,
-      (unsigned long)ADC2->JDR2);
+  /* ADC2注入组原始码诊断：JDR1为V相电流(Ib)，JDR2为V相端电压。
+   * JSQR的JL字段决定注入序列长度，用于区分"V相没有被转换(JDR2恒为0)"
+   * 和"V相实测确实为0V"两种情况。
+   */
+  DebugConsole_Printf("ADC JDR1=%lu JDR2=%lu JSQR=0x%08lX\r\n",
+      (unsigned long)ADC2->JDR1, (unsigned long)ADC2->JDR2,
+      (unsigned long)ADC2->JSQR);
 }
 
 /**
  * @brief 将命令名绑定到现有控制结构，避免另外维护一份参数副本。
  * 注册接口最后一个参数为只读标志；范围只约束控制台写入，
  * 不等同于控制器输出限幅。例如速度PI的Iq限幅仍由controller.h定义。
+ *
+ * @note id/iq/speed_en注册的是外部命令字段，实际的每拍参考由应用层仲裁后
+ *       写入motor_control.reference；status回复显示的是仲裁后的生效值。
  */
 static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
   /* success累积每个注册调用的结果，任意一项失败都会报告初始化失败。 */
@@ -246,6 +543,65 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
   return (success != 0U) ? HAL_OK : HAL_ERROR;
 }
 
+/* ======================== 波形输出 ======================== */
+
+/* 预先设置DMA外设地址和固定帧地址，控制中断只需更新内容及传输长度。 */
+static void MotorApp_JustFloatInit(void) {
+  /* STM32小端存储后依次为00 00 80 7F，即JustFloat帧尾。 */
+  just_float_frame.tail = 0x7F800000UL;
+  just_float_enabled = 1U;
+
+  CLEAR_BIT(USART1->CR3, USART_CR3_DMAT);
+  __HAL_DMA_DISABLE(&hdma_usart1_tx);
+  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
+  }
+
+  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
+                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
+
+  hdma_usart1_tx.Instance->CPAR = (uint32_t)&USART1->TDR;
+  hdma_usart1_tx.Instance->CMAR = (uint32_t)&just_float_frame;
+  hdma_usart1_tx.Instance->CNDTR = 0U;
+
+  SET_BIT(USART1->CR3, USART_CR3_DMAT);
+}
+
+/**
+ * @brief 尝试启动一帧波形发送，返回0表示已启动，-1表示串口仍忙。
+ * 检查TC后才修改共用帧，防止DMA尚未读完时覆盖内容。
+ * 忙时丢弃本拍数据，不等待整帧串口发送，因此波形帧率低于控制频率。
+ */
+static int MotorApp_SendJustFloat(float f0, float f1, float f2,
+                                  float f3, float f4, float f5) {
+  /* f0至f5依次对应三相电流、转速、电角度和母线电压。 */
+  if ((USART1->ISR & USART_ISR_TC) == 0U) {
+    return -1;
+  }
+
+  just_float_frame.data[0] = f0;
+  just_float_frame.data[1] = f1;
+  just_float_frame.data[2] = f2;
+  just_float_frame.data[3] = f3;
+  just_float_frame.data[4] = f4;
+  just_float_frame.data[5] = f5;
+
+  __HAL_DMA_DISABLE(&hdma_usart1_tx);
+  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
+  }
+
+  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
+                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
+  hdma_usart1_tx.Instance->CNDTR = sizeof(MotorApp_JustFloatFrame_t);
+  USART1->ICR = USART_ICR_TCCF;
+
+  __DMB();
+  __HAL_DMA_ENABLE(&hdma_usart1_tx);
+
+  return 0;
+}
+
+/* ======================== 模拟前端与功率级初始化 ======================== */
+
 /**
  * @brief 在功率桥未启动时校准运放和ADC的硬件偏差。
  * 运放启动后预留模拟电路稳定时间；这一步不代替后续三相电流零偏平均。
@@ -286,300 +642,19 @@ static HAL_StatusTypeDef MotorApp_CalibrateAnalogFrontEnd(void) {
   return HAL_OK;
 }
 
-/* 预先设置DMA外设地址和固定帧地址，控制中断只需更新内容及传输长度。 */
-static void MotorApp_JustFloatInit(void) {
-  /* STM32小端存储后依次为00 00 80 7F，即JustFloat帧尾。 */
-  just_float_frame.tail = 0x7F800000UL;
-  just_float_enabled = 1U;
-
-  CLEAR_BIT(USART1->CR3, USART_CR3_DMAT);
-  __HAL_DMA_DISABLE(&hdma_usart1_tx);
-  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
-  }
-
-  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
-                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
-
-  hdma_usart1_tx.Instance->CPAR = (uint32_t)&USART1->TDR;
-  hdma_usart1_tx.Instance->CMAR = (uint32_t)&just_float_frame;
-  hdma_usart1_tx.Instance->CNDTR = 0U;
-
-  SET_BIT(USART1->CR3, USART_CR3_DMAT);
-}
-
 /**
- * @brief 尝试启动一帧波形发送，返回0表示已启动，-1表示串口仍忙。
- * 检查TC后才修改共用帧，防止DMA尚未读完时覆盖内容。
- * 忙时丢弃本拍数据，不等待整帧串口发送，因此波形帧率低于控制频率。
- */
-static int MotorApp_SendJustFloat(float f0, float f1, float f2,
-                                  float f3, float f4, float f5) {
-  /* f0至f5依次对应电流、转速、角度和母线等诊断通道。 */
-  if ((USART1->ISR & USART_ISR_TC) == 0U) {
-    return -1;
-  }
-
-  just_float_frame.data[0] = f0;
-  just_float_frame.data[1] = f1;
-  just_float_frame.data[2] = f2;
-  just_float_frame.data[3] = f3;
-  just_float_frame.data[4] = f4;
-  just_float_frame.data[5] = f5;
-
-  __HAL_DMA_DISABLE(&hdma_usart1_tx);
-  while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
-  }
-
-  __HAL_DMA_CLEAR_FLAG(&hdma_usart1_tx,
-                       __HAL_DMA_GET_GI_FLAG_INDEX(&hdma_usart1_tx));
-  hdma_usart1_tx.Instance->CNDTR = sizeof(MotorApp_JustFloatFrame_t);
-  USART1->ICR = USART_ICR_TCCF;
-
-  __DMB();
-  __HAL_DMA_ENABLE(&hdma_usart1_tx);
-
-  return 0;
-}
-
-/**
- * @brief 主循环响应串口启动请求，零偏校准完成后开启观测器闭环。
- * 启动时将斜坡内部参考同步到目标速度；后续变速才经过斜坡。
- * 当前流程没有定位或开环拖动阶段，静止转子角度依赖观测器初始状态。
- */
-static void MotorApp_StartClosedLoop(void) {
-  /* 开启六路PWM前暂停CH4，避免中途插入一次控制中断。 */
-  if (HAL_TIM_PWM_Stop(&htim1, TIM_CHANNEL_4) != HAL_OK) {
-    Error_Handler();
-  }
-
-  motor_align_angle = 0.0f;
-  motor_align_count = 0U;
-  motor_if_angle = motor_align_angle;
-  motor_if_speed_rad_s = 0.0f;
-
-  /* I/F启动速度跟随目标命令，限制最大电角速度。 */
-  motor_if_direction = (motor_control.speed_command_rpm >= 0.0f) ? 1.0f : -1.0f;
-  motor_if_speed_target_rad_s = fabsf(motor_control.speed_command_rpm) *
-                                6.2831853f * 7.0f / 60.0f;
-  if (motor_if_speed_target_rad_s > MOTOR_IF_MAX_SPEED_RAD_S) {
-    motor_if_speed_target_rad_s = MOTOR_IF_MAX_SPEED_RAD_S;
-  }
-
-  motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
-  motor_control.speed_ref_active_rpm = motor_control.speed_ref_rpm;
-  motor_control.speed_loop_enable = 1U;
-  motor_control.speed_loop_enable_last = 0U;
-
-  /* 每次启动均从实测端电压开始观测。 */
-  voltage_source.measured_selected = 1U;
-  voltage_source.measured_weight = 1.0f;
-
-  foc_motor_state = FOC_MOTOR_ALIGN;
-  motor_idle_reset_done = 0U;
-  FOC_PWM_Start();
-}
-
-/**
- * @brief 每个控制周期更新观测器电压输入和实测权重。
- * 三相端电压已改为与TIM1同步的Injected采样，当前拍在ADC中断中完成Clarke变换；
- * 1200/900rpm构成迟滞区间，低速优先实测端电压，高速逐步切到PWM重构电压。
- * 包括切换在内，实际权重都按20ms渐变，不会立即跳到目标值。
- */
-static void MotorApp_UpdateObserverVoltage(Observer_Input_t *input) {
-  /* blend_step为本控制周期的权重增量。 */
-  float blend_step;
-  /* speed_abs_rpm用于按转速迟滞选择电压源，正反转共用阈值。 */
-  float speed_abs_rpm;
-
-  /* 三端电压均为对地电压；Clarke变换会消去三相共有的零序分量。 */
-  input->measured_u_alpha = foc.state.u_alpha_beta_measured.alpha;
-  input->measured_u_beta = foc.state.u_alpha_beta_measured.beta;
-
-  /* 标量fabsf可直接生成FPU的VABS指令，无需调用面向数组的arm_abs_f32。 */
-  speed_abs_rpm = fabsf(foc.observer.state.speed_rpm);
-
-  if (speed_abs_rpm >= MOTOR_APP_CALCULATED_VOLTAGE_ENTER_RPM) {
-    voltage_source.measured_selected = 0U;
-  } else if (speed_abs_rpm <= MOTOR_APP_MEASURED_VOLTAGE_RETURN_RPM) {
-    voltage_source.measured_selected = 1U;
-  }
-
-  blend_step = foc.timer.Ts / MOTOR_APP_VOLTAGE_BLEND_TIME_S;
-  if (blend_step > 1.0f) {
-    blend_step = 1.0f;
-  }
-
-  if (voltage_source.measured_selected != 0U) {
-    voltage_source.measured_weight += blend_step;
-    if (voltage_source.measured_weight > 1.0f) {
-      voltage_source.measured_weight = 1.0f;
-    }
-  } else {
-    voltage_source.measured_weight -= blend_step;
-    if (voltage_source.measured_weight < 0.0f) {
-      voltage_source.measured_weight = 0.0f;
-    }
-  }
-
-  input->measured_voltage_weight = voltage_source.measured_weight;
-}
-
-/**
- * @brief Step 3静止定位：固定电角度建立磁场，不启动速度环。
+ * @brief 强制将三相功率级的6路PWM控制引脚置为安全低电平
  *
- * 本步骤只验证定位链路，完成后暂不自动进入I/F。
- */
-static void MotorApp_RunAlign(void) {
-  uint32_t phase_q31;
-  float ud;
-  float uq;
-
-  phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(motor_align_angle);
-  CORDIC_SinCos_FastF32((int32_t)phase_q31,
-                        &observer_sin_cos.sin,
-                        &observer_sin_cos.cos);
-
-  FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos,
-           &foc.state.i_dq);
-
-  motor_control.speed_loop_enable = 0U;
-  motor_control.id_ref = MOTOR_ALIGN_ID_A;
-  motor_control.iq_ref = 0.0f;
-
-  FOC_Control_Run(&motor_control, foc.state.i_dq.d,
-                  foc.state.i_dq.q, 0.0f, foc.state.vbus,
-                  &ud, &uq);
-
-  foc.state.u_dq.d = ud;
-  foc.state.u_dq.q = uq;
-  FOC_InvPark(&foc.state.u_dq, &observer_sin_cos,
-              &foc.state.u_alpha_beta);
-  FOC_InvClarke(&foc.state.u_alpha_beta,
-                &foc.state.u_abc);
-  (void)FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus,
-                      &foc.timer, &foc.svpwm);
-
-  motor_align_count++;
-}
-
-/**
- * @brief Step 4 I/F开环拖动：使用虚拟电角度代替观测器角度。
+ * @note 该函数应在系统启动早期、TIM1和相关GPIO被配置为复用PWM功能之前调用，
+ *       防止MCU上电/复位过程中PWM引脚处于不确定状态而误导通MOSFET。
  *
- * 仅用于启动验证，不读取observer角度作为控制角。
- */
-static void MotorApp_UpdateObserverReady(void) {
-  float speed_abs;
-
-  speed_abs = fabsf(foc.observer.state.speed_rpm);
-
-  /* 第一版只判断观测器已经产生稳定状态，不参与控制角切换。 */
-  if ((foc.observer.state.psi_mag > foc.observer.config.psi_min) &&
-      (speed_abs > 50.0f) &&
-      (foc.observer.state.initialized != 0U)) {
-    if (motor_observer_ready_count < (MOTOR_OBSERVER_READY_COUNT_MS * 25U)) {
-      motor_observer_ready_count++;
-    }
-    if (motor_observer_ready_count >= (MOTOR_OBSERVER_READY_COUNT_MS * 25U)) {
-      motor_observer_ready = 1U;
-    }
-  } else {
-    motor_observer_ready_count = 0U;
-    motor_observer_ready = 0U;
-  }
-}
-
-static void MotorApp_RunIF(void) {
-  uint32_t phase_q31;
-  float ud;
-  float uq;
-
-  if (motor_if_speed_rad_s < motor_if_speed_target_rad_s) {
-    motor_if_speed_rad_s += MOTOR_IF_ACCEL_RAD_S2 * foc.timer.Ts;
-    if (motor_if_speed_rad_s > motor_if_speed_target_rad_s) {
-      motor_if_speed_rad_s = motor_if_speed_target_rad_s;
-    }
-  }
-
-  motor_if_angle += motor_if_speed_rad_s * motor_if_direction * foc.timer.Ts;
-  motor_if_angle = FOC_WrapToPiFast(motor_if_angle);
-
-  phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(motor_if_angle);
-  CORDIC_SinCos_FastF32((int32_t)phase_q31,
-                        &observer_sin_cos.sin,
-                        &observer_sin_cos.cos);
-
-  FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos,
-           &foc.state.i_dq);
-
-  motor_control.speed_loop_enable = 0U;
-  motor_control.id_ref = 0.0f;
-  motor_control.iq_ref = MOTOR_IF_IQ_A;
-
-  FOC_Control_Run(&motor_control, foc.state.i_dq.d,
-                  foc.state.i_dq.q, 0.0f, foc.state.vbus,
-                  &ud, &uq);
-
-  foc.state.u_dq.d = ud;
-  foc.state.u_dq.q = uq;
-  FOC_InvPark(&foc.state.u_dq, &observer_sin_cos,
-              &foc.state.u_alpha_beta);
-  FOC_InvClarke(&foc.state.u_alpha_beta,
-                &foc.state.u_abc);
-  (void)FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus,
-                      &foc.timer, &foc.svpwm);
-}
-
-/**
- * @brief 完成电流坐标变换、速度/电流PI以及电压到占空比的转换。
- * Park和逆Park共用本拍磁链原始电角度phase_raw；速度反馈取PLL估计值。
- * 这里生成下一次PWM比较值，实际寄存器写入在注入中断尾部统一执行。
- */
-static void MotorApp_RunClosedLoop(void) {
-  /* phase_control是用于本次Park/逆Park变换的电角度。 */
-  float phase_control;
-  /* CORDIC输入的Q31角度表示。 */
-  uint32_t phase_q31;
-
-  /* 外部阶跃先由控制器内部转换为20000rpm/s速度斜坡。 */
-  motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
-
-  phase_control = FOC_WrapToPiFast(foc.observer.state.phase_raw);
-  phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(phase_control);
-
-  CORDIC_SinCos_FastF32(phase_q31, &observer_sin_cos.sin,
-                        &observer_sin_cos.cos);
-
-  FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos, &foc.state.i_dq);
-
-  FOC_Control_Run(&motor_control, foc.state.i_dq.d, foc.state.i_dq.q,
-                  foc.observer.state.speed_rpm, foc.state.vbus,
-                  &foc.state.u_dq.d, &foc.state.u_dq.q);
-
-  FOC_InvPark(&foc.state.u_dq, &observer_sin_cos, &foc.state.u_alpha_beta);
-  FOC_InvClarke(&foc.state.u_alpha_beta, &foc.state.u_abc);
-  (void)FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus, &foc.timer,
-                      &foc.svpwm);
-}
-
-
-/**
- * @brief  强制将三相功率级的 6 路 PWM 控制引脚置为安全低电平
+ *       当前三相PWM引脚：
+ *         PA8  -> TIM1_CH1      PB13 -> TIM1_CH1N
+ *         PA9  -> TIM1_CH2      PB14 -> TIM1_CH2N
+ *         PA10 -> TIM1_CH3      PB15 -> TIM1_CH3N
  *
- * @note
- *  该函数应在系统启动早期、TIM1 和相关 GPIO 被配置为复用 PWM 功能之前调用。
- *  目的是防止 MCU 上电/复位过程中 PWM 引脚处于不确定状态，
- *  导致栅极驱动器误导通 MOSFET。
- *
- *  当前三相 PWM 引脚：
- *    PA8  -> TIM1_CH1
- *    PA9  -> TIM1_CH2
- *    PA10 -> TIM1_CH3
- *    PB13 -> TIM1_CH1N
- *    PB14 -> TIM1_CH2N
- *    PB15 -> TIM1_CH3N
- *
- *  执行完成后，6 路引脚均被配置为普通推挽输出，并保持低电平。
- *  后续由 CubeMX 生成的 GPIO/TIM 初始化代码重新配置为 TIM1 复用功能。
+ *       执行完成后6路引脚均为普通推挽输出并保持低电平，后续由CubeMX生成的
+ *       GPIO/TIM初始化重新配置为复用功能。
  */
 void MotorApp_ForcePowerStageSafe(void) {
   /* gpio复用同一结构体依次配置高低桥臂引脚。 */
@@ -603,36 +678,30 @@ void MotorApp_ForcePowerStageSafe(void) {
   HAL_GPIO_Init(GPIOB, &gpio);
 }
 
+/* ======================== 对外接口 ======================== */
 
+/** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
+FOC_Control_t *MotorApp_GetControl(void) {
+  return &motor_control;
+}
+
+/** @brief 写入运行请求，实际启停仍由MotorApp控制节拍执行。 */
+void MotorApp_RequestRun(uint8_t run) {
+  motor_run_requested = (run != 0U) ? 1U : 0U;
+}
 
 /**
- * @brief  初始化电机控制应用层
+ * @brief 初始化电机控制应用层
  *
  * @return HAL_OK    初始化成功
  * @return HAL_ERROR 任一步骤初始化失败
  *
- * @note
- * 初始化流程大致为：
+ * @note 前置条件：main已在MX_TIM1_Init之前调用FOC_Data_Init，完成板级参数初始化。
+ *       本函数依次完成DWT延时、CORDIC配置、波形输出、控制器、功率桥安全状态、
+ *       调试串口、模拟前端校准、母线初值和ADC注入组启动。
  *
- *  前置条件：main已在MX_TIM1_Init之前调用FOC_Data_Init，完成板级参数初始化。
- *
- *  1. 使用已初始化的 FOC 数据结构
- *  2. 初始化 DWT 微秒延时
- *  3. 配置 CORDIC 正余弦计算
- *  4. 初始化调试波形输出
- *  5. 初始化电机控制器
- *  6. 保持功率桥关闭
- *  7. 初始化调试串口及在线变量
- *  8. 校准模拟前端
- *  9. 获取母线电压、端电压初值
- * 10. 启动 ADC 注入组
- * 11. 启动 TIM1 CH4，产生 ADC 同步采样触发
- *
- * 此函数结束时：
- * - ADC 注入采样已经开始工作；
- * - TIM1 CH4 已经运行，用于产生电流采样触发；
- * - HAL启动CH4会置位MOE，但CH1~3及其互补通道尚未使能；
- * - 三相功率桥不会在本函数中直接开始输出 PWM。
+ *       函数返回时：ADC注入采样和TIM1 CH4触发已经工作；HAL启动CH4会置位MOE，
+ *       但CH1~3及其互补通道尚未使能，因此三相功率桥不会在本函数中开始输出。
  */
 HAL_StatusTypeDef MotorApp_Init(void) {
   if (DWT_Delay_Init() == 0U) {
@@ -694,25 +763,25 @@ HAL_StatusTypeDef MotorApp_Init(void) {
   return HAL_OK;
 }
 
-
-
 /**
  * @brief 电机应用层主循环处理函数
  *
- * @note
- * 该函数在 main() 的 while(1) 中循环调用，只处理不要求严格实时性的任务。
- * 规则组 ADC 轮询和串口命令解析可能产生等待或不确定执行时间，
- * 因此不放入 25 kHz 的电流环控制中断，避免影响 FOC 控制周期。
+ * @note 该函数在main()的while(1)中循环调用，只处理不要求严格实时性的任务。
+ *       规则组ADC轮询和串口命令解析可能产生等待或不确定执行时间，
+ *       因此不放入25kHz的电流环控制中断，避免影响FOC控制周期。
  */
 void MotorApp_Process(void) {
   /* 只发送一次READY，避免主循环高速运行时重复占用串口。 */
   static uint8_t ready_reported = 0U;
+
   if (ready_reported == 0U) {
     ready_reported = 1U;
     DebugConsole_Printf("READY: set run 1 / set run 0 / status\r\n");
   }
+
   /* 优先解析命令，避免规则组的轮询等待增加启停请求延迟。 */
   DebugConsole_Process();
+
   /*
    * 轮询ADC规则组，仅采集母线电压和MCU温度。
    * U/V/W三相端电压已进入TIM1同步Injected序列，不再从主循环规则组读取。
@@ -729,9 +798,10 @@ void MotorApp_Process(void) {
       (foc.calibration.calibrated != 0U) &&
       (motor_idle_reset_done != 0U) &&
       (foc_motor_state == FOC_MOTOR_IDLE)) {
-    MotorApp_StartClosedLoop();
+    MotorApp_StartControlSequence();
   }
 }
+
 /**
  * @brief 注入转换完成后的实时入口，只有ADC1回调执行完整控制流程。
  * ADC1依次采Ia、Ic、U端电压、W端电压，ADC2依次采Ib、V端电压；
@@ -763,8 +833,8 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   }
 
   /*
-   * Step 2：安全状态关闭功率桥，主动控制状态进入FOC执行路径。
-   * 当前只有CLOSED_LOOP实际启用，其余新增状态先保持安全退出。
+   * 安全状态关闭功率桥，主动控制状态进入FOC执行路径。
+   * 当前可运行状态为ALIGN、OPEN_LOOP_IF和CLOSED_LOOP，其余一律回到IDLE。
    */
   if (MotorApp_IsControlState(foc_motor_state) == 0U) {
     foc_motor_state = FOC_MOTOR_IDLE;
@@ -824,36 +894,22 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   observer_input.vbus = foc.state.vbus;
   observer_input.i_alpha = foc.state.i_alpha_beta.alpha;
   observer_input.i_beta = foc.state.i_alpha_beta.beta;
-
-  //选择观测器电压来源
   MotorApp_UpdateObserverVoltage(&observer_input);
-  if (foc_motor_state == FOC_MOTOR_ALIGN) {
-    MotorApp_RunAlign();
-    /* ALIGN保持30ms后进入I/F拖动。 */
-    if (motor_align_count >= (MOTOR_ALIGN_TIME_MS * 25U)) {
-      foc_motor_state = FOC_MOTOR_OPEN_LOOP_IF;
-      motor_if_angle = motor_align_angle;
-      motor_if_speed_rad_s = 0.0f;
-    }
-    TIM1->CCR1 = foc.svpwm.ccr_a;
-    TIM1->CCR2 = foc.svpwm.ccr_b;
-    TIM1->CCR3 = foc.svpwm.ccr_c;
-  } else if (foc_motor_state == FOC_MOTOR_OPEN_LOOP_IF) {
-    /* Step 5：I/F期间后台运行observer，只用于判断可信度，不影响控制角。 */
-    Observer_Run(&foc.observer, &observer_input);
-    MotorApp_UpdateObserverReady();
-    MotorApp_RunIF();
-    TIM1->CCR1 = foc.svpwm.ccr_a;
-    TIM1->CCR2 = foc.svpwm.ccr_b;
-    TIM1->CCR3 = foc.svpwm.ccr_c;
-  } else if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {
-    Observer_Run(&foc.observer, &observer_input);
-    MotorApp_RunClosedLoop();
-    /* 只有闭环状态允许写入新的功率PWM比较值。 */
-    TIM1->CCR1 = foc.svpwm.ccr_a;
-    TIM1->CCR2 = foc.svpwm.ccr_b;
-    TIM1->CCR3 = foc.svpwm.ccr_c;
-  }
+
+  /*
+   * 控制顺序固定为：推进状态内部量 -> 仲裁参考 -> 执行电流环 -> 写PWM
+   * -> 提交状态切换。切换放在最后，保证边界拍仍使用原状态的控制量。
+   */
+  MotorApp_AdvanceStateMachine(&observer_input);
+  MotorApp_ResolveControlReference();
+  MotorApp_RunCurrentLoop(&motor_control);
+
+  /* 只有主动控制状态允许写入新的功率PWM比较值。 */
+  TIM1->CCR1 = foc.svpwm.ccr_a;
+  TIM1->CCR2 = foc.svpwm.ccr_b;
+  TIM1->CCR3 = foc.svpwm.ccr_c;
+
+  MotorApp_UpdateStateTransition();
 
   /* 高频更新估算值，供低频CAN反馈使用；IDLE时函数会同步清零。 */
   FOC_UpdateBusCurrentEstimate(&foc);

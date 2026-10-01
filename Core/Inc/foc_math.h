@@ -84,16 +84,17 @@ typedef enum {
 /**
  * @brief 电机运行状态
  *
- * 控制中断内切换：安全状态关闭功率桥，主动控制状态允许执行FOC。
- * Step 2先扩展状态框架，不启用新增状态；后续ALIGN/I-F/反转流程复用此入口。
+ * 控制中断内切换，正常启动路径为：
+ * IDLE -> ALIGN -> OPEN_LOOP_IF -> CLOSED_LOOP。
+ * IDLE关闭功率桥，其余三个状态都由MotorApp_IsControlState判定为主动控制状态。
+ * 各状态只决定控制角和dq电流参考，公共的电流环与SVPWM统一由应用层执行。
  */
 typedef enum
 {
-    FOC_MOTOR_IDLE = 0,          /**< 空闲状态，功率桥关闭，仅保留ADC采样触发 */
-    FOC_MOTOR_CLOSED_LOOP,       /**< 闭环运行，执行观测器+双闭环+SVPWM */
-    FOC_MOTOR_ALIGN,             /**< 预留：转子定位状态 */
-    FOC_MOTOR_OPEN_LOOP_IF,      /**< 预留：I/F开环启动状态 */
-    FOC_MOTOR_OBSERVER_HANDOVER, /**< 预留：观测器接管状态 */
+    FOC_MOTOR_IDLE = 0,     /**< 空闲：功率桥关闭，仅保留ADC采样触发 */
+    FOC_MOTOR_CLOSED_LOOP,  /**< 闭环：观测器磁链角 + 电流/速度双闭环 */
+    FOC_MOTOR_ALIGN,        /**< 静止定位：固定电角度，只给定Id */
+    FOC_MOTOR_OPEN_LOOP_IF, /**< I/F开环拖动：虚拟电角度，只给定Iq */
 
 } FOC_Motor_State_t;
 
@@ -234,7 +235,9 @@ typedef struct {
 
 } FOC_Handle_t;
 
+/* 控制角正余弦缓存：每拍由应用层控制路径刷新，只服务于Park/逆Park。 */
 extern FOC_SIN_COS_t foc_sin_cos;
+/* 观测器PLL角正余弦缓存：只由observer.c使用，与上面的控制角缓存互不共用。 */
 extern FOC_SIN_COS_t observer_sin_cos;
 extern FOC_Handle_t foc;
 extern FOC_Motor_State_t foc_motor_state;

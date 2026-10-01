@@ -88,16 +88,21 @@ typedef struct {
 
 
 /**
- * @brief FOC控制参考仲裁结果。
+ * @brief FOC控制参考仲裁结果：一个控制周期的唯一控制目标。
  *
- * 后续启动、观测器接管和反转状态只允许生成参考，不直接修改控制器内部状态。
- * 当前阶段仅接入现有速度/电流参考，保持原闭环行为不变。
+ * 写入方与读取方约定：
+ * - 应用层每拍只提交一次（FOC_Control_SubmitReference），其它模块不写。
+ * - 控制器只读本结构，不再回读下面的外部命令字段。
+ * - 启动、观测器接管和反转状态不允许修改控制器内部状态，只能在本结构里
+ *   用状态自己的参考覆盖命令值。
+ *
+ * 控制角来源由状态机决定：ALIGN用固定定位角，I/F用虚拟角，闭环用观测器磁链角。
  */
 typedef struct {
-  float theta_ctrl;                 /* 当前控制角，后续由状态机仲裁。 */
-  float id_ref;                     /* 最终d轴电流参考。 */
-  float iq_ref;                     /* 最终q轴电流参考。 */
-  uint8_t speed_loop_enable;        /* 是否允许速度环产生Iq参考。 */
+  float theta_ctrl;          /* 本周期Park/逆Park使用的电角度，rad。 */
+  float id_ref;              /* 本周期d轴电流参考，A。 */
+  float iq_ref;              /* 本周期q轴电流参考，A。 */
+  uint8_t speed_loop_enable; /* 1=速度环产生Iq参考，0=直接使用iq_ref。 */
 } FOC_Control_Reference_t;
 
 /**
@@ -115,10 +120,10 @@ typedef struct {
   PI_Controller_t iq_pi;
   PI_Controller_t speed_pi;
 
-  /* 控制参考唯一入口。当前仅同步已有参考，后续状态机从这里接入。 */
+  /* 控制参考唯一入口：应用层仲裁后提交，控制器只读。 */
   FOC_Control_Reference_t reference;
 
-  /* 外部命令，可由串口实时修改。
+  /* 外部命令，可由串口实时修改；只作为仲裁输入，不直接进入PI。
    * id_ref/iq_ref单位A；speed_command_rpm为控制台目标，应用层复制给
    * speed_ref_rpm，控制器再生成speed_ref_active_rpm作为实际PI参考。
    */
@@ -253,6 +258,22 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time);
  * @brief 清空三个PI的运行状态，不修改Kp、Ki和命令值
  */
 void FOC_Control_Reset(FOC_Control_t *control);
+
+/**
+ * @brief 提交本周期的控制参考，是写入reference的唯一接口。
+ *
+ * 应用层状态机每拍调用一次：先按当前状态决定控制角和dq电流参考，
+ * 再交给FOC_Control_Run消费。控制器内部不再从外部命令字段推断参考。
+ *
+ * @param control           FOC总控制器指针。
+ * @param theta_ctrl        本周期控制电角度（rad）。
+ * @param id_ref            d轴电流参考（A）。
+ * @param iq_ref            q轴电流参考（A）。
+ * @param speed_loop_enable 0=电流模式直接使用iq_ref；非0=速度模式。
+ */
+void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
+                                 float id_ref, float iq_ref,
+                                 uint8_t speed_loop_enable);
 
 /**
  * @brief 每个电流环周期调用一次
