@@ -72,8 +72,14 @@ static volatile uint32_t motor_adc_irq_count = 0U;
 /* Step 3：静止定位参数，仅用于首次验证，不进入I/F。 */
 static float motor_align_angle = 0.0f;
 static uint32_t motor_align_count = 0U;
+/* Step 4：I/F开环启动参数，先采用低速验证，后续再标定。 */
+static float motor_if_angle = 0.0f;
+static float motor_if_speed_rad_s = 0.0f;
+static float motor_if_speed_target_rad_s = 20.0f;
 #define MOTOR_ALIGN_TIME_MS 30U
 #define MOTOR_ALIGN_ID_A 1.0f
+#define MOTOR_IF_IQ_A 1.5f
+#define MOTOR_IF_ACCEL_RAD_S2 200.0f
 
 /**
  * @brief 判断当前状态是否允许进入FOC实时控制。
@@ -83,7 +89,8 @@ static uint32_t motor_align_count = 0U;
  */
 static uint8_t MotorApp_IsControlState(FOC_Motor_State_t state) {
   return ((state == FOC_MOTOR_CLOSED_LOOP) ||
-          (state == FOC_MOTOR_ALIGN)) ? 1U : 0U;
+          (state == FOC_MOTOR_ALIGN) ||
+          (state == FOC_MOTOR_OPEN_LOOP_IF)) ? 1U : 0U;
 }
 
 /** @brief 返回应用层唯一的FOC控制器实例，供协议层更新目标。 */
@@ -336,6 +343,8 @@ static void MotorApp_StartClosedLoop(void) {
 
   motor_align_angle = 0.0f;
   motor_align_count = 0U;
+  motor_if_angle = motor_align_angle;
+  motor_if_speed_rad_s = 0.0f;
 
   motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
   motor_control.speed_ref_active_rpm = motor_control.speed_ref_rpm;
@@ -432,6 +441,52 @@ static void MotorApp_RunAlign(void) {
                       &foc.timer, &foc.svpwm);
 
   motor_align_count++;
+}
+
+/**
+ * @brief Step 4 I/F开环拖动：使用虚拟电角度代替观测器角度。
+ *
+ * 仅用于启动验证，不读取observer角度作为控制角。
+ */
+static void MotorApp_RunIF(void) {
+  uint32_t phase_q31;
+  float ud;
+  float uq;
+
+  if (motor_if_speed_rad_s < motor_if_speed_target_rad_s) {
+    motor_if_speed_rad_s += MOTOR_IF_ACCEL_RAD_S2 * foc.timer.Ts;
+    if (motor_if_speed_rad_s > motor_if_speed_target_rad_s) {
+      motor_if_speed_rad_s = motor_if_speed_target_rad_s;
+    }
+  }
+
+  motor_if_angle += motor_if_speed_rad_s * foc.timer.Ts;
+  motor_if_angle = FOC_WrapToPiFast(motor_if_angle);
+
+  phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(motor_if_angle);
+  CORDIC_SinCos_FastF32((int32_t)phase_q31,
+                        &observer_sin_cos.sin,
+                        &observer_sin_cos.cos);
+
+  FOC_Park(&foc.state.i_alpha_beta, &observer_sin_cos,
+           &foc.state.i_dq);
+
+  motor_control.speed_loop_enable = 0U;
+  motor_control.id_ref = 0.0f;
+  motor_control.iq_ref = MOTOR_IF_IQ_A;
+
+  FOC_Control_Run(&motor_control, foc.state.i_dq.d,
+                  foc.state.i_dq.q, 0.0f, foc.state.vbus,
+                  &ud, &uq);
+
+  foc.state.u_dq.d = ud;
+  foc.state.u_dq.q = uq;
+  FOC_InvPark(&foc.state.u_dq, &observer_sin_cos,
+              &foc.state.u_alpha_beta);
+  FOC_InvClarke(&foc.state.u_alpha_beta,
+                &foc.state.u_abc);
+  (void)FOC_SVPWM_Run(&foc.state.u_abc, foc.state.vbus,
+                      &foc.timer, &foc.svpwm);
 }
 
 /**
@@ -734,10 +789,21 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   MotorApp_UpdateObserverVoltage(&observer_input);
   if (foc_motor_state == FOC_MOTOR_ALIGN) {
     MotorApp_RunAlign();
+    /* ALIGN保持30ms后进入I/F拖动。 */
+    if (motor_align_count >= (MOTOR_ALIGN_TIME_MS * 25U)) {
+      foc_motor_state = FOC_MOTOR_OPEN_LOOP_IF;
+      motor_if_angle = motor_align_angle;
+      motor_if_speed_rad_s = 0.0f;
+    }
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
-  } else if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {
+  } else if (foc_motor_state == FOC_MOTOR_OPEN_LOOP_IF) {
+    MotorApp_RunIF();
+    TIM1->CCR1 = foc.svpwm.ccr_a;
+    TIM1->CCR2 = foc.svpwm.ccr_b;
+    TIM1->CCR3 = foc.svpwm.ccr_c;
+  } else if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {"origin":"llm
     Observer_Run(&foc.observer, &observer_input);
     MotorApp_RunClosedLoop();
     /* 只有闭环状态允许写入新的功率PWM比较值。 */
