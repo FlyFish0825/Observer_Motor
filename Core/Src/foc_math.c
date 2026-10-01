@@ -93,7 +93,14 @@ void FOC_Data_Init(void) {
        */
       .pll_kp = 400.0f,
       .pll_ki = 40000.0f,
-      .pll_omega_limit = 50000.0f
+      .pll_omega_limit = 50000.0f,
+
+      /*
+       * 上报速度低通截止频率：30Hz双极点低通(两级一阶级联)，
+       * 平滑CAN/VOFA速度显示。直流群延迟约10.6ms；
+       * 只作用于speed_rpm_f，判据与速度环用原始值。
+       */
+      .speed_filter_fc = 30.0f
   };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);

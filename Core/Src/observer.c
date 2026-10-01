@@ -2,12 +2,15 @@
  * @file observer.c
  * @brief 非线性磁链观测器与同步旋转坐标系PLL。
  * 电压/电流在静止alpha-beta坐标系中计算，磁链atan2输出电角度(rad)，
- * PLL输出电角速度(rad/s)，再换算机械转速(rpm)。输入每控制周期更新一次。
+ * PLL输出电角速度(rad/s)，再换算机械转速(rpm)。
+ * speed_rpm另经两级一阶低通级联得到上报值speed_rpm_f。
+ * 输入每控制周期更新一次。
  */
 #include "observer.h"
 #include "arm_math.h"
 #include "foc_math.h"
 #include <stddef.h>
+#include <math.h>
 
 /**
  * @brief 复制电机和观测参数，并将初始磁链设置在alpha轴正方向。
@@ -18,6 +21,8 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
                    const Observer_Config_t *config) {
 
   /* obs保存观测器运行时状态；motor和config提供本次电机的标定参数。 */
+  /* w为各级归一化角频率2*pi*fc*Ts。 */
+  float w;
 
   obs->motor.Rs = motor->Rs;
   obs->motor.Ls = motor->Ls;
@@ -31,6 +36,22 @@ void Observer_Init(Observer_Handle_t *obs, const Observer_MotorParam_t *motor,
   obs->config.pll_kp = config->pll_kp;
   obs->config.pll_ki = config->pll_ki;
   obs->config.pll_omega_limit = config->pll_omega_limit;
+  obs->config.speed_filter_fc = config->speed_filter_fc;
+
+  /*
+   * 速度上报滤波器：两级一阶低通级联，k<=1。
+   * fc<=0或Ts<=0时k=1，滤波器退化为直通，
+   * 此时speed_rpm_f始终等于speed_rpm。
+   */
+  obs->state.speed_rpm_f = 0.0f;
+  obs->state.speed_filter.y1 = 0.0f;
+
+  if ((config->speed_filter_fc > 0.0f) && (config->Ts > 0.0f)) {
+    w = 2.0f * FOC_PI * config->speed_filter_fc * config->Ts;
+    obs->state.speed_filter.k = w / (1.0f + w);
+  } else {
+    obs->state.speed_filter.k = 1.0f;
+  }
 
   /*
    * 初始磁链
@@ -279,6 +300,9 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
   /* 当前磁链幅值是否落在PLL允许的有效区间。 */
   uint8_t psi_valid;
 
+  /* speed_in是滤波器输入(本拍speed_rpm,磁链无效时为保持值)。 */
+  float speed_in;
+
   /*
    * 判断当前磁链幅值是否可信。psi_min/max只用于PLL更新资格判断，
    * 并不会钳住上面磁链积分器的状态，也不是整机启动完成的判据。
@@ -345,4 +369,22 @@ void Observer_PLL_Run(Observer_Handle_t *obs) {
    */
   obs->state.pll_phase =
       FOC_WrapToPiFast(obs->state.pll_phase + omega_e * obs->config.Ts);
+
+  /*
+   * 推进速度上报滤波器(两级一阶级联)：
+   *
+   *   y1 += k*(speed_rpm   - y1)
+   *   f  += k*(y1          - f  )   f即speed_rpm_f
+   *
+   * 每级直流增益结构性为1，稳态时speed_rpm_f与speed_rpm一致；
+   * 输入恒取本拍speed_rpm，磁链无效保持期间输出继续向保持值收敛。
+   */
+  speed_in = obs->state.speed_rpm;
+
+  obs->state.speed_filter.y1 +=
+      obs->state.speed_filter.k * (speed_in - obs->state.speed_filter.y1);
+
+  obs->state.speed_rpm_f +=
+      obs->state.speed_filter.k *
+      (obs->state.speed_filter.y1 - obs->state.speed_rpm_f);
 }

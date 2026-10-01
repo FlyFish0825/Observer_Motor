@@ -59,7 +59,36 @@ typedef struct {
   /* PLL输出电角速度限幅，单位rad/s */
   float pll_omega_limit;
 
+  /*
+   * 速度上报低通滤波截止频率，Hz；<=0时滤波器退化为直通。
+   * 只作用于上报值speed_rpm_f；启动判据和速度环仍使用原始speed_rpm。
+   */
+  float speed_filter_fc;
+
 } Observer_Config_t;
+
+/*
+ * 速度上报滤波器：两级一阶低通级联，等效双极点。
+ *
+ * 每级按 y += k*(x-y) 更新，直流增益结构性为1，且系数无近抵消，
+ * 稳态时speed_rpm_f与speed_rpm一致。
+ * 不用单节二阶巴特沃斯的原因：fc/Ts很小(30Hz/25kHz)时其分母
+ * 1+a1+a2≈5.7e-5，直接型结构的状态量化误差被放大约1.7万倍，
+ * 恒转速下会钉死在偏差十几rpm的假平衡点。
+ */
+typedef struct {
+
+  /*
+   * 每级融合系数 k = w/(1+w)，w = 2*pi*fc*Ts。
+   * 单级-3dB点在fc；级联后-6dB@fc、-40dB/dec。
+   * fc<=0或Ts<=0时k=1，滤波器退化为直通。
+   */
+  float k;
+
+  /* 第一节输出状态；第二节输出即speed_rpm_f。 */
+  float y1;
+
+} Observer_SpeedFilter_t;
 
 /*
  * 观测器输入
@@ -140,6 +169,15 @@ typedef struct {
   float omega_m;
   //机械转速  单位  rpm
   float speed_rpm;
+  //机械转速上报滤波值，单位rpm；由speed_filter对speed_rpm低通得到
+  float speed_rpm_f;
+
+  /*
+   * speed_rpm_f的滤波器状态。
+   * 磁链无效拍speed_rpm保持上一拍值，滤波器继续向该保持值收敛，
+   * 因此上报值不会冻结。
+   */
+  Observer_SpeedFilter_t speed_filter;
 
   /*
    * 磁链大小

@@ -241,7 +241,8 @@ static void MotorProtocol_SendNormalFeedback(void) {
   uint8_t flags = 0U;    /* 校准、速度环、SVPWM 限幅状态位。 */
 
   MotorProtocol_PutS16(&data[0],
-                       MotorProtocol_S16(foc.observer.state.speed_rpm, 1.0f));
+                       MotorProtocol_S16(foc.observer.state.speed_rpm_f,
+                                         1.0f));
   MotorProtocol_PutU16(&data[2],
                        MotorProtocol_U16(foc.state.ibus_filter,
                                          MOTOR_PROTOCOL_BUS_CURRENT_SCALE));
@@ -270,7 +271,8 @@ static void MotorProtocol_SendDebugFeedback(void) {
   uint8_t data[64] = {0}; /* CAN FD 调试帧，未使用的尾部保持为零。 */
 
   MotorProtocol_PutS16(&data[0],
-                       MotorProtocol_S16(foc.observer.state.speed_rpm, 1.0f));
+                       MotorProtocol_S16(foc.observer.state.speed_rpm_f,
+                                         1.0f));
   MotorProtocol_PutS16(&data[2],
                        MotorProtocol_S16(foc.observer.state.pll_omega_e, 1.0f));
   MotorProtocol_PutS16(&data[4], MotorProtocol_S16(foc.state.i_abc.a, 100.0f));

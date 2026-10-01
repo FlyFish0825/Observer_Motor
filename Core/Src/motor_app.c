@@ -180,9 +180,9 @@ typedef struct {
   uint32_t handover_ticks_total;
 } MotorApp_Startup_t;
 
-/* 小端float六通道加4字节帧尾，共28字节，直接交给DMA发送。 */
+/* 小端float七通道加4字节帧尾，共32字节，直接交给DMA发送。 */
 typedef struct {
-  float data[6];
+  float data[7];
   uint32_t tail;
 } MotorApp_JustFloatFrame_t;
 
@@ -810,10 +810,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned long)startup.observer_ready,
       (unsigned long)motor_ready_fail_mask,
       (unsigned long)motor_start_fail_reason);
-  DebugConsole_Printf("DRIVE Vbus=%.3f cmd=%.1f ref=%.1f rpm=%.1f speed_en=%lu\r\n",
+  DebugConsole_Printf("DRIVE Vbus=%.3f cmd=%.1f ref=%.1f rpm=%.1f rpm_f=%.1f speed_en=%lu\r\n",
       (double)foc.state.vbus, (double)motor_control.speed_command_rpm,
       (double)motor_control.speed_ref_active_rpm,
       (double)foc.observer.state.speed_rpm,
+      (double)foc.observer.state.speed_rpm_f,
       (unsigned long)motor_control.reference.speed_loop_enable);
   DebugConsole_Printf("CURRENT Iq_ref=%.3f Id=%.3f Iq=%.3f Ud=%.3f Uq=%.3f Ulim=%.3f\r\n",
       (double)motor_control.iq_ref_active, (double)foc.state.i_dq.d,
@@ -938,8 +939,8 @@ static void MotorApp_JustFloatInit(void) {
  * 忙时丢弃本拍数据，不等待整帧串口发送，因此波形帧率低于控制频率。
  */
 static int MotorApp_SendJustFloat(float f0, float f1, float f2,
-                                  float f3, float f4, float f5) {
-  /* f0至f5依次对应三相电流、转速、电角度和母线电压。 */
+                                  float f3, float f4, float f5, float f6) {
+  /* f0至f6依次对应三相电流、滤波转速、电角度、母线电压和原始转速。 */
   if ((USART1->ISR & USART_ISR_TC) == 0U) {
     return -1;
   }
@@ -950,6 +951,7 @@ static int MotorApp_SendJustFloat(float f0, float f1, float f2,
   just_float_frame.data[3] = f3;
   just_float_frame.data[4] = f4;
   just_float_frame.data[5] = f5;
+  just_float_frame.data[6] = f6;
 
   __HAL_DMA_DISABLE(&hdma_usart1_tx);
   while ((hdma_usart1_tx.Instance->CCR & DMA_CCR_EN) != 0U) {
@@ -1351,8 +1353,10 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   /* 高频更新估算值，供低频CAN反馈使用；IDLE时函数会同步清零。 */
   FOC_UpdateBusCurrentEstimate(&foc);
 
-  /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、观测电角度(deg)、母线(V)。
-   * 所有主动控制状态都发送：ALIGN / I-f / 接管期间的相电流与角度同样需要观察。
+  /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、滤波机械转速(rpm)、观测电角度(deg)、
+   * 母线(V)、原始机械转速(rpm)。第4通道为30Hz双极点低通(两级一阶级联)后的
+   * speed_rpm_f，第7通道保留原始speed_rpm用于对比：两通道波动一致说明波动
+   * 来自真实转速，仅原始通道波动说明是观测估计噪声。所有主动控制状态都发送。
    */
   if ((just_float_enabled != 0U) &&
       (motor_console_tx_active == 0U) &&
@@ -1360,7 +1364,8 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
       ((USART1->ISR & USART_ISR_TC) != 0U)) {
     (void)MotorApp_SendJustFloat(
         foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c,
-        foc.observer.state.speed_rpm,
-        foc.observer.state.phase_raw * RAD_TO_DEG_F, foc.state.vbus);
+        foc.observer.state.speed_rpm_f,
+        foc.observer.state.phase_raw * RAD_TO_DEG_F, foc.state.vbus,
+        foc.observer.state.speed_rpm);
   }
 }
