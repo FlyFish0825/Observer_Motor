@@ -803,7 +803,7 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
-  } else if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {"origin":"llm
+  } else if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) {
     Observer_Run(&foc.observer, &observer_input);
     MotorApp_RunClosedLoop();
     /* 只有闭环状态允许写入新的功率PWM比较值。 */
