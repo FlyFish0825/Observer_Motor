@@ -76,10 +76,12 @@ static uint32_t motor_align_count = 0U;
 static float motor_if_angle = 0.0f;
 static float motor_if_speed_rad_s = 0.0f;
 static float motor_if_speed_target_rad_s = 20.0f;
+static float motor_if_direction = 1.0f;
 #define MOTOR_ALIGN_TIME_MS 30U
 #define MOTOR_ALIGN_ID_A 1.0f
 #define MOTOR_IF_IQ_A 1.5f
 #define MOTOR_IF_ACCEL_RAD_S2 200.0f
+#define MOTOR_IF_MAX_SPEED_RAD_S 150.0f
 
 /**
  * @brief 判断当前状态是否允许进入FOC实时控制。
@@ -346,6 +348,14 @@ static void MotorApp_StartClosedLoop(void) {
   motor_if_angle = motor_align_angle;
   motor_if_speed_rad_s = 0.0f;
 
+  /* I/F启动速度跟随目标命令，限制最大电角速度。 */
+  motor_if_direction = (motor_control.speed_command_rpm >= 0.0f) ? 1.0f : -1.0f;
+  motor_if_speed_target_rad_s = fabsf(motor_control.speed_command_rpm) *
+                                6.2831853f * 7.0f / 60.0f;
+  if (motor_if_speed_target_rad_s > MOTOR_IF_MAX_SPEED_RAD_S) {
+    motor_if_speed_target_rad_s = MOTOR_IF_MAX_SPEED_RAD_S;
+  }
+
   motor_control.speed_ref_rpm = motor_control.speed_command_rpm;
   motor_control.speed_ref_active_rpm = motor_control.speed_ref_rpm;
   motor_control.speed_loop_enable = 1U;
@@ -460,7 +470,7 @@ static void MotorApp_RunIF(void) {
     }
   }
 
-  motor_if_angle += motor_if_speed_rad_s * foc.timer.Ts;
+  motor_if_angle += motor_if_speed_rad_s * motor_if_direction * foc.timer.Ts;
   motor_if_angle = FOC_WrapToPiFast(motor_if_angle);
 
   phase_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(motor_if_angle);
