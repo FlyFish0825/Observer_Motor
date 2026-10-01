@@ -77,6 +77,10 @@ static float motor_if_angle = 0.0f;
 static float motor_if_speed_rad_s = 0.0f;
 static float motor_if_speed_target_rad_s = 20.0f;
 static float motor_if_direction = 1.0f;
+/* Step 5：观测器后台运行与可信判据，仅用于观察，不切换控制角。 */
+static uint8_t motor_observer_ready = 0U;
+static uint16_t motor_observer_ready_count = 0U;
+#define MOTOR_OBSERVER_READY_COUNT_MS 5U
 #define MOTOR_ALIGN_TIME_MS 30U
 #define MOTOR_ALIGN_ID_A 1.0f
 #define MOTOR_IF_IQ_A 1.5f
@@ -458,6 +462,27 @@ static void MotorApp_RunAlign(void) {
  *
  * 仅用于启动验证，不读取observer角度作为控制角。
  */
+static void MotorApp_UpdateObserverReady(void) {
+  float speed_abs;
+
+  speed_abs = fabsf(foc.observer.state.speed_rpm);
+
+  /* 第一版只判断观测器已经产生稳定状态，不参与控制角切换。 */
+  if ((foc.observer.state.psi_mag > foc.observer.config.psi_min) &&
+      (speed_abs > 50.0f) &&
+      (foc.observer.state.initialized != 0U)) {
+    if (motor_observer_ready_count < (MOTOR_OBSERVER_READY_COUNT_MS * 25U)) {
+      motor_observer_ready_count++;
+    }
+    if (motor_observer_ready_count >= (MOTOR_OBSERVER_READY_COUNT_MS * 25U)) {
+      motor_observer_ready = 1U;
+    }
+  } else {
+    motor_observer_ready_count = 0U;
+    motor_observer_ready = 0U;
+  }
+}
+
 static void MotorApp_RunIF(void) {
   uint32_t phase_q31;
   float ud;
@@ -809,6 +834,9 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
     TIM1->CCR2 = foc.svpwm.ccr_b;
     TIM1->CCR3 = foc.svpwm.ccr_c;
   } else if (foc_motor_state == FOC_MOTOR_OPEN_LOOP_IF) {
+    /* Step 5：I/F期间后台运行observer，只用于判断可信度，不影响控制角。 */
+    Observer_Run(&foc.observer, &observer_input);
+    MotorApp_UpdateObserverReady();
     MotorApp_RunIF();
     TIM1->CCR1 = foc.svpwm.ccr_a;
     TIM1->CCR2 = foc.svpwm.ccr_b;
