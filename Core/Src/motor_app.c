@@ -62,6 +62,21 @@
 #define MOTOR_APP_OBSERVER_READY_TIME_MS 5U
 #define MOTOR_APP_OBSERVER_READY_MIN_RPM 50.0f
 
+/*
+ * ADC注入序列期望值，与adc.c的MX_ADC1_Init/MX_ADC2_Init保持一致，只用于上电回读自检。
+ * JL是"注入转换次数-1"：ADC1为4次(Ia/Ic/U端/W端)，ADC2为2次(Ib/V端)。
+ * 改动adc.c的注入通道后必须同步这里；不一致时自检会拒绝启动——这是"注入序列被
+ * 静默截断"（V相端电压曾因此从未被采样、JDR2恒为0）的防护。
+ */
+#define MOTOR_APP_ADC1_INJ_JL 3U
+#define MOTOR_APP_ADC1_INJ_JSQ1 3U  /* Ia  ADC1_IN3  */
+#define MOTOR_APP_ADC1_INJ_JSQ2 12U /* Ic  ADC1_IN12 */
+#define MOTOR_APP_ADC1_INJ_JSQ3 11U /* U端 ADC1_IN11 */
+#define MOTOR_APP_ADC1_INJ_JSQ4 14U /* W端 ADC1_IN14 */
+#define MOTOR_APP_ADC2_INJ_JL 1U
+#define MOTOR_APP_ADC2_INJ_JSQ1 3U  /* Ib  ADC2_IN3  */
+#define MOTOR_APP_ADC2_INJ_JSQ2 17U /* V端 ADC2_IN17 */
+
 /* ======================== 应用层数据结构 ======================== */
 
 /* 实测/重构端电压融合状态：选择目标与渐变权重分开保存，切换过程逐拍渐变。 */
@@ -114,6 +129,10 @@ static volatile uint8_t motor_idle_reset_done = 0U;
 static volatile uint8_t motor_console_tx_active = 0U;
 /* ADC注入中断累计次数，仅用于状态诊断和校准进度观察。 */
 static volatile uint32_t motor_adc_irq_count = 0U;
+/* ADC注入序列自检结果：0表示与adc.c不一致，run请求会被拒绝；由status的adc_cfg显示。 */
+static volatile uint32_t motor_adc_cfg_ok = 0U;
+/* 本拍实际用于Park/逆Park的控制角（rad），只供上位机与Live Watch观察。 */
+static volatile float motor_control_angle_rad = 0.0f;
 
 /* ======================== 控制参考仲裁与电流环 ======================== */
 
@@ -177,6 +196,8 @@ static void MotorApp_RunCurrentLoop(FOC_Control_t *control) {
 
   theta_ctrl = FOC_WrapToPiFast(control->reference.theta_ctrl);
   theta_q31 = (uint32_t)CORDIC_RadToQ31_WrappedFast(theta_ctrl);
+  /* 诊断用：本拍实际控制角，供上位机比对观测角与虚拟角。 */
+  motor_control_angle_rad = theta_ctrl;
 
   CORDIC_SinCos_FastF32((int32_t)theta_q31, &foc_sin_cos.sin,
                         &foc_sin_cos.cos);
@@ -477,19 +498,20 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned long)TIM1->CCR1, (unsigned long)TIM1->CCR2,
       (unsigned long)TIM1->CCR3, (unsigned long)TIM1->CCER,
       (unsigned long)TIM1->CR1);
-  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f U=%.2f V=%.2f W=%.2f\r\n",
+  DebugConsole_Printf("OBSERVER phase=%.3f flux=%.6f weight=%.3f U=%.2f V=%.2f W=%.2f ctrl=%.3f\r\n",
       (double)foc.observer.state.phase_raw, (double)foc.observer.state.psi_mag,
       (double)voltage_source.measured_weight,
       (double)foc.state.u_abc_measured.a,
       (double)foc.state.u_abc_measured.b,
-      (double)foc.state.u_abc_measured.c);
+      (double)foc.state.u_abc_measured.c,
+      (double)motor_control_angle_rad);
   /* ADC2注入组原始码诊断：JDR1为V相电流(Ib)，JDR2为V相端电压。
    * JSQR的JL字段决定注入序列长度，用于区分"V相没有被转换(JDR2恒为0)"
-   * 和"V相实测确实为0V"两种情况。
+   * 和"V相实测确实为0V"两种情况。adc_cfg为上电回读自检结果，0时拒绝启动。
    */
-  DebugConsole_Printf("ADC JDR1=%lu JDR2=%lu JSQR=0x%08lX\r\n",
+  DebugConsole_Printf("ADC JDR1=%lu JDR2=%lu JSQR=0x%08lX adc_cfg=%lu\r\n",
       (unsigned long)ADC2->JDR1, (unsigned long)ADC2->JDR2,
-      (unsigned long)ADC2->JSQR);
+      (unsigned long)ADC2->JSQR, (unsigned long)motor_adc_cfg_ok);
 }
 
 /**
@@ -539,6 +561,11 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
       "volt_src", &voltage_source.measured_selected, 0U, 1U, true);
   success &= DebugConsole_RegisterF32(
       "volt_weight", &voltage_source.measured_weight, 0.0f, 1.0f, true);
+  /* 启动期诊断：ADC注入自检结果与本拍控制角。 */
+  success &= DebugConsole_RegisterU32("adc_cfg", &motor_adc_cfg_ok, 0U, 1U,
+                                      true);
+  success &= DebugConsole_RegisterF32("ctrl_rad", &motor_control_angle_rad,
+                                      -4.0f, 4.0f, true);
 
   return (success != 0U) ? HAL_OK : HAL_ERROR;
 }
@@ -640,6 +667,51 @@ static HAL_StatusTypeDef MotorApp_CalibrateAnalogFrontEnd(void) {
   DWT_Delay_Ms(10U);
 
   return HAL_OK;
+}
+
+/**
+ * @brief 回读注入序列寄存器，确认两路电流与三路端电压真的在注入序列里。
+ *
+ * HAL_ADCEx_InjectedConfigChannel()在ScanConvMode=DISABLE时会静默丢弃
+ * InjectedNbrOfConversion、只把Rank1写进JSQR，而它仍返回HAL_OK，且本工程关闭了
+ * USE_FULL_ASSERT，所以配置被截断时没有任何错误信号。V相端电压曾因此从未被转换。
+ * 这里只能靠回读JSQR发现：校验失败只置标志并由run门控拒绝启动，不进Error_Handler
+ * 死循环，便于现场通过串口定位。
+ *
+ * @return 1=与MOTOR_APP_ADCx_INJ_* 期望一致；0=不一致。
+ */
+static uint8_t MotorApp_CheckAdcInjectedConfig(void) {
+  /* 两个ADC的注入序列寄存器快照。 */
+  uint32_t jsqr1 = ADC1->JSQR;
+  uint32_t jsqr2 = ADC2->JSQR;
+  /* JL字段为转换次数-1，是"序列被截断"最直接的判据。 */
+  uint32_t jl1 = (jsqr1 & ADC_JSQR_JL) >> ADC_JSQR_JL_Pos;
+  uint32_t jl2 = (jsqr2 & ADC_JSQR_JL) >> ADC_JSQR_JL_Pos;
+  uint8_t ok = 1U;
+
+  if ((jl1 != MOTOR_APP_ADC1_INJ_JL) ||
+      (((jsqr1 & ADC_JSQR_JSQ1) >> ADC_JSQR_JSQ1_Pos) != MOTOR_APP_ADC1_INJ_JSQ1) ||
+      (((jsqr1 & ADC_JSQR_JSQ2) >> ADC_JSQR_JSQ2_Pos) != MOTOR_APP_ADC1_INJ_JSQ2) ||
+      (((jsqr1 & ADC_JSQR_JSQ3) >> ADC_JSQR_JSQ3_Pos) != MOTOR_APP_ADC1_INJ_JSQ3) ||
+      (((jsqr1 & ADC_JSQR_JSQ4) >> ADC_JSQR_JSQ4_Pos) != MOTOR_APP_ADC1_INJ_JSQ4)) {
+    ok = 0U;
+  }
+
+  if ((jl2 != MOTOR_APP_ADC2_INJ_JL) ||
+      (((jsqr2 & ADC_JSQR_JSQ1) >> ADC_JSQR_JSQ1_Pos) != MOTOR_APP_ADC2_INJ_JSQ1) ||
+      (((jsqr2 & ADC_JSQR_JSQ2) >> ADC_JSQR_JSQ2_Pos) != MOTOR_APP_ADC2_INJ_JSQ2)) {
+    ok = 0U;
+  }
+
+  if (ok == 0U) {
+    /* 打印实际JSQR，便于直接对照adc.c判断是哪一段被改写。 */
+    DebugConsole_Printf("ADC INJ FAIL ADC1 JSQR=0x%08lX JL=%lu ADC2 JSQR=0x%08lX JL=%lu\r\n",
+        (unsigned long)jsqr1, (unsigned long)jl1,
+        (unsigned long)jsqr2, (unsigned long)jl2);
+    DebugConsole_Printf("ADC INJ expect ADC1 JL=3 JSQ=3,12,11,14 ; ADC2 JL=1 JSQ=3,17 ; run disabled\r\n");
+  }
+
+  return ok;
 }
 
 /**
@@ -748,6 +820,12 @@ HAL_StatusTypeDef MotorApp_Init(void) {
   }
 
   /*
+   * 注入序列已由MX_ADC1_Init/MX_ADC2_Init写定，这里回读校验。失败只记录标志，
+   * 由MotorApp_Process拒绝run请求；不进Error_Handler，保持串口可诊断。
+   */
+  motor_adc_cfg_ok = MotorApp_CheckAdcInjectedConfig();
+
+  /*
    * hadc1.Init.EOCSelection必须保留ADC_EOC_SINGLE_CONV，供规则组逐Rank
    * 轮询读取；HAL据此默认打开JEOC。这里仅把注入组中断切换到JEOS，
    * 确保ADC1的U/W两个Rank全部完成后，每个PWM周期只进入一次控制回调。
@@ -773,6 +851,8 @@ HAL_StatusTypeDef MotorApp_Init(void) {
 void MotorApp_Process(void) {
   /* 只发送一次READY，避免主循环高速运行时重复占用串口。 */
   static uint8_t ready_reported = 0U;
+  /* 只报告一次"因ADC配置无效而拒绝启动"，避免阻塞时刷屏。 */
+  static uint8_t adc_cfg_reported = 0U;
 
   if (ready_reported == 0U) {
     ready_reported = 1U;
@@ -791,10 +871,18 @@ void MotorApp_Process(void) {
     foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
   }
 
-  /* 校准完成且IDLE复位已完成才能启动，重复run 1不会重新初始化运行电机。
+  /* ADC注入配置不匹配时拒绝启动：采样通道不可信时闭环没有意义。 */
+  if ((motor_run_requested != 0U) && (motor_adc_cfg_ok == 0U) &&
+      (adc_cfg_reported == 0U)) {
+    adc_cfg_reported = 1U;
+    DebugConsole_Printf("run ignored: ADC injected config invalid\r\n");
+  }
+
+  /* 校准完成、IDLE复位完成且ADC注入配置正确才能启动，重复run 1不会重新初始化运行电机。
    * 校准期间收到run 1则等待校准结束；run 0可以取消该请求。
    */
   if ((motor_run_requested != 0U) &&
+      (motor_adc_cfg_ok != 0U) &&
       (foc.calibration.calibrated != 0U) &&
       (motor_idle_reset_done != 0U) &&
       (foc_motor_state == FOC_MOTOR_IDLE)) {
@@ -914,10 +1002,12 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   /* 高频更新估算值，供低频CAN反馈使用；IDLE时函数会同步清零。 */
   FOC_UpdateBusCurrentEstimate(&foc);
 
-  /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、电角度(deg)、母线(V)。 */
+  /* VOFA通道：Iu(A)、Iv(A)、Iw(A)、机械转速(rpm)、观测电角度(deg)、母线(V)。
+   * 所有主动控制状态都发送：ALIGN / I-f / 接管期间的相电流与角度同样需要观察。
+   */
   if ((just_float_enabled != 0U) &&
       (motor_console_tx_active == 0U) &&
-      (foc_motor_state == FOC_MOTOR_CLOSED_LOOP) &&
+      (MotorApp_IsControlState(foc_motor_state) != 0U) &&
       ((USART1->ISR & USART_ISR_TC) != 0U)) {
     (void)MotorApp_SendJustFloat(
         foc.state.i_abc.a, foc.state.i_abc.b, foc.state.i_abc.c,
