@@ -21,7 +21,19 @@
 #include "usart.h"
 
 /* USER CODE BEGIN 0 */
-
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此配置说明集中写在这里。
+ *
+ * USART1（PB6=TX、PB7=RX）作为调试控制台，2 Mbaud。
+ * 接收：DMA空闲中断（HAL_UARTEx_ReceiveToIdle_DMA）
+ *   -> HAL_UARTEx_RxEventCallback -> DebugConsole_OnRxEvent() 只把字节入环形队列，
+ *   命令行解析留在主循环，避免在中断里做字符串处理。
+ * 发送：DMA + 发送环形队列；motor_console_tx_active标志用于避免
+ *   VOFA波形帧与命令文本回复同时改写同一个USART。
+ * main.c中的_write()也重定向到huart1，用于printf调试输出。
+ * MspInit里设置的USART1中断优先级须低于ADC1_2（25 kHz电流环），
+ * 保证串口收发不会延迟电流控制。
+ */
 /* USER CODE END 0 */
 
 UART_HandleTypeDef huart1;

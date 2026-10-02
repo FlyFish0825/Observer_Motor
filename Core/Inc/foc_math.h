@@ -7,23 +7,36 @@
 
 /* ======================== CORDIC 常量 ======================== */
 
+/* 弧度制圆周率，rad，CORDIC输入角归一化区间的正端点。 */
 #define CORDIC_PI_F 3.14159265358979323846f
+/* 2pi，rad，一个完整电周期；Q31循环归一化时按此值步进。 */
 #define CORDIC_TWO_PI_F 6.28318530717958647692f
+/* 1/pi，把弧度角除以它归一化到[-1,1)，供Q1.31定点编码使用。 */
 #define CORDIC_INV_PI_F 0.31830988618379067154f
 
+/* 2的31次方，把[-1,1)归一化角放大成Q1.31整数域。 */
 #define CORDIC_Q31_SCALE_F 2147483648.0f
+/* 2的负31次方，把Q1.31整数还原为[-1,1)浮点值的乘数。 */
 #define CORDIC_Q31_TO_FLOAT_F 4.656612873077392578125e-10f
 
+/* Q1.31角度单位到角度制的换算系数，deg/count，数值等于180/2^31。 */
 #define Q31_TO_DEG_F 8.381903171539307e-8f
+/* 弧度到角度制的换算系数，deg/rad，数值等于180/pi。 */
 #define RAD_TO_DEG_F 57.29577951308232f
+/* Q32角度单位到弧度的换算系数，rad/count，数值等于2pi/2^32。 */
 #define Q32_TO_RAD_F 1.4629180792671596e-9f
 
 /* ======================== FOC 数学常量 ======================== */
 
+/* 1/3，三电流完整Clarke变换里(2Ia-Ib-Ic)的缩放系数。 */
 #define FOC_ONE_THIRD_F   0.33333333333333333333f
+/* 1/sqrt(3)，Clarke变换beta支路以及观测器由占空比重构电压的系数。 */
 #define FOC_INV_SQRT3_F   0.57735026918962576451f
+/* sqrt(3)/2，逆Clarke变换中B、C两相的系数。 */
 #define FOC_SQRT3_BY_2_F  0.86602540378443864676f
+/* FOC运算使用的圆周率，rad，用于角度归一化和atan2近似常数。 */
 #define FOC_PI            3.14159265358979323846f
+/* 零偏校准累加的样本数，25 kHz下1000拍约40 ms。 */
 #define CURRENT_OFFSET_SAMPLE_NUM 1000 // 校准采样次数
 
 /* ======================== FOC 结构体变量 ======================== */
@@ -32,9 +45,9 @@
  * 三相坐标，a/b/c对应U/V/W；电流为A，电压为V
  */
 typedef struct {
-  float a;
-  float b;
-  float c;
+  float a; /* A相（U相）分量；电流单位为A，电压单位为V。 */
+  float b; /* B相（V相）分量。 */
+  float c; /* C相（W相）分量。 */
 
 } FOC_ABC_t;
 
@@ -42,8 +55,8 @@ typedef struct {
  * 静止两相坐标
  */
 typedef struct {
-  float alpha;
-  float beta;
+  float alpha; /* alpha轴分量，与A相轴重合，单位随用途为A或V。 */
+  float beta;  /* beta轴分量，超前alpha轴90度电角度，单位同上。 */
 
 } FOC_AlphaBeta_t;
 
@@ -51,8 +64,8 @@ typedef struct {
  * 转子同步旋转坐标；d轴沿磁链方向，q轴为转矩电流方向
  */
 typedef struct {
-  float d;
-  float q;
+  float d; /* d轴分量，沿转子永磁磁链方向，单位随用途为A或V。 */
+  float q; /* q轴分量，超前d轴90度电角度，即转矩轴方向。 */
 
 } FOC_DQ_t;
 
@@ -60,8 +73,8 @@ typedef struct {
  * sin cos
  */
 typedef struct {
-  float sin;
-  float cos;
+  float sin; /* 该角度的正弦值，无量纲，范围[-1,1]。 */
+  float cos; /* 该角度的余弦值，无量纲，范围[-1,1]。 */
 
 } FOC_SIN_COS_t;
 
@@ -102,59 +115,59 @@ typedef enum
 
 typedef struct {
 
-  uint16_t adc_a;
-  uint16_t adc_b;
-  uint16_t adc_c;
+  uint16_t adc_a; /* A相电流注入结果原始计数，12位，范围0~4095。 */
+  uint16_t adc_b; /* B相电流注入结果原始计数。 */
+  uint16_t adc_c; /* C相电流注入结果原始计数。 */
 
   /* 保留的规则组DMA接口缓冲区；当前BoardAdc轮询路径不使用这些数组。 */
-  uint16_t adc1_regular_dma_buffer[3] __attribute__((aligned(4)));
-  uint16_t adc2_regular_dma_buffer[1] __attribute__((aligned(4)));
+  uint16_t adc1_regular_dma_buffer[3] __attribute__((aligned(4))); /* ADC1规则组DMA落点，3个半字。 */
+  uint16_t adc2_regular_dma_buffer[1] __attribute__((aligned(4))); /* ADC2规则组DMA落点，1个半字。 */
 
   /* 预留零偏字段；当前换算实际使用FOC_Calibration_t的ia/ib/ic_offset。 */
-  float offset_a;
-  float offset_b;
-  float offset_c;
+  float offset_a; /* A相零电流对应的ADC平均计数，本结构体内未使用。 */
+  float offset_b; /* B相零电流对应的ADC平均计数，本结构体内未使用。 */
+  float offset_c; /* C相零电流对应的ADC平均计数，本结构体内未使用。 */
 
   /* ADC计数到电流的增益，A/计数，需与硬件过采样设置一致。 */
-  float gain_a;
-  float gain_b;
-  float gain_c;
+  float gain_a; /* A相计数到电流的换算增益，A/计数。 */
+  float gain_b; /* B相计数到电流的换算增益，A/计数。 */
+  float gain_c; /* C相计数到电流的换算增益，A/计数。 */
 
-  FOC_CurrentRebuild_t rebuild;
+  FOC_CurrentRebuild_t rebuild; /* 本拍因占空比超阈而被重构的那一相。 */
 
 } FOC_CurrentSample_t;
 
 typedef struct {
 
   // 输入
-  float vbus;
+  float vbus; /* 直流母线电压采样值，单位V。 */
   /* MCU内部温度传感器换算值，单位摄氏度。 */
   float temperature_c;
-  float theta;
-  float omega;
+  float theta; /* 本拍控制用转子电角度，rad，范围[-pi,pi]。 */
+  float omega; /* 观测器输出的电角速度，rad/s。 */
 
   // 电流
-  FOC_ABC_t i_abc;
-  FOC_AlphaBeta_t i_alpha_beta;
-  FOC_DQ_t i_dq;
+  FOC_ABC_t i_abc; /* 三相电流，A，已扣除零偏并做重构。 */
+  FOC_AlphaBeta_t i_alpha_beta; /* 三相电流经Clarke变换后的静止坐标电流，A。 */
+  FOC_DQ_t i_dq; /* 静止坐标电流经Park变换后的dq电流，A。 */
   /* 由dq轴电功率估算的母线电流及其滤波值，单位A。 */
-  float ibus_est;
-  float ibus_filter;
+  float ibus_est; /* 本拍由dq轴电功率除以母线电压得到的母线电流，A。 */
+  float ibus_filter; /* ibus_est的一阶低通结果，A，系数0.95/0.05。 */
 
   /// 电压
-  FOC_DQ_t u_dq;
-  FOC_AlphaBeta_t u_alpha_beta;
-  FOC_ABC_t u_abc;
+  FOC_DQ_t u_dq; /* 电流环给出的dq电压命令，V。 */
+  FOC_AlphaBeta_t u_alpha_beta; /* dq电压命令经逆Park得到的静止坐标电压，V。 */
+  FOC_ABC_t u_abc; /* 静止坐标电压经逆Clarke得到的三相电压命令，V。 */
 
   /* ADC实测端电压，已恢复分压倍率，单位V；a/b/c对应U/V/W对地电压。
    * 上面的u_abc是控制器电压命令，此处独立保存实际采样值。
    */
-  FOC_ABC_t u_abc_measured;
+  FOC_ABC_t u_abc_measured; /* 三个元素分别为U/V/W相对地实测电压，V。 */
   /* 实测端电压经Clarke变换后的静止坐标电压，供低速观测器使用。 */
-  FOC_AlphaBeta_t u_alpha_beta_measured;
+  FOC_AlphaBeta_t u_alpha_beta_measured; /* 实测端电压的alpha/beta分量，V。 */
 
   // Q31角度
-  uint32_t theta_q31;
+  uint32_t theta_q31; /* 控制角的Q1.31定点形式，供CORDIC直接使用。 */
 } FOC_State_t;
 
 typedef struct {
@@ -173,12 +186,12 @@ typedef struct {
 
 typedef struct {
 
-  uint8_t calibrated;
+  uint8_t calibrated; /* 1表示零偏校准已完成，未校准时的offset不可信。 */
 
   /* 校准阶段先累加ADC计数，完成后除以样本数，保存零电流平均计数。 */
-  float ia_offset;
-  float ib_offset;
-  float ic_offset;
+  float ia_offset; /* A相零电流平均计数，单位count。 */
+  float ib_offset; /* B相零电流平均计数，单位count。 */
+  float ic_offset; /* C相零电流平均计数，单位count。 */
 
 } FOC_Calibration_t;
 
@@ -189,50 +202,50 @@ typedef struct {
   /*
    * 三相占空比，范围0.0~1.0
    */
-  float duty_a;
-  float duty_b;
-  float duty_c;
+  float duty_a; /* A相占空比，0.0对应全低、1.0对应全高。 */
+  float duty_b; /* B相占空比。 */
+  float duty_c; /* C相占空比。 */
 
   /*
    * 三相定时器比较值
    */
-  uint32_t ccr_a;
-  uint32_t ccr_b;
-  uint32_t ccr_c;
+  uint32_t ccr_a; /* A相比较值，单位TIM1计数，上限为ARR。 */
+  uint32_t ccr_b; /* B相比较值。 */
+  uint32_t ccr_c; /* C相比较值。 */
 
   /*
    * 实际加入的公共模电压
    */
-  float common_mode;
+  float common_mode; /* 三次谐波式公共模注入量，V，已乘电压缩放因子。 */
 
   /*
    * 电压缩放比例：
    * 1.0表示未限幅；
    * 小于1.0表示输入电压超过母线能力。
    */
-  float voltage_scale;
+  float voltage_scale; /* 母线不足时的等比缩放因子，无量纲，范围(0,1]。 */
 
   /*
    * 0：没有限幅
    * 1：发生电压限幅
    */
-  uint8_t limited;
+  uint8_t limited; /* 电压限幅发生标志，0为未限幅、1为已限幅。 */
 
 } FOC_SVPWM_Output_t;
 
 typedef struct {
 
-  FOC_State_t state;
+  FOC_State_t state; /* 采样输入、变换结果和角度缓存。 */
 
-  FOC_CurrentSample_t current;
+  FOC_CurrentSample_t current; /* 三相电流原始计数、换算增益与重构相。 */
 
-  FOC_Calibration_t calibration;
+  FOC_Calibration_t calibration; /* 电流零偏校准状态与结果。 */
 
-  FOC_TimerConfig_t timer;
+  FOC_TimerConfig_t timer; /* TIM1计数时钟、ARR、触发点和死区配置。 */
 
-  FOC_SVPWM_Output_t svpwm;
+  FOC_SVPWM_Output_t svpwm; /* 最近一次SVPWM计算的占空比、比较值与限幅信息。 */
 
-   Observer_Handle_t observer;
+   Observer_Handle_t observer; /* 磁链观测器与PLL实例。 */
 
 } FOC_Handle_t;
 

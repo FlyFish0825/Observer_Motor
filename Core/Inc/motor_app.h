@@ -9,9 +9,19 @@ extern "C" {
 #include "controller.h"
 
 /**
+ * @file motor_app.h
+ * @brief 电机应用层接口：上电安全、初始化、主循环任务与25 kHz控制中断入口。
+ * 本模块是唯一同时接触"主循环域"和"ADC中断域"的模块，启动状态机、
+ * 运行请求仲裁与故障闩锁都集中在这里。
+ * 控制算法本身在controller.c/observer.c/foc_math.c，本层负责决定
+ * 每个状态用什么控制角和什么dq电流参考。
+ */
+
+/**
  * @brief HAL初始化前将六路栅极驱动输出置于安全低电平。
  * @note 在main()最开头调用，防止上电时PWM引脚不确定状态误导通MOSFET。
  *       后续由CubeMX生成的GPIO/TIM初始化重新配置为复用功能。
+ *       此时外设时钟尚未配置，因此直接写GPIO寄存器而不走HAL。
  */
 void MotorApp_ForcePowerStageSafe(void);
 
@@ -33,6 +43,8 @@ void MotorApp_Process(void);
 /**
  * @brief ADC注入组完成回调中的25kHz电机控制入口
  * @param hadc HAL回调传入的ADC句柄；只处理ADC1，忽略ADC2和空指针。
+ * @note 单拍预算40 µs，函数内完成零偏校准、观测器、状态机、电流环与SVPWM，
+ *       并写TIM1->CCR1~3。不得在其中调用阻塞式HAL函数。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc);
 
@@ -44,6 +56,8 @@ FOC_Control_t *MotorApp_GetControl(void);
 
 /**
  * @brief 设置运行请求；真正的启动/停机仍由MotorApp_Process和ADC控制节拍执行。
+ * @param run 0=请求停机，非0=请求运行。
+ * @note 只置请求，不做实际启停；故障闩锁后必须先发run 0再发run 1才能重启。
  */
 void MotorApp_RequestRun(uint8_t run);
 

@@ -29,13 +29,20 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
-
+/*
+ * FDCAN1（PA11=RX/PA12=TX）用于电机协议与返回Bootloader。
+ * 仲裁段与数据段均配置为1 Mbit/s，且关闭BRS（位速率切换）：
+ * 这是板载CAN收发器带宽限制决定的，协议层用MOTOR_PROTOCOL_CANFD_BRS_ENABLED=0
+ * 记住这一约束，即使FDFormat为FD_CAN也不会打开BRS。
+ * 接收：主循环轮询FIFO0，把帧放入协议环形队列后再解析，不在中断里解析；
+ * 两个中断入口FDCAN1_IT0/IT1都只调用HAL_FDCAN_IRQHandler。
+ */
 /* USER CODE END Includes */
 
 extern FDCAN_HandleTypeDef hfdcan1;
 
 /* USER CODE BEGIN Private defines */
-
+/* 协议层的节点号、帧ID与长度宏定义在motor_protocol.h，本文件不重复定义。 */
 /* USER CODE END Private defines */
 
 void MX_FDCAN1_Init(void);

@@ -63,6 +63,24 @@
   ******************************************************************************
   */
 
+/*
+ * 本文件是CubeMX/ST提供的CMSIS设备启动代码，与Observer.ioc无关的修改在
+ * CubeMX重新生成时可能被覆盖，因此本工程的板级时钟参数不要写在这里，
+ * 统一放在 Core/Inc/board_clock.h 与 Core/Src/main.c 的 USER CODE 块里。
+ *
+ * 本文件提供两个函数与一个全局变量：
+ *   SystemInit()            复位后、跳转main()之前由启动文件调用：
+ *                           设置向量表偏移、按需初始化FPU与外部存储器，
+ *                           并把SystemCoreClock置为初始值。
+ *   SystemCoreClock         当前HCLK频率，供HAL_Delay、DWT换算等使用。
+ *   SystemCoreClockUpdate() 重新计算并刷新SystemCoreClock，
+ *                           时钟配置变更后必须调用。
+ * 注意：本工程真正把系统时钟配到170 MHz的是main.c的SystemClock_Config()
+ * （HSE 16/24 MHz -> PLL M=4/6、N=85、R=2），不要在两处重复配置时钟。
+ * 上面注释里"HSI 16 MHz / PLL_P=7"等表格是ST模板的默认说明，
+ * 不反映本工程的最终配置，参考时以main.c为准。
+ */
+
 /** @addtogroup CMSIS
   * @{
   */

@@ -51,7 +51,26 @@
 
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
-
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此说明写在这里。
+ *
+ * 中断与职责的对应关系（详细清单同Core/Inc/stm32g4xx_it.h）：
+ *   ADC1_2_IRQHandler    25 kHz控制入口。依次调用HAL_ADC_IRQHandler(&hadc1)与(&hadc2)，
+ *                        hadc1的注入完成会触发HAL_ADCEx_InjectedConvCpltCallback，
+ *                        最终进入MotorApp_OnInjectedConversion()，这是本固件的实时核心。
+ *   TIM6_DAC_IRQHandler  1 ms节拍，经HAL_TIM_PeriodElapsedCallback进入
+ *                        MotorProtocol_TimerTick()，调度CAN周期反馈与高速调试反馈。
+ *   TIM1_UP_TIM16_IRQHandler 更新中断，本工程未使用其回调。
+ *   DMA1_Channel1/2      USART1接收/发送；DMA1_Channel3/4 为ADC规则组。
+ *   FDCAN1_IT0/IT1       只调用HAL_FDCAN_IRQHandler，帧解析放在主循环。
+ *   USART1_IRQHandler    控制台错误与空闲事件。
+ *   CORDIC_IRQHandler    本工程用轮询读结果，该中断实际不会被触发。
+ *   SysTick_Handler      只调用HAL_IncTick()维护HAL毫秒计数。
+ *
+ * 故障类异常（NMI/HardFault/MemManage/BusFault/UsageFault）都停在死循环里；
+ * 现场调试时可用调试器查看栈帧，定位触发异常的地址。
+ * 本文件所有处理函数都只做转发，不放业务逻辑，保证CubeMX重新生成时不丢代码。
+ */
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/

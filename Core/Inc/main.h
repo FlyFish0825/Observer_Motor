@@ -31,7 +31,7 @@ extern "C" {
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
-
+/* 只包含HAL主头；各外设句柄声明在各自的外设头文件（adc.h/tim.h/usart.h等）。 */
 /* USER CODE END Includes */
 
 /* Exported types ------------------------------------------------------------*/
@@ -53,7 +53,7 @@ extern "C" {
 void Error_Handler(void);
 
 /* USER CODE BEGIN EFP */
-
+/* Error_Handler()在main.c中实现：关中断后死循环，用于上电初始化失败的致命错误。 */
 /* USER CODE END EFP */
 
 /* Private defines -----------------------------------------------------------*/

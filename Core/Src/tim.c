@@ -21,7 +21,28 @@
 #include "tim.h"
 
 /* USER CODE BEGIN 0 */
+/* foc_math.h提供foc.timer参数，MX_TIM1_Init()后半段用它覆盖CubeMX写的默认值。 */
 #include "foc_math.h"
+
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此配置说明集中写在这里。
+ *
+ * TIM1（MX_TIM1_Init，中心对齐25 kHz三相PWM + ADC触发）：
+ *   htim1.Init.Prescaler = 0           计数时钟即170 MHz，不再分频
+ *   htim1.Init.CounterMode = 中心对齐1 载波对称，便于在波谷/波峰同步采样
+ *   htim1.Init.Period = 3399           周期 = (3399+1)*2/170 MHz = 40 µs，即25 kHz
+ *   htim1.Init.RepetitionCounter = 0   每个完整周期都产生更新事件
+ *   sMasterConfig.MasterOutputTrigger = TIM_TRGO_OC4REF，用CH4比较事件触发ADC注入组
+ *   CH1~CH3：PWM1模式、Pulse=0（启动时由FOC_PWM_Start改为50%中点）、互补输出
+ *   CH4：Pulse=3398（接近ARR，把采样点推到载波末端），只作触发源不输出引脚
+ *   死区：DeadTime=90（DTG编码，约529 ns），OSSR/OSSI使能保证IDLE关断时引脚为安全态
+ *
+ * 注意：本函数后半段会读取foc.timer.pwm_arr / adc_trigger / dead_time 覆盖上面这些默认值，
+ * 因此调用顺序必须是 FOC_Data_Init() 在前、MX_TIM1_Init() 在后，否则载波频率与采样点全错。
+ *
+ * TIM6（MX_TIM6_Init，1 ms节拍）：170 MHz/(169+1)/(999+1) = 1 kHz，
+ * 中断里调用MotorProtocol_TimerTick()调度CAN周期反馈与高速调试反馈。
+ */
 /* USER CODE END 0 */
 
 TIM_HandleTypeDef htim1;

@@ -37,7 +37,20 @@ extern "C" {
 
 /* Exported constants --------------------------------------------------------*/
 /* USER CODE BEGIN EC */
-
+/*
+ * 中断向量清单与本工程的对应关系（供对照startup_stm32g431xx.s）：
+ *   ADC1_2_IRQHandler      25 kHz控制入口：HAL_ADC_IRQHandler(&hadc1)触发注入完成回调，
+ *                          最终进入MotorApp_OnInjectedConversion()。本固件的核心实时路径。
+ *   TIM6_DAC_IRQHandler    1 ms节拍：调度CAN周期反馈与高速调试反馈。
+ *   DMA1_Channel1/2        USART1接收/发送DMA。
+ *   DMA1_Channel3/4        ADC1/ADC2规则组DMA（电流环不使用）。
+ *   FDCAN1_IT0/IT1         CAN收发中断，只调用HAL_FDCAN_IRQHandler，帧解析在主循环。
+ *   USART1_IRQHandler      控制台错误/空闲事件。
+ *   CORDIC_IRQHandler      本工程用轮询方式读CORDIC结果，此中断实际不被触发。
+ *   SysTick_Handler        只调用HAL_IncTick()维护HAL毫秒计数。
+ * 故障类异常（HardFault/MemManage/BusFault/UsageFault/NMI）都停在死循环里，
+ * 现场调试时可用调试器查看栈帧定位出错地址。
+ */
 /* USER CODE END EC */
 
 /* Exported macro ------------------------------------------------------------*/

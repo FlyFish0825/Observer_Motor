@@ -29,7 +29,13 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
-
+/*
+ * MX_GPIO_Init()在CubeMX生成的初始化区，配置各外设复用引脚、模拟输入
+ * （ADC/OPAMP通道）以及排针方向为模拟模式。
+ * 三相栅极驱动引脚在上电的最初阶段并不安全：main()在HAL_Init()之前先调用
+ * MotorApp_ForcePowerStageSafe()把它们强制拉低，之后才由本文件重新配置为
+ * 定时器复用功能。修改本文件的引脚配置时不要破坏这个上电顺序的前提。
+ */
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Private defines */

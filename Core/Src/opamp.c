@@ -21,7 +21,15 @@
 #include "opamp.h"
 
 /* USER CODE BEGIN 0 */
-
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此说明写在这里。
+ *
+ * OPAMP1/2/3构成三相电流采样的模拟前端：三个运放都以内部跟随器方式接在
+ * 各自ADC通道之前，用来缓冲分流电阻上的小信号并提供1.65 V中点偏置。
+ * 换算关系：电流增益 = 3.3 V / 4096 / (0.005 Ω × 24) = 0.0067138671875 A/count，
+ * 该系数写在foc_math.c的FOC_Data_Init()里（foc.current.gain_a/b/c）。
+ * 改动运放增益、分流电阻或参考电压时，必须同步修改那个增益，否则电流量纲全错。
+ */
 /* USER CODE END 0 */
 
 OPAMP_HandleTypeDef hopamp1;

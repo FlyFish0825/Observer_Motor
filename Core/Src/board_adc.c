@@ -21,14 +21,15 @@ static BoardAdcMeasurements_t board_adc_measurements = {0};
 HAL_StatusTypeDef BoardAdc_Update(void) {
   /* 暂存本轮完整结果；只有所有 ADC 转换成功才会发布到共享对象。 */
   BoardAdcMeasurements_t next = {0};
-  /* ADC1规则组原始计数：母线电压和MCU内部温度。 */
+  /* ADC1规则组原始计数：[0]=母线电压(Vbus)，[1]=MCU内部温度，单位count，范围0~4095。 */
   uint16_t adc1_values[2];
+  /* 当前要触发并读取的ADC1规则组序号，0=Rank1(Vbus)，1=Rank2(温度)。 */
 
   /* ADC1规则组间断模式：每次触发只转换一个Rank，读完再推进到下一Rank。
    * 温度通道使用长采样时间，仍按逐Rank轮询确保每个结果与通道对应。
+   * 顺序必须与MX_ADC1_Init()里的规则组Rank配置一致，否则会把温度当母线电压。
    */
   for (uint32_t rank = 0U; rank < 2U; rank++) {
-    /* rank 是当前要触发并读取的 ADC1 规则组序号。 */
     if (HAL_ADC_Start(&hadc1) != HAL_OK) {
       (void)HAL_ADCEx_RegularStop(&hadc1);
       return HAL_ERROR;

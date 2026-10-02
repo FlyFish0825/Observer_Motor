@@ -18,6 +18,25 @@
   */
 /* USER CODE END Header */
 
+/*
+ * 本文件由CubeMX维护：只有本注释所在的Header块（以及文件末尾的USER CODE块）
+ * 会在重新生成时保留，中间所有 #define 都会被CubeMX重写，因此不要在其间加注释。
+ *
+ * 本工程实际启用的HAL模块（与CMakeLists中编译的HAL源文件对应）：
+ *   ADC、CORDIC、FDCAN、OPAMP、TIM、UART、GPIO、EXTI、DMA、RCC、FLASH、PWR、CORTEX。
+ * 其余模块（COMP/CRC/DAC/FMAC/HRTIM/I2C/IWDG/LPTIM/SPI/RTC/SAI/SPI/SMBUS等）
+ * 全部处于注释关闭状态，未参与编译，所以固件里不存在这些外设的HAL代码。
+ *
+ * 关键点：
+ * - 未启用HAL_I2C_MODULE_ENABLED：AS5600.c是保留源码接口，当前未编入构建。
+ * - 未启用HAL_IWDG_MODULE_ENABLED/WWDG：APP不启动也不喂看门狗（看门狗归Bootloader管）。
+ * - 全部USE_HAL_xxx_REGISTER_CALLBACKS为0：回调走HAL弱函数（本工程在main.c
+ *   与motor_protocol.c中重写HAL_ADCEx_InjectedConvCpltCallback、
+ *   HAL_UARTEx_RxEventCallback、HAL_FDCAN_RxFifo0Callback等），
+ *   不用注册表机制，少一层间接调用，适合25 kHz路径。
+ * - HSE_VALUE来自board_clock.h的BOARD_HSE_HZ，因此换晶振只需改那一个宏或CMake变量。
+ */
+
 /* Define to prevent recursive inclusion -------------------------------------*/
 #ifndef STM32G4xx_HAL_CONF_H
 #define STM32G4xx_HAL_CONF_H

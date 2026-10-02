@@ -21,7 +21,18 @@
 #include "fdcan.h"
 
 /* USER CODE BEGIN 0 */
-
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此说明写在这里。
+ *
+ * FDCAN1（PA11=RX、PA12=TX）仲裁段与数据段均配置为1 Mbit/s，
+ * 并且关闭BRS（位速率切换）：这是板载CAN收发器的带宽限制决定的，
+ * 协议层用MOTOR_PROTOCOL_CANFD_BRS_ENABLED=0记住该约束，
+ * 所以即使数据帧用FD格式也不会打开BRS（MotorProtocol_Send里按该宏选择）。
+ *
+ * 本文件只初始化外设；过滤器配置、节点号读取、协议状态机与反馈调度都在
+ * motor_protocol.c的MotorProtocol_Init()里完成（Boot过滤器在app_boot_control.c）。
+ * 接收不在这里解析：主循环轮询FIFO0后入协议环形队列，再出队解析。
+ */
 /* USER CODE END 0 */
 
 FDCAN_HandleTypeDef hfdcan1;

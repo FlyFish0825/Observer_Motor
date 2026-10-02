@@ -29,7 +29,14 @@ extern "C" {
 #include "main.h"
 
 /* USER CODE BEGIN Includes */
-
+/*
+ * CORDIC硬件加速器用于高频三角运算（Park/逆Park与PLL鉴相）。
+ * 配置为COSINE功能、Q1.31定点角度、1次写入2次读取、6个周期：
+ * 写入WDATA后第一次读RDATA得到cos，第二次得到sin，顺序不能颠倒。
+ * MX_CORDIC_Init()之后必须调用一次CORDIC_SinCos_RegisterConfig()
+ * 再使用；高频路径用头文件里的CORDIC_SinCos_FastF32()内联函数直接读写寄存器，
+ * 避免函数调用与指针传参开销。
+ */
 /* USER CODE END Includes */
 
 extern CORDIC_HandleTypeDef hcordic;

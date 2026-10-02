@@ -31,7 +31,13 @@ extern "C" {
 /* DMA memory to memory transfer handles -------------------------------------*/
 
 /* USER CODE BEGIN Includes */
-
+/*
+ * MX_DMA_Init()使能DMA控制器时钟并配置NVIC，各通道的具体参数在其外设的
+ * MspInit里分别设置（见adc.c与usart.c）。本工程用到四个通道：
+ * DMA1_Channel1=USART1_RX、DMA1_Channel2=USART1_TX、
+ * DMA1_Channel3=ADC1规则组、DMA1_Channel4=ADC2规则组。
+ * 注意：ADC注入组不使用DMA，由中断直接读JDRx寄存器，因此电流环路径不受DMA影响。
+ */
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN Private defines */

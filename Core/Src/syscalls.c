@@ -20,6 +20,18 @@
  ******************************************************************************
  */
 
+/*
+ * 本文件是CubeMX生成的最小系统调用集，用途是让newlib/picolibc的C库在裸机上能链接通过。
+ * 绝大多数函数是空实现或返回固定值，因为裸机没有操作系统、文件系统与进程概念：
+ *   _read/_write/_close/_fstat/_isatty/_lseek/_open/_stat 是C库I/O桩，
+ *   _getpid/_kill/_exit/_fork/_execve/_wait/_link/_unlink/_times 是进程相关桩。
+ * 真正有实际行为的两处：
+ *   1. 本文件的 _write() 是弱符号，被 main.c 中的同名强符号覆盖并重定向到USART1，
+ *      所以 printf 的输出实际走调试串口。
+ *   2. malloc 系列依赖的 _sbrk() 在 sysmem.c 中实现，不在本文件。
+ * 文件末尾的 __strong_reference 段把带下划线的桩函数别名成标准名（供picolibc使用）。
+ */
+
 /* Includes */
 #include <sys/stat.h>
 #include <stdlib.h>

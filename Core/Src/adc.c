@@ -21,7 +21,39 @@
 #include "adc.h"
 
 /* USER CODE BEGIN 0 */
-
+/*
+ * 本文件由CubeMX维护，只有USER CODE块会在重新生成时保留，因此配置说明集中写在这里。
+ *
+ * 采样分工（重要）：三相电流与三相端电压必须在同一拍采样，所以它们都放在注入组；
+ * 规则组只留给慢速量（母线电压、MCU内部温度），由主循环软件触发。
+ *
+ * ADC1：
+ *   注入组4个Rank，由T1_TRGO下降沿触发（与TIM1 CH4比较事件同步）：
+ *     Rank1 = IN3  (Ia，U相电流)
+ *     Rank2 = IN12 (Ic，W相电流)
+ *     Rank3 = IN11 (U相端电压)
+ *     Rank4 = IN14 (W相端电压)
+ *   InjectedNbrOfConversion = 4，采样时间6.5周期（电流通道）
+ *   规则组2个Rank：Rank1 = PA0母线电压(6.5周期)，Rank2 = 内部温度传感器(247.5周期，需长采样)
+ *   规则组为间断模式 + 软件触发：每次HAL_ADC_Start只转换一个Rank，读完再推进
+ * 公共配置：独立模式、PCLK/4（170 MHz/4）、12位、溢出保留（ADC_OVR_DATA_PRESERVED）、
+ *   不使用过采样、不开启连续转换。
+ *
+ * ADC2：
+ *   注入组2个Rank（同样由T1_TRGO下降沿触发）：
+ *     Rank1 = IN3  (Ib，V相电流)
+ *     Rank2 = IN17 (V相端电压)
+ *   规则组1个Rank。
+ *
+ * ！关键坑：ADC2的ScanConvMode必须保持ENABLE。HAL_ADCEx_InjectedConfigChannel()在
+ * ScanConvMode为DISABLE时会走"丢弃InjectedNbrOfConversion"的分支：只把Rank1写进JSQR，
+ * Rank2那次配置调用变成空操作，结果是V相端电压（IN17）永远不会被采样，JDR2恒为0。
+ * 同时ScanConvMode=ENABLE时规则组仍只有1个转换，二者不冲突。
+ *
+ * 注入序列的期望值在motor_app.c里用MOTOR_APP_ADC1_INJ_* / ADC2_INJ_* 宏做上电回读自检，
+ * 改动本文件的注入通道或Rank顺序后必须同步那些宏，否则自检会拒绝启动——
+ * 这正是上面那个"注入序列被静默截断"问题的防护。
+ */
 /* USER CODE END 0 */
 
 ADC_HandleTypeDef hadc1;
