@@ -13,6 +13,7 @@
 #include "foc_math.h"
 #include "motor_app.h"
 #include "tim.h"
+#include <math.h>
 #include <string.h>
 
 /* 写入备份寄存器、请求 Bootloader 接管时使用的魔数。 */
@@ -415,7 +416,9 @@ static void MotorProtocol_HandleVector(const uint8_t data[24]) {
       /* speed_rpm是本节点在向量帧中对应的有符号转速目标。 */
       int16_t speed_rpm;
       memcpy(&speed_rpm, &data[8U + (2U * index)], sizeof(speed_rpm));
-      if ((speed_rpm < -10000) || (speed_rpm > 10000)) return;
+      /* The signed int16 field is the wire-format limit.  Do not add a
+       * software 10000-rpm ceiling here; the speed loop and linear SVPWM
+       * determine the reachable operating point from the actual bus voltage. */
       motor_protocol.control->speed_command_rpm = (float)speed_rpm;
       motor_protocol.control->speed_ref_rpm = (float)speed_rpm;
       FOC_Control_EnableSpeedLoop(motor_protocol.control, 1U);
@@ -443,8 +446,7 @@ static void MotorProtocol_HandleLegacy(const uint8_t data[8]) {
     /* 旧版帧直接携带IEEE754 float速度，兼容历史上位机。 */
     float speed_rpm;
     memcpy(&speed_rpm, &data[3], sizeof(speed_rpm));
-    if ((speed_rpm == speed_rpm) && speed_rpm >= -10000.0f &&
-        speed_rpm <= 10000.0f) {
+    if (isfinite(speed_rpm)) {
       motor_protocol.control->speed_command_rpm = speed_rpm;
       motor_protocol.control->speed_ref_rpm = speed_rpm;
       FOC_Control_EnableSpeedLoop(motor_protocol.control, 1U);

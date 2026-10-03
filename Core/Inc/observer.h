@@ -67,7 +67,8 @@ typedef struct {
 
   /*
    * 速度上报低通滤波截止频率，Hz；<=0时滤波器退化为直通。
-   * 只作用于上报值speed_rpm_f；启动判据和速度环仍使用原始speed_rpm。
+   * 用于上报值speed_rpm_f及启动速度匹配门。速度 PI 由应用层单独做
+   * 100 Hz 单极点滤波；最低转速、方向和单拍跳变仍用原始speed_rpm。
    */
   float speed_filter_fc;
 
@@ -172,8 +173,8 @@ typedef struct {
   float pll_phase_;//预留角度补偿字段，当前观测流程未更新
   float pll_omega_e; /* 最近一次有效磁链更新得到的电角速度，rad/s */
   float omega_m; /* 机械角速度，rad/s */
-  float speed_rpm; /* 机械转速原始值，rpm；启动判据和速度环使用此值 */
-  float speed_rpm_f; /* 机械转速上报滤波值，rpm；由speed_filter对speed_rpm低通得到 */
+  float speed_rpm; /* 机械转速原始值，rpm；启动判据的快速保护门使用此值 */
+  float speed_rpm_f; /* 机械转速滤波值，rpm；Ready速度匹配门与上报使用此值 */
 
   /*
    * speed_rpm_f的滤波器状态。
