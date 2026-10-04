@@ -163,8 +163,6 @@
 #define MOTOR_APP_SPEED_SETTLE_MS 50U
 /* 运行中只平滑转矩阶跃，不限制最终速度或可用电压。 */
 #define MOTOR_APP_RUN_IQ_SLEW_A_S 100.0f
-/* 速度控制单独用 100 Hz 单极点，30 Hz 双极点继续用于显示/Ready。 */
-#define MOTOR_APP_SPEED_CONTROL_FILTER_HZ 100.0f
 /* 只在可信闭环速度区估计机械加速度：5 ms 差分、10 ms 一阶滤波。 */
 #define MOTOR_APP_ACCEL_SAMPLE_MS 5U
 #define MOTOR_APP_ACCEL_FILTER_S 0.010f
@@ -457,7 +455,7 @@ static float MotorApp_Slew(float current, float target, float max_step) {
 /* 不对盲区速度求导，也不使用虚拟轨迹作为“实测”加速度。进入 I/F 后
  * 冻结最后可信估计；重新闭环时从新的速度窗口开始，避免跨状态差分。 */
 static void MotorApp_UpdateMeasuredAcceleration(void) {
-  float speed = motor_control.speed_feedback_rpm;
+  float speed = foc.observer.state.speed_rpm_f;
   if ((foc_motor_state != FOC_MOTOR_CLOSED_LOOP) ||
       !isfinite(speed) ||
       (fabsf(speed) <= MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM) ||
@@ -489,7 +487,7 @@ static void MotorApp_UpdateMeasuredAcceleration(void) {
 /* 仅在实际速度进入低速区后调用。进入点沿用当前控制角、电流参考；
  * 虚拟轨迹继承实际减速度及对应转矩，不能把配置上限当成实际减速度。 */
 static void MotorApp_BeginForcedOpenLoop(float command) {
-  float speed = motor_control.speed_feedback_rpm;
+  float speed = foc.observer.state.speed_rpm_f;
   float target = copysignf(fminf(fabsf(command), MOTOR_APP_HANDOFF_TARGET_RPM), command);
   float motion = target - speed;
   float requested_rate = motor_control.speed_slew_rpm_per_s;
@@ -574,7 +572,7 @@ static void MotorApp_CaptureDiagnostic(MotorApp_Diagnostic_t *dst,
   dst->iq = foc.state.i_dq.q;
   dst->vbus = foc.state.vbus;
   dst->segment = startup.segment;
-  dst->control_rpm = motor_control.speed_feedback_rpm;
+  dst->control_rpm = foc.observer.state.speed_rpm_f;
   dst->accel_rpm_s = startup.measured_accel_rpm_s;
   dst->if_accel_rad_s2 = startup.if_accel_rad_s2;
   dst->speed_integral = motor_control.speed_pi.integral;
@@ -739,13 +737,13 @@ static void MotorApp_ResolveControlReference(void) {
 }
 
 /* 控制速度与显示速度分离；I/F 时连速度输入都来自虚拟状态，辅助观测
- * 输出即使失效也不能把 NaN 带进控制器。 */
-static float MotorApp_ControlSpeedFeedback(const FOC_Control_t *control) {
+ * 输出即使失效也不能把 NaN 带进控制器。控制反馈直接用观测器 50 Hz
+ * 双极点滤波值 speed_rpm_f（与 Ready 一致性门、上报同源），应用层不再
+ * 叠加单极点滤波。 */
+static float MotorApp_ControlSpeedFeedback(void) {
   if ((foc_motor_state == FOC_MOTOR_CLOSED_LOOP) ||
       (foc_motor_state == FOC_MOTOR_OBSERVER_HANDOVER)) {
-    float w = CORDIC_TWO_PI_F * MOTOR_APP_SPEED_CONTROL_FILTER_HZ * foc.timer.Ts;
-    return control->speed_feedback_rpm + w / (1.0f + w) *
-        (foc.observer.state.speed_rpm - control->speed_feedback_rpm);
+    return foc.observer.state.speed_rpm_f;
   }
   return MotorApp_VirtualRpm();
 }
@@ -771,11 +769,12 @@ static void MotorApp_RunCurrentLoop(FOC_Control_t *control) {
   /* Park：静止系 alpha-beta -> 旋转系 dq。 */
   FOC_Park(&foc.state.i_alpha_beta, &foc_sin_cos, &foc.state.i_dq);
 
-  /* 控制用单极点 100 Hz，避免将显示用双极点 30 Hz 的约 10.6 ms
-   * 延迟带入速度 PI。强制 I/F 时只送虚拟速度，不依赖低速观测器。 */
-  float speed_feedback = MotorApp_ControlSpeedFeedback(control);
+  /* 速度环反馈用观测器 50 Hz 双极点滤波值（与显示/Ready 同源，50 Hz
+   * 双极点直流群延迟约 10.6 ms）。强制 I/F 时只送虚拟速度，不依赖低速
+   * 观测器。控制器经 control->speed_feedback 读取，不再走形参。 */
+  control->speed_feedback = MotorApp_ControlSpeedFeedback();
   FOC_Control_Run(control, foc.state.i_dq.d, foc.state.i_dq.q,
-                  speed_feedback, foc.state.vbus,
+                  foc.state.vbus,
                   &foc.state.u_dq.d, &foc.state.u_dq.q);
 
   /* NaN/Inf 一旦进 SVPWM 会算出垃圾比较值，必须在写寄存器前拦下。 */
@@ -1118,7 +1117,7 @@ static void MotorApp_AdvanceStateMachine(const Observer_Input_t *input) {
         (fabsf(command) <= MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM);
     if ((startup.closed_loop_braking != 0U) &&
         (fabsf(foc.observer.state.speed_rpm) <= MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM) &&
-        (fabsf(motor_control.speed_feedback_rpm) <= MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM)) {
+        (fabsf(foc.observer.state.speed_rpm_f) <= MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM)) {
       MotorApp_BeginForcedOpenLoop(command);
       return; /* 本拍角度与电流沿用原值，下一拍推进虚拟角。 */
     }
@@ -1486,7 +1485,7 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (double)foc.state.i_dq.q, (double)foc.state.u_dq.d,
       (double)foc.state.u_dq.q, (double)motor_control.voltage_limit);
   DebugConsole_Printf("CONTROL rpm_fb=%.1f slew=%.1f if_accel=%.1f sat_d=%d sat_q=%d speed_aw=%u brake=%u\r\n",
-      (double)motor_control.speed_feedback_rpm,
+      (double)foc.observer.state.speed_rpm_f,
       (double)motor_control.speed_slew_rpm_per_s,
       (double)startup.if_accel_rad_s2,
       (int)motor_control.id_pi.saturation, (int)motor_control.iq_pi.saturation,
@@ -2318,8 +2317,9 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
             FOC_WrapToPiFast(motor_control_angle_rad - foc.observer.state.phase_raw),
             motor_control.iq_ref_active, iq_obs);
       } else if (motor_wave_mode == MOTOR_APP_WAVE_VOLTAGE) {
-        /* 无协议长度变化：控制反馈、参考、电流请求/反馈、Ud/Uq/Ulim。 */
-        (void)MotorApp_SendJustFloat(motor_control.speed_feedback_rpm,
+        /* 无协议长度变化：控制反馈(speed_rpm_f)、参考、电流请求/反馈、
+         * Ud/Uq/Ulim。 */
+        (void)MotorApp_SendJustFloat(foc.observer.state.speed_rpm_f,
             motor_control.speed_ref_active_rpm, motor_control.iq_ref_active,
             foc.state.i_dq.q, foc.state.u_dq.d, foc.state.u_dq.q,
             motor_control.voltage_limit);

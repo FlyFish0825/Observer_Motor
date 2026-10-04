@@ -598,13 +598,13 @@ void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
  * @param control           FOC总控制器指针。
  * @param id_feedback       d轴电流反馈（A）。
  * @param iq_feedback       q轴电流反馈（A）。
- * @param speed_feedback_rpm 转速反馈（rpm），来自观测器PLL。
  * @param dc_bus_voltage    当前直流母线电压（V），用于电压矢量限幅。
  * @param ud_output         [out] d轴电压输出（V），可为NULL。
  * @param uq_output         [out] q轴电压输出（V），可为NULL。
  *
  *
- * 1) 记录反馈：id_feedback/iq_feedback（A）、speed_feedback_rpm（rpm）写进结构体；
+ * 1) 记录反馈：id_feedback/iq_feedback（A）写进结构体；转速反馈由应用层在本拍
+ *    调用前写入 speed_feedback 字段，本函数只读；
  * 2) 读仲裁使能：只看 reference.speed_loop_enable，与 speed_loop_enable_last
  *    比较；不相等说明模式发生跳变，本拍执行一次无扰切换：计数器清零、
  *    iq_ref_target 从 iq_ref_active 续起；进入速度模式时把
@@ -631,8 +631,7 @@ void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
  * speed_loop_enable_last 已同步为本拍使能。
  */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
-                     float iq_feedback, float speed_feedback_rpm,
-                     float dc_bus_voltage, float *ud_output,
+                     float iq_feedback, float dc_bus_voltage, float *ud_output,
                      float *uq_output);
 
 /**

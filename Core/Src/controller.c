@@ -19,7 +19,7 @@
  *
  * 计数器与角度单位约定（阅读本文件时必须分清）：
  *   - theta_ctrl 是"电角度"，单位 rad，机械角度 = 电角度 / 极对数；
- *   - speed_feedback_rpm / speed_ref_rpm 是"机械转速"，单位 rpm；
+ *   - speed_feedback / speed_ref_rpm 是"机械转速"，单位 rpm；
  *   - 所有电流单位 A，所有电压单位 V，时间单位 s，角度斜坡单位 rpm/s 或 A/s。
  */
 #include "controller.h"
@@ -749,11 +749,9 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
   control->id_feedback = 0.0f;
   control->iq_feedback = 0.0f;
-  control->speed_feedback_rpm = 0.0f;
-  /* 三个反馈量初值 0（电机还没转，也没有电流采样结果）。
-   * 注意 speed_feedback_rpm = 0 会让第一次进入速度模式时把
-   * speed_ref_active_rpm 也设为 0，也就是说上电初期转速参考会被"归零重爬"
-   * ——这正是从 0 起步的斜坡行为，符合预期。 */
+  /* 两个反馈量初值 0（电机还没转，也没有电流采样结果）。 */
+  control->speed_feedback = 0.0f;
+  /* 转速反馈初值 0，进入速度模式前由应用层每拍覆写。 */
   control->speed_ref_active_rpm = control->speed_ref_rpm;
   /* 斜坡内部状态初值 = 参考值，使未进入速度模式前两者一致。 */
   control->speed_ref_previous_rpm = control->speed_ref_rpm;
@@ -808,8 +806,8 @@ void FOC_Control_Reset(FOC_Control_t *control) {
 
   control->id_feedback = 0.0f;
   control->iq_feedback = 0.0f;
-  control->speed_feedback_rpm = 0.0f;
-  /* 三个反馈缓存清零，使复位后的显示/曲线与"尚未采样"状态一致。 */
+  /* 反馈缓存清零，使复位后的显示/曲线与"尚未采样"状态一致。 */
+  control->speed_feedback = 0.0f;
   control->speed_ref_active_rpm = control->speed_ref_rpm;
   /* 斜坡内部状态重新对齐当前参考，复位后不产生额外爬升。注意此时
    * speed_ref_rpm 是"命令值"而不是实测转速，所以复位后下一次速度环会朝着
@@ -876,10 +874,12 @@ void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
  * 它必须是常数时间、无阻塞、无动态分配的；本函数内部唯一的外部计算是
  * arm_sqrt_f32（VSQRT.F32 单指令）。
  * 参数单位：id_feedback/iq_feedback 为 A（Park 变换后的 dq 电流）；
- * speed_feedback_rpm 为 rpm（观测器 PLL 的电角速度换算成机械转速）；
  * dc_bus_voltage 为 V（母线电压采样，可能还没做滤波）；ud_output/uq_output
  * 为可选的输出指针，单位 V，可为 NULL。
- * 前置条件：应用层已在同一拍调用 FOC_Control_SubmitReference 提交本拍参考。
+ * 转速反馈不经过形参：应用层在本拍调用前把实际反馈量写入 control->speed_feedback
+ * （闭环/接管时为观测器 50 Hz 滤波值，I/F 时为虚拟转速），本函数直接读该字段。
+ * 前置条件：应用层已在同一拍调用 FOC_Control_SubmitReference 提交本拍参考，
+ * 并已写入 control->speed_feedback。
  * 后置条件：control->ud_output/uq_output/voltage_limit/iq_ref_active/
  * speed_loop_enable_last 等字段为本拍值；若输出指针非空，其中写入与结构体
  * 相同的电压值。
@@ -889,8 +889,7 @@ void FOC_Control_SubmitReference(FOC_Control_t *control, float theta_ctrl,
  * 的限幅都变成 ±0 V，即停止输出电压（故障可见、可控）。
  */
 void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
-                     float iq_feedback, float speed_feedback_rpm,
-                     float dc_bus_voltage, float *ud_output,
+                     float iq_feedback, float dc_bus_voltage, float *ud_output,
                      float *uq_output) {
   float uq_limit_squared; /* 扣除 d 轴电压后的 q 轴电压平方余量。= voltage_limit² - ud²，单位 V²，可以为负（表示 d 轴已把矢量额度用尽）。 */
   float uq_limit;         /* q 轴 PI 的动态输出限幅。= sqrt(max(uq_limit_squared,0))，单位 V，恒 >= 0；作为 iq_pi 的 ±限幅。 */
@@ -915,9 +914,9 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
 
   control->id_feedback = id_feedback;
   control->iq_feedback = iq_feedback;
-  control->speed_feedback_rpm = speed_feedback_rpm;
-  /* 先把三个反馈写进结构体，纯粹是为了 Live Watch/上位机观察；
-   * 真正的计算直接用形参，不依赖这三个字段。 */
+  /* 先把反馈写进结构体，纯粹是为了 Live Watch/上位机观察；
+   * 真正的计算直接用形参，不依赖这些字段。转速反馈不同：应用层
+   * 预先写入 speed_feedback 字段，本函数的计算直接读该字段。 */
 
   /* 仲裁结果由应用层在调用本函数前提交，这里只读取并规范化使能标志。 */
   speed_enabled = (control->reference.speed_loop_enable != 0U) ? 1U : 0U;
@@ -952,9 +951,9 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
    * speed_slew value authoritative; only the default acceleration slope is
    * replaced by the faster deceleration slope. */
   if (isfinite(speed_target) && isfinite(control->speed_ref_previous_rpm) &&
-      isfinite(speed_feedback_rpm) &&
-      ((speed_feedback_rpm > 0.0f && speed_target < speed_feedback_rpm) ||
-       (speed_feedback_rpm < 0.0f && speed_target > speed_feedback_rpm))) {
+      isfinite(control->speed_feedback) &&
+      ((control->speed_feedback > 0.0f && speed_target < control->speed_feedback) ||
+       (control->speed_feedback < 0.0f && speed_target > control->speed_feedback))) {
     if ((control->reference.speed_slew_limit < 0.0f) &&
         (speed_slew >=
          (FOC_SPEED_REFERENCE_SLEW_RPM_PER_S_DEFAULT - 0.001f)) &&
@@ -981,13 +980,13 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
        * 仲裁参考，也可能来自速度 PI），若再按某个方向标志反号就会把制动力矩
        * 变成驱动力矩。反转运行由应用层通过 id_ref/iq_ref 的符号和角度处理，
        * 控制器不再引入第二处符号翻转。 */
-      control->speed_ref_active_rpm = speed_feedback_rpm;
+      control->speed_ref_active_rpm = control->speed_feedback;
       control->speed_ref_previous_rpm = speed_target;
       /* 把斜坡内部状态直接设为当前实测转速，使速度 PI 接管瞬间
        * "参考=反馈"，误差为 0，避免参考从旧值（例如 1500 rpm）跳到实测值
        * 造成一次巨大的误差冲击。 */
       PI_Controller_PreloadOutput(&control->speed_pi, control->iq_ref_active,
-                                  speed_feedback_rpm, speed_feedback_rpm);
+                                  control->speed_feedback, control->speed_feedback);
       /* 用当前 Iq 作为期望输出预装速度 PI。因为 reference 与
        * feedback 都传实测转速，误差为 0、比例项为 0，所以等价于把速度 PI 的
        * 积分直接设成 iq_ref_active —— 速度环接管的第一拍输出就等于原来的 Iq，
@@ -1012,18 +1011,18 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
      * 进入速度模式时的无扰预装或 slew=0 的冻结语义。 */
     if ((speed_target != control->speed_ref_previous_rpm) &&
         isfinite(speed_target) && isfinite(control->speed_ref_previous_rpm) &&
-        isfinite(speed_feedback_rpm) && isfinite(control->speed_ref_active_rpm) &&
+        isfinite(control->speed_feedback) && isfinite(control->speed_ref_active_rpm) &&
         isfinite(speed_slew) && (speed_slew > 0.0f) &&
-        (((speed_feedback_rpm > 0.0f) && (speed_target < speed_feedback_rpm)) ||
-         ((speed_feedback_rpm < 0.0f) && (speed_target > speed_feedback_rpm)))) {
-      if (((speed_feedback_rpm > 0.0f) &&
-           (control->speed_ref_active_rpm > speed_feedback_rpm)) ||
-          ((speed_feedback_rpm < 0.0f) &&
-           (control->speed_ref_active_rpm < speed_feedback_rpm))) {
-        control->speed_ref_active_rpm = speed_feedback_rpm;
+        (((control->speed_feedback > 0.0f) && (speed_target < control->speed_feedback)) ||
+         ((control->speed_feedback < 0.0f) && (speed_target > control->speed_feedback)))) {
+      if (((control->speed_feedback > 0.0f) &&
+           (control->speed_ref_active_rpm > control->speed_feedback)) ||
+          ((control->speed_feedback < 0.0f) &&
+           (control->speed_ref_active_rpm < control->speed_feedback))) {
+        control->speed_ref_active_rpm = control->speed_feedback;
       }
-      if (((speed_feedback_rpm > 0.0f) && (control->speed_pi.integral > 0.0f)) ||
-          ((speed_feedback_rpm < 0.0f) && (control->speed_pi.integral < 0.0f))) {
+      if (((control->speed_feedback > 0.0f) && (control->speed_pi.integral > 0.0f)) ||
+          ((control->speed_feedback < 0.0f) && (control->speed_pi.integral < 0.0f))) {
         control->speed_pi.integral = 0.0f;
       }
       /* iq_ref_active、iq_ref_target 和电流 PI 保持原值，后续仍通过
@@ -1052,7 +1051,7 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
       /* 先归零再计算，保证即使下面的 PI 调用出现异常，计数器也不会
        * 溢出（uint16_t 虽然能计到 65535，但保持"到点即清"的语义更清晰）。 */
       float integral_before = control->speed_pi.integral;
-      float speed_error = control->speed_ref_active_rpm - speed_feedback_rpm;
+      float speed_error = control->speed_ref_active_rpm - control->speed_feedback;
       float current_error = control->iq_ref_active - iq_feedback;
       /* 电压已打满且电流仍跟不上时，禁止速度积分继续要求同方向转矩。
        * 误差反号立即允许退积分；不降低电压、转速目标或 Iq 软件上限。 */
@@ -1061,11 +1060,11 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
           (((control->iq_pi.saturation == PI_SATURATION_HIGH) && (speed_error > 0.0f)) ||
            ((control->iq_pi.saturation == PI_SATURATION_LOW) && (speed_error < 0.0f)));
       requested = PI_Controller_Run(&control->speed_pi,
-          control->speed_ref_active_rpm, speed_feedback_rpm);
+          control->speed_ref_active_rpm, control->speed_feedback);
       if (control->speed_voltage_limited != 0U) {
         PI_Controller_PreloadOutput(&control->speed_pi,
             control->speed_pi.proportional + integral_before,
-            control->speed_ref_active_rpm, speed_feedback_rpm);
+            control->speed_ref_active_rpm, control->speed_feedback);
         requested = control->speed_pi.output;
       }
       reachable = requested;
@@ -1090,7 +1089,7 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
            * PI_Controller_Run 内部算出的一致，回装纯粹是把积分改写成"可达值"
            * 对应的状态，从而让速度 PI 下一拍从更低的目标继续。 */
           PI_Controller_PreloadOutput(&control->speed_pi, reachable,
-              control->speed_ref_active_rpm, speed_feedback_rpm);
+              control->speed_ref_active_rpm, control->speed_feedback);
         }
       }
       control->iq_ref_target = reachable;
