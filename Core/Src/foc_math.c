@@ -34,7 +34,7 @@ void FOC_Data_Init(void) {
   foc.timer.pwm_arr = 3399U;
   foc.timer.adc_trigger = 3398U;
   /* 170 MHz下90个DTG计数约为529 ns，适合作为新功率板的保守起点。 */
-  foc.timer.dead_time = 0U; //预驱自带死区，这个不需要了
+  foc.timer.dead_time = 0U; // 外部栅极驱动已提供死区
   foc.timer.clock_freq = 170000000U;
 
   /*
@@ -55,11 +55,11 @@ void FOC_Data_Init(void) {
   /*
    * 新板电流采样：5 mOhm分流电阻、约24倍模拟增益。
    * ADC注入组使用单次12位采样，因此每个ADC计数对应：
-   * 3.3 / 4096 / (0.005 * 24) = 0.0067138671875 A。
+   * 3.3 / 4096 / (0.005 *  23.5294117647) = 0.00684814453125f A。
    */
-  foc.current.gain_a = 0.0067138671875f;
-  foc.current.gain_b = 0.0067138671875f;
-  foc.current.gain_c = 0.0067138671875f;
+  foc.current.gain_a = 0.00684814453125f;
+  foc.current.gain_b = 0.00684814453125f;
+  foc.current.gain_c = 0.00684814453125f;
   foc.current.rebuild = CURRENT_REBUILD_A;
 
   foc_sin_cos.sin = 0.0f;
@@ -96,12 +96,12 @@ void FOC_Data_Init(void) {
       .pll_omega_limit = 50000.0f,
 
       /*
-       * 上报速度低通截止频率：30Hz双极点低通(两级一阶级联)，
+       * 上报速度低通截止频率：50Hz双极点低通(两级一阶级联)，
        * 平滑CAN/VOFA速度显示。直流群延迟约10.6ms；
        * Ready速度一致性门使用该滤波值；速度 PI 另用 100 Hz 单极点。
        * 最低转速、方向、单拍跳变门仍使用原始值。
        */
-      .speed_filter_fc = 30.0f
+      .speed_filter_fc = 50.0f
   };
 
   Observer_Init(&foc.observer, &motor, &observer_cfg);

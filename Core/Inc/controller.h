@@ -177,7 +177,7 @@ typedef struct {
 #define FOC_SPEED_REFERENCE_SLEW_RPM_PER_S_DEFAULT 20000.0f   /* 速度参考最大变化率，单位 rpm/s，取值 [0, +inf)。 */
 /* 降速/反转时提高参考回落速度；Iq 仍受独立的电流变化率限制，避免把
  * 旧正向速度积分拖到目标之后。仅在没有应用层显式 speed_slew 限制时启用。 */
-#define FOC_SPEED_DECEL_REFERENCE_SLEW_RPM_PER_S_DEFAULT 60000.0f
+#define FOC_SPEED_DECEL_REFERENCE_SLEW_RPM_PER_S_DEFAULT 20000.0f
 
 /* 25kHz电流环 / 25 = 1kHz速度环 */
 /*
