@@ -304,13 +304,55 @@ HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
   return HAL_OK;
 }
 
-void ADC_Regular_PauseForLs(void) {
-  /* 当前分支的规则组由主循环轮询；停止两路DMA/规则组可安全释放ADC。
-   * 注入组仍由TIM1硬件触发，不受此调用影响。 */
-  (void)HAL_ADC_Stop_DMA(&hadc1);
-  (void)HAL_ADC_Stop_DMA(&hadc2);
-  (void)HAL_ADCEx_RegularStop(&hadc1);
-  (void)HAL_ADCEx_RegularStop(&hadc2);
+/**
+ * @brief 恢复上电时的FOC注入采样约定，不开启功率输出或TIM1触发。
+ * 两路注入组先停稳，再依次武装ADC2/ADC1；统一关闭单Rank的JEOC，
+ * 仅ADC1整组完成JEOS触发控制。不能用InjectedStart_IT的默认EOC选择，
+ * 因为规则组轮询保留ADC_EOC_SINGLE_CONV，会把注入中断改回JEOC。
+ * @note 仅供初始化/主循环调用；TIM1必须停止、MOE必须关闭。
+ */
+HAL_StatusTypeDef ADC_Injected_RestoreForFoc(void) {
+  const uint32_t armed = ADC_CR_ADEN | ADC_CR_JADSTART;
+  HAL_StatusTypeDef status;
+
+  /* 不能在PWM运行中重建采样链路，也不能意外启动软件触发注入。 */
+  if (((TIM1->CR1 & TIM_CR1_CEN) != 0U) ||
+      ((TIM1->BDTR & TIM_BDTR_MOE) != 0U)) {
+    return HAL_BUSY;
+  }
+  if (((ADC1->JSQR & ADC_JSQR_JEXTEN) == 0U) ||
+      ((ADC2->JSQR & ADC_JSQR_JEXTEN) == 0U)) {
+    return HAL_ERROR;
+  }
+
+  /* 禁止残留JEOC/JEOS回调；HAL停止等待尚未完成的注入转换退出。 */
+  __HAL_ADC_DISABLE_IT(&hadc1, ADC_IT_JEOC | ADC_IT_JEOS);
+  __HAL_ADC_DISABLE_IT(&hadc2, ADC_IT_JEOC | ADC_IT_JEOS);
+  status = HAL_ADCEx_InjectedStop_IT(&hadc1);
+  if (status != HAL_OK) return status;
+  status = HAL_ADCEx_InjectedStop_IT(&hadc2);
+  if (status != HAL_OK) return status;
+
+  /* 不按最后测量回路只恢复一路，防止B相反馈在下一轮Rs/FOC中冻结。
+   * 非IT启动不会根据规则组EOCSelection偷偷打开JEOC中断。 */
+  status = HAL_ADCEx_InjectedStart(&hadc2);
+  if (status != HAL_OK) return status;
+  status = HAL_ADCEx_InjectedStart(&hadc1);
+  if (status != HAL_OK) return status;
+
+  /* 只有两路都已启用且等待外部触发，才开放ADC1完整序列中断。 */
+  if (((ADC1->CR & armed) != armed) || ((ADC2->CR & armed) != armed)) {
+    return HAL_ERROR;
+  }
+  __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_JEOS);
+  return HAL_OK;
+}
+
+HAL_StatusTypeDef ADC_Regular_PauseForLs(void) {
+  /* 当前BoardAdc_Update仅轮询ADC1母线/温度，不启动规则组DMA。
+   * RegularStop只停规则组，保留已武装的注入组；这里不能使用
+   * HAL_ADC_Stop_DMA，它会连同注入组一起停止并禁用ADC。 */
+  return HAL_ADCEx_RegularStop(&hadc1);
 }
 
 

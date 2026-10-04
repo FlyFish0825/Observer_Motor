@@ -402,10 +402,13 @@ bool MotorCalibration_LsStart(CalPhase_t phase)
     ls_gain = (phase == CAL_PHASE_CA) ? foc.current.gain_a : foc.current.gain_b;
     ls_rline = 2.0f * motor_cal.rs;
     ls_vbus = foc.state.vbus;
-    /* CA暂停原母线/温度DMA，恢复时使用MX_ADC1_Init()标准配置。 */
-    /* 只有CA占用ADC1规则组，需暂停原母线/温度DMA；Stop后由常规服务恢复。 */
-    if (phase == CAL_PHASE_CA)
-        ADC_Regular_PauseForLs();
+    /* CA只暂停ADC1母线/温度轮询；不能连带停止B相的ADC2注入组。
+     * 暂停失败时仍未配置脉冲或导通GPIO，不允许继续辨识。 */
+    if ((phase == CAL_PHASE_CA) && (ADC_Regular_PauseForLs() != HAL_OK)) {
+        ls_error = 2U;
+        MotorCalibration_Stop();
+        return false;
+    }
     ls_error = 0U;
     ls_update_seen = ls_compare_seen = ls_armed = 0U;
 
@@ -839,10 +842,11 @@ void MotorCalibration_Start(void)
  * @brief 统一关闭功率级并恢复正式固件的ADC/TIM1配置。
  * 步骤1：关MOE、取消自动下一组并停止PWM，六路GPIO全拉低。
  * 步骤2：若Ls使用过TIM2/3与ADC DMA，则停止触发、DMA和当前ADC规则组。
- * 步骤3：恢复本次ADC（CA为ADC1，其他为ADC2），清除Ls模拟看门狗设置。
+ * 步骤3：恢复本次占用ADC的通道配置，清除Ls模拟看门狗设置。
  * 步骤4：MX_TIM1_Init恢复正常PWM与ADC触发配置，但继续强制关闭输出。
- * 步骤5：Ls场景重新启动所选ADC注入组并置LS_IDLE，最后回到FOC待机。
- * 不擦除辨识数值；CA原母线规则DMA由ADC_Regular_Service后续重启。
+ * 步骤5：与上电共用恢复入口，重新武装两路注入组：ADC1仅JEOS、ADC2无中断。
+ * 两路恢复成功后才置LS_IDLE/FOC待机；不擦除辨识数值。
+ * CA原母线/温度轮询由MotorApp_Process后续恢复，不在此启动规则DMA。
  * @note 调用环境：主循环；不得在高频中断中执行HAL初始化
  */
 void MotorCalibration_Stop(void)
@@ -854,6 +858,7 @@ void MotorCalibration_Stop(void)
     ls_armed = 0U;
     ls_auto = 0U; /* 任何Stop（包括ls stop或按键）都取消剩余自动回路。 */
     FOC_PWM_Stop();
+    TIM1->CR1 &= ~TIM_CR1_CEN; /* 明确停止触发源，恢复ADC期间不产生新采样。 */
 
     /* 切回标准TIM1配置前，六路GPIO必须先全部拉低。 */
     Cal_AllPinsLow();
@@ -897,12 +902,13 @@ void MotorCalibration_Stop(void)
                     TIM_CCER_CC3E | TIM_CCER_CC3NE | TIM_CCER_CC4E);
     TIM1->CCR1 = TIM1->CCR2 = TIM1->CCR3 = 0U;
 
-    /* 8.6 ADC注入电流采样恢复成功后才发布LS_IDLE。 */
-    if (restore_ls) {
-        if (HAL_ADCEx_InjectedStart_IT(hadc) != HAL_OK)
-            Error_Handler();
-        ls_state = LS_IDLE; /* CA的常规DMA交由ADC_Regular_Service下轮重启。 */
+    /* 8.6 Rs/Ls退出均恢复两路注入采样，不能只重启最后使用的ADC。
+     * 与上电共用JEOS策略；恢复失败时保持MOE/CEN关闭，不发布可运行状态。 */
+    if (ADC_Injected_RestoreForFoc() != HAL_OK) {
+        Error_Handler();
+        return;
     }
+    ls_state = LS_IDLE;
     /* 8.7 整个外设恢复完成后回到待机；结果继续保存在RAM。 */
     foc_motor_state = FOC_MOTOR_IDLE;
 }

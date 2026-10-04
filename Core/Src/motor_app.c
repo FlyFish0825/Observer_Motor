@@ -1511,6 +1511,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
   DebugConsole_Printf("ADC JDR1=%lu JDR2=%lu JSQR=0x%08lX adc_cfg=%lu\r\n",
       (unsigned long)ADC2->JDR1, (unsigned long)ADC2->JDR2,
       (unsigned long)ADC2->JSQR, (unsigned long)motor_adc_cfg_ok);
+  /* 实时读回，不沿用上电adc_cfg缓存；辨识后可检查两路注入是否重新武装。
+   * CR需同时包含ADEN/JADSTART；ADC1应仅JEOSIE，ADC2不应有JEOCIE/JEOSIE。 */
+  DebugConsole_Printf("ADC_RUN A1_CR=0x%08lX A1_IER=0x%08lX A2_CR=0x%08lX A2_IER=0x%08lX\r\n",
+      (unsigned long)ADC1->CR, (unsigned long)ADC1->IER,
+      (unsigned long)ADC2->CR, (unsigned long)ADC2->IER);
   /* 自检不通过时把"为什么起不来"直接写进 status：上电那条报容易漏看。 */
   if (motor_adc_cfg_ok == 0U) {
     DebugConsole_Printf("ADC INJ MISMATCH expect ADC1 JL=3 JSQ=3,12,11,14 ; ADC2 JL=1 JSQ=3,17 ; adc_chk=%lu\r\n",
@@ -1802,8 +1807,8 @@ void MotorApp_RequestRun(uint8_t run) {
  * 条件：FOC_Data_Init 已在 MX_TIM1_Init 之前执行）。关键顺序：
  *   DWT 延时 -> CORDIC -> 波形 DMA 预配置 -> 控制器增益 -> 关桥清比较值
  *   -> 调试控制台与寄存器注册 -> 模拟前端校准 -> 母线初值
- *   -> 启动 ADC2 注入（无中断）-> 启动 ADC1 注入中断（默认 JEOC，随后
- *   换成 JEOS，保证每周期只进一次控制回调）-> 注入序列回读自检
+ *   -> 共用入口恢复ADC2/ADC1注入（ADC2无中断、ADC1仅JEOS，
+ *   完整序列后执行控制回调）-> 注入序列回读自检
  *   -> 设置 CH4 比较值并启动 CH4（会置 MOE，但 CH1~3 未使能，桥不输出）。
  * 返回 HAL_OK 后注入中断开始产生，零偏校准自动进行。 */
 HAL_StatusTypeDef MotorApp_Init(void) {
@@ -1878,13 +1883,9 @@ HAL_StatusTypeDef MotorApp_Init(void) {
     foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
   }
 
-  /* ADC2 只有一个注入通道，先启动不开中断：结果在 ADC1 完整序列结束时
-   * 统一读取，共享的 ADC1_2 IRQ 只由 ADC1 产生控制中断。 */
-  if (HAL_ADCEx_InjectedStart(&hadc2) != HAL_OK) return HAL_ERROR;
-
-  /* 启动 ADC1 注入并开中断。从这里开始 25 kHz 中断产生；状态为 IDLE，
-   * 中断只走关桥+校准路径。 */
-  if (HAL_ADCEx_InjectedStart_IT(&hadc1) != HAL_OK) return HAL_ERROR;
+  /* 与Rs/Ls退出共用恢复入口：ADC2两Rank不产生注入中断，ADC1四Rank
+   * 完成后仅JEOS触发控制。此处TIM1尚未启动，先武装完整采样链路。 */
+  if (ADC_Injected_RestoreForFoc() != HAL_OK) return HAL_ERROR;
 
   /* 注入序列回读自检：HAL 在 ScanConvMode=DISABLE 时会静默截断注入序列
    * 且仍返回 HAL_OK（V 相端电压曾因此从未被采样、JDR2 恒 0），只能靠
@@ -1917,11 +1918,8 @@ HAL_StatusTypeDef MotorApp_Init(void) {
   }
   motor_adc_cfg_ok = adc_inj_ok;
 
-  /* EOCSelection 须保留 ADC_EOC_SINGLE_CONV 供规则组逐 Rank 轮询（HAL
-   * 据此默认开 JEOC）；这里把注入中断换成 JEOS，确保 ADC1 的 U/W 两个
-   * Rank 全部完成后每周期只进一次控制回调。 */
-  __HAL_ADC_DISABLE_IT(&hadc1, ADC_IT_JEOC);
-  __HAL_ADC_ENABLE_IT(&hadc1, ADC_IT_JEOS);
+  /* ADC_Injected_RestoreForFoc已统一设置ADC1仅JEOS、ADC2无注入中断。
+   * EOCSelection仍保留ADC_EOC_SINGLE_CONV，供规则组逐Rank轮询使用。 */
 
   /* CH4 比较值 = adc_trigger：决定注入触发在 PWM 周期内的位置（通常落在
    * 下桥臂全开、电流可采的窗口）。必须用 HAL_TIM_PWM_Start（HAL 才会

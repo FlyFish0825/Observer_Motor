@@ -285,8 +285,14 @@ void FOC_PWM_Stop(void);
  * @return HAL_OK成功，HAL_TIMEOUT超时，HAL_ERROR启动失败。
  */
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void);
-/* 参数辨识占用规则组DMA前释放主循环采样资源。 */
-void ADC_Regular_PauseForLs(void);
+/**
+ * @brief 在TIM1停止且MOE关闭时恢复两路FOC注入采样。
+ * @note 上电与辨识退出共用：ADC2无注入中断，ADC1仅JEOS；不启动PWM。
+ * @return HAL_OK表示两路均已武装；调用者仅在成功后允许重新开启触发。
+ */
+HAL_StatusTypeDef ADC_Injected_RestoreForFoc(void);
+/* CA电感辨识前只暂停ADC1规则组轮询，不停止ADC2注入采样。 */
+HAL_StatusTypeDef ADC_Regular_PauseForLs(void);
 
 /**
  * @brief 三相电流ADC零偏校准（已废弃，校准逻辑移入motor_app.c）。
