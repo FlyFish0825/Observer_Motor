@@ -163,7 +163,8 @@ void FOC_UpdateBusCurrentEstimate(FOC_Handle_t *handle) {
     return;
   }
 
-  if (foc_motor_state == FOC_MOTOR_IDLE) {
+  if ((foc_motor_state == FOC_MOTOR_IDLE) ||
+      (foc_motor_state == FOC_MOTOR_CALIBRATION)) {
     handle->state.ibus_est = 0.0f;
     handle->state.ibus_filter = 0.0f;
     return;
@@ -301,6 +302,15 @@ HAL_StatusTypeDef ADC_Regular_Read_DMA(void) {
   HAL_ADC_Stop_DMA(&hadc2);
 
   return HAL_OK;
+}
+
+void ADC_Regular_PauseForLs(void) {
+  /* 当前分支的规则组由主循环轮询；停止两路DMA/规则组可安全释放ADC。
+   * 注入组仍由TIM1硬件触发，不受此调用影响。 */
+  (void)HAL_ADC_Stop_DMA(&hadc1);
+  (void)HAL_ADC_Stop_DMA(&hadc2);
+  (void)HAL_ADCEx_RegularStop(&hadc1);
+  (void)HAL_ADCEx_RegularStop(&hadc2);
 }
 
 

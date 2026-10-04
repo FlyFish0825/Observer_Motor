@@ -34,6 +34,8 @@
 #include "debug_console.h"
 #include "foc_math.h"
 #include "main.h"
+#include "motor_calibration.h"
+#include "motor_protocol.h"
 #include "opamp.h"
 #include "tim.h"
 #include "usart.h"
@@ -41,6 +43,8 @@
 #include "arm_math.h"
 #include <stddef.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
 
 /* ======================== 应用层参数 ======================== */
 
@@ -337,6 +341,7 @@ static volatile uint32_t motor_run_requested = 0U;  /* ISR 闸门：故障时强
 static volatile uint32_t motor_fault_latched = 0U;  /* 故障闭锁：须显式 run 0 解除 */
 static volatile uint32_t motor_start_fail_reason = MOTOR_APP_FAIL_NONE; /* 首个故障码 */
 static volatile uint8_t motor_idle_reset_done = 0U; /* IDLE 重量级复位去重 */
+static volatile uint8_t motor_calibration_just_started = 0U;
 
 /* ---- 采样与实时诊断（中断域写，主循环只读） ---- */
 
@@ -1528,6 +1533,111 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
     DebugConsole_Printf("FAULT latched: inspect startdiag; set run 0 before another start\r\n");
 }
 
+/* Rs单一启动入口：串口、CAN和按键均共用同一套前置条件。 */
+bool MotorApp_StartRsCalibration(void) {
+  if ((foc_motor_state != FOC_MOTOR_IDLE) ||
+      MotorCalibration_LsBusy() ||
+      (foc.calibration.calibrated == 0U) ||
+      (foc.state.vbus < 5.0f) || (foc.state.vbus > 50.0f) ||
+      ((TIM1->BDTR & TIM_BDTR_MOE) != 0U)) {
+    return false;
+  }
+
+  FOC_PWM_Stop();
+  /* 辨识完成后不得沿用尚未执行的run 1自动启动FOC；上位机需再次明确下发run。 */
+  motor_run_command = 0U;
+  MotorApp_ApplyRunCommand();
+  motor_calibration_just_started = 1U;
+  MotorCalibration_Start();
+  foc_motor_state = FOC_MOTOR_CALIBRATION;
+  TIM1->CCR4 = foc.timer.adc_trigger;
+  if (HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_4) != HAL_OK) {
+    MotorCalibration_Stop();
+    motor_cal.state = CAL_ERROR;
+    return false;
+  }
+  return true;
+}
+
+void MotorApp_MarkCalibrationStarted(void) {
+  motor_calibration_just_started = 1U;
+}
+
+static void MotorDebug_Rs(int argc, char *argv[]) {
+  MotorProtocol_CalibrationCancel();
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("Rs stopped\r\n");
+    return;
+  }
+  if ((argc != 1) || !MotorApp_StartRsCalibration()) {
+    DebugConsole_Printf("Rs rejected: use rs | rs stop; check idle, ADC, Vbus\r\n");
+    return;
+  }
+  DebugConsole_Printf("Rs started\r\n");
+}
+
+static void MotorDebug_Ls(int argc, char *argv[]) {
+  MotorProtocol_CalibrationCancel();
+  if ((argc == 2) && (strcmp(argv[1], "stop") == 0)) {
+    MotorCalibration_Stop();
+    DebugConsole_Printf("Ls stopped\r\n");
+    return;
+  }
+  if (MotorCalibration_LsBusy()) {
+    DebugConsole_Printf("Ls rejected: calibration already active\r\n");
+    return;
+  }
+  CalPhase_t phase = CAL_PHASE_AB;
+  uint8_t all = 1U;
+  int pos = 1;
+  if (argc > 1) {
+    if (strcmp(argv[1], "ab") == 0) { phase = CAL_PHASE_AB; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "bc") == 0) { phase = CAL_PHASE_BC; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "ca") == 0) { phase = CAL_PHASE_CA; all = 0U; pos = 2; }
+    else if (strcmp(argv[1], "all") == 0) { pos = 2; }
+  }
+  if (argc > pos + 1) {
+    DebugConsole_Printf("Usage: ls [all|ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+    return;
+  }
+  if (argc == pos + 1) {
+    char *end = NULL;
+    float rs = strtof(argv[pos], &end);
+    if ((end == NULL) || (*end != '\0') || !(rs >= 0.1f && rs <= 2.0f) ||
+        (foc_motor_state != FOC_MOTOR_IDLE)) {
+      DebugConsole_Printf("Usage: ls [all|ab|bc|ca] [Rs_ohm] | ls stop\r\n");
+      return;
+    }
+    motor_cal.rs = rs;
+    DebugConsole_Printf("Ls using supplied Rs=%.6fohm\r\n", (double)rs);
+  }
+  motor_run_command = 0U;
+  MotorApp_ApplyRunCommand();
+  motor_calibration_just_started = 1U;
+  if (all) {
+    if (MotorCalibration_LsStartAll())
+      DebugConsole_Printf("Ls sequence started: AB -> BC -> CA\r\n");
+    else
+      DebugConsole_Printf("Ls rejected: stop motor, measure Rs, check Vbus\r\n");
+  } else if (MotorCalibration_LsStart(phase)) {
+    DebugConsole_Printf("Ls %s started\r\n",
+        phase == CAL_PHASE_AB ? "AB" : phase == CAL_PHASE_BC ? "BC" : "CA");
+  } else {
+    DebugConsole_Printf("Ls rejected: stop motor, measure Rs, check Vbus\r\n");
+  }
+}
+
+static void MotorDebug_Cal(int argc, char *argv[]) {
+  if ((argc != 2) || (strcmp(argv[1], "show") != 0)) {
+    DebugConsole_Printf("Usage: cal show\r\n");
+    return;
+  }
+  DebugConsole_Printf("Rs=%.6fohm Ls AB/BC/CA=%.3f/%.3f/%.3fuH\r\n",
+      (double)motor_cal.rs, (double)(motor_cal.ls_ab * 1e6f),
+      (double)(motor_cal.ls_bc * 1e6f), (double)(motor_cal.ls_ca * 1e6f));
+}
+
 /* 把命令名直接绑定到现有控制结构（避免另维护一份参数副本）。范围只
  * 约束控制台写入，不等于控制器内部限幅；只读项仅供 get / Live Watch。
  * 注册对象必须是 static 变量或外设寄存器（固件运行期内始终有效）。 */
@@ -1594,6 +1704,12 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
   success &= DebugConsole_RegisterBool("if_trim", &motor_if_trim_enable, false);
   success &= DebugConsole_RegisterCommand("startdiag", MotorApp_DebugStartup,
                                            "startdiag: latched handover/closed/fault snapshots");
+  success &= DebugConsole_RegisterCommand("rs", MotorDebug_Rs,
+                                           "rs: identify AB/BC/CA resistance; rs stop: abort");
+  success &= DebugConsole_RegisterCommand("ls", MotorDebug_Ls,
+                                           "ls: AB->BC->CA; ls [all|ab|bc|ca] [Rs_ohm]; ls stop: abort");
+  success &= DebugConsole_RegisterCommand("cal", MotorDebug_Cal,
+                                           "cal show (RAM calibration only)");
 
   return (success != 0U) ? HAL_OK : HAL_ERROR;
 }
@@ -1827,6 +1943,8 @@ void MotorApp_Process(void) {
   /* 只发送/提示一次的标志，避免刷屏。 */
   static uint8_t ready_reported = 0U;
   static uint8_t adc_cfg_reported = 0U;
+  static uint8_t previous_run_command = 0U;
+  static uint8_t calibration_seen = 0U;
 
   if (ready_reported == 0U) {
     ready_reported = 1U;
@@ -1836,11 +1954,27 @@ void MotorApp_Process(void) {
   DebugConsole_Process();
   MotorApp_ApplyRunCommand();
 
-  /* 规则组只采母线电压与 MCU 温度（三相端电压在 TIM1 同步注入序列里）；
-   * 失败时保留上一组结果。 */
-  if (BoardAdc_Update() == HAL_OK) {
-    foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
-    foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
+  /* 串口/CAN的 run 0 下降沿也必须撤销辨识占用；不把上电时默认的
+   * run=0误认为用户刚刚停止，避免辨识启动后被同一主循环立即取消。 */
+  if ((motor_calibration_just_started == 0U) &&
+      (calibration_seen != 0U) && (previous_run_command != 0U) &&
+      (motor_run_command == 0U) &&
+      ((foc_motor_state == FOC_MOTOR_CALIBRATION) || MotorCalibration_LsBusy())) {
+    MotorProtocol_CalibrationCancel();
+    MotorCalibration_Stop();
+  }
+  previous_run_command = motor_run_command;
+  motor_calibration_just_started = 0U;
+  calibration_seen = ((foc_motor_state == FOC_MOTOR_CALIBRATION) ||
+                       MotorCalibration_LsBusy()) ? 1U : 0U;
+
+  /* 参数辨识的 Ls 脉冲会临时占用规则组 ADC；此时不能由主循环重新启动
+   * 普通 Vbus/温度采样，否则会抢占 DMA 和触发源。 */
+  if (!MotorCalibration_LsBusy()) {
+    if (BoardAdc_Update() == HAL_OK) {
+      foc.state.vbus = BoardAdc_GetMeasurements()->vbus_voltage;
+      foc.state.temperature_c = BoardAdc_GetMeasurements()->temperature_c;
+    }
   }
 
   /* 闸门归零时复位提示标志，使下一次 run 请求能重新提示一次。 */
@@ -1861,6 +1995,9 @@ void MotorApp_Process(void) {
       (foc_motor_state == FOC_MOTOR_IDLE)) {
     MotorApp_StartControlSequence();
   }
+
+  /* Rs/Ls拟合、换相和外设恢复全部在主循环完成，避免阻塞25 kHz中断。 */
+  MotorCalibration_Process();
 }
 
 /**
@@ -1889,8 +2026,28 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
 
   /* run 0：只改状态，真正关桥统一交给下面的 ResetIdle（停止路径与其它
    * 安全状态共用同一条代码）。 */
-  if (motor_run_requested == 0U) {
+  if ((motor_run_requested == 0U) &&
+      (foc_motor_state != FOC_MOTOR_CALIBRATION)) {
     foc_motor_state = FOC_MOTOR_IDLE;
+  }
+
+  /* 参数辨识独占功率级和ADC规则组：Rs阶段仍由TIM1注入回调累计三相
+   * 电流，Ls阶段则只允许DMA/TIM3路径工作，绝不能落入FOC状态机。 */
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION) {
+    if (motor_cal.state == CAL_IDLE) {
+      motor_callback_cycles_last = DWT->CYCCNT - callback_cycles_start;
+      if (motor_callback_cycles_last > motor_callback_cycles_max)
+        motor_callback_cycles_max = motor_callback_cycles_last;
+      return;
+    }
+    FOC_Get_Iabc(&foc, (uint16_t)ADC1->JDR1, (uint16_t)ADC2->JDR1,
+                 (uint16_t)ADC1->JDR2);
+    MotorCalibration_Run(foc.state.i_abc.a, foc.state.i_abc.b,
+                          foc.state.i_abc.c, foc.state.vbus);
+    motor_callback_cycles_last = DWT->CYCCNT - callback_cycles_start;
+    if (motor_callback_cycles_last > motor_callback_cycles_max)
+      motor_callback_cycles_max = motor_callback_cycles_last;
+    return;
   }
 
   /* 安全状态关桥 + IDLE 复位；主动控制状态清 idle_reset_done（允许下次

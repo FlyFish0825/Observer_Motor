@@ -7,6 +7,7 @@ extern "C" {
 
 #include "stm32g4xx_hal.h"
 #include "controller.h"
+#include <stdbool.h>
 
 /**
  * @file motor_app.h
@@ -60,6 +61,11 @@ FOC_Control_t *MotorApp_GetControl(void);
  * @note 只置请求，不做实际启停；故障闩锁后必须先发run 0再发run 1才能重启。
  */
 void MotorApp_RequestRun(uint8_t run);
+
+/* 按照 main 分支的统一入口启动 Rs 辨识；CAN/串口共用此安全检查。 */
+bool MotorApp_StartRsCalibration(void);
+/* CAN直接启动Ls后通知运行闸门，避免把本轮启动误判为run 0下降沿。 */
+void MotorApp_MarkCalibrationStarted(void);
 
 #ifdef __cplusplus
 }

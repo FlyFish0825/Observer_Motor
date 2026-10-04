@@ -109,6 +109,7 @@ typedef enum
     FOC_MOTOR_ALIGN,        /**< 静止定位：固定电角度，只给定Id */
     FOC_MOTOR_OPEN_LOOP_IF, /**< I/F开环拖动：虚拟电角度，只给定Iq */
     FOC_MOTOR_OBSERVER_HANDOVER, /**< 接管：控制角=观测器角+渐消偏置，仍为电流模式 */
+    FOC_MOTOR_CALIBRATION, /**< 参数辨识：临时占用功率级与ADC规则组 */
 
 } FOC_Motor_State_t;
 
@@ -284,6 +285,8 @@ void FOC_PWM_Stop(void);
  * @return HAL_OK成功，HAL_TIMEOUT超时，HAL_ERROR启动失败。
  */
 HAL_StatusTypeDef ADC_Regular_Read_DMA(void);
+/* 参数辨识占用规则组DMA前释放主循环采样资源。 */
+void ADC_Regular_PauseForLs(void);
 
 /**
  * @brief 三相电流ADC零偏校准（已废弃，校准逻辑移入motor_app.c）。

@@ -11,10 +11,12 @@
 
 #include "app_memory.h"
 #include "foc_math.h"
+#include "motor_calibration.h"
 #include "motor_app.h"
 #include "tim.h"
 #include <math.h>
 #include <string.h>
+#include <stdbool.h>
 
 /* 写入备份寄存器、请求 Bootloader 接管时使用的魔数。 */
 #define MOTOR_PROTOCOL_BOOT_MAGIC          0x544F4F42UL
@@ -39,20 +41,51 @@
 #define MOTOR_PROTOCOL_BOOT_ACK_TIMEOUT_MS 20U
 /* 上电 HELLO 帧允许等待发送完成的最长时间。 */
 #define MOTOR_PROTOCOL_HELLO_TIMEOUT_MS    10U
+#define MOTOR_PROTOCOL_CAL_TX_DEPTH         4U
+
+#define CAL_EVENT_ACCEPTED   1U
+#define CAL_EVENT_COMPLETED  2U
+#define CAL_EVENT_REJECTED   3U
+#define CAL_EVENT_FAILED     4U
+#define CAL_EVENT_STOPPED    5U
+#define CAL_EVENT_SNAPSHOT   6U
+#define CAL_EVENT_RS_DONE    7U
+#define CAL_ERR_NONE         0U
+#define CAL_ERR_ACTION       1U
+#define CAL_ERR_MASK         2U
+#define CAL_ERR_BUSY         3U
+#define CAL_ERR_NOT_READY    4U
+#define CAL_ERR_START        5U
+#define CAL_ERR_RESULT       6U
+#define CAL_ERR_STOPPED      7U
+#define CAL_ERR_FAULT        8U
+#define CAL_ERR_FORMAT       9U
+#define CAL_STAGE_IDLE       0U
+#define CAL_STAGE_RS         1U
+#define CAL_STAGE_LS         2U
+#define CAL_STAGE_WAIT_LS    3U
 /* 1 表示保留main分支验证过的周期FD反馈；0可用于总线诊断时暂时停发。 */
 #define MOTOR_PROTOCOL_PERIODIC_FD_FEEDBACK_ENABLED 1U
 
 /* 协议状态码沿用main分支：IDLE=0、OPEN_LOOP=1、CLOSED_LOOP=2。
  * 当前CBT6应用只实现IDLE和CLOSED_LOOP，因此不能直接发送本地枚举值。 */
 #define MOTOR_PROTOCOL_STATE_IDLE         0U
+#define MOTOR_PROTOCOL_STATE_OPEN_LOOP    1U
 #define MOTOR_PROTOCOL_STATE_CLOSED_LOOP  2U
+#define MOTOR_PROTOCOL_STATE_CALIBRATION  3U
 
 /** @brief 把当前PCB的本地电机状态映射为协议状态码。 */
 static uint8_t MotorProtocol_StateCode(void) {
   /* 将本地状态压缩为上位机协议规定的有限状态集合。 */
-  return (foc_motor_state == FOC_MOTOR_CLOSED_LOOP)
-             ? MOTOR_PROTOCOL_STATE_CLOSED_LOOP
-             : MOTOR_PROTOCOL_STATE_IDLE;
+  if (foc_motor_state == FOC_MOTOR_CLOSED_LOOP)
+    return MOTOR_PROTOCOL_STATE_CLOSED_LOOP;
+  if ((foc_motor_state == FOC_MOTOR_ALIGN) ||
+      (foc_motor_state == FOC_MOTOR_OPEN_LOOP_IF) ||
+      (foc_motor_state == FOC_MOTOR_OBSERVER_HANDOVER))
+    return MOTOR_PROTOCOL_STATE_OPEN_LOOP;
+  if (foc_motor_state == FOC_MOTOR_CALIBRATION)
+    return MOTOR_PROTOCOL_STATE_CALIBRATION;
+  return MOTOR_PROTOCOL_STATE_IDLE;
 }
 
 /** @brief 一项从HAL FIFO取出的接收帧及其完整数据缓存。 */
@@ -87,6 +120,11 @@ typedef struct {
   volatile uint8_t rx_tail;
   /* 下一次发送 1 秒心跳帧的绝对 tick。 */
   uint32_t heartbeat_next_tick;
+  uint8_t cal_stage;
+  uint8_t cal_action;
+  uint16_t cal_sequence;
+  uint8_t cal_tx_head, cal_tx_tail, cal_tx_count;
+  uint8_t cal_tx[MOTOR_PROTOCOL_CAL_TX_DEPTH][64];
   /* 将 HAL FIFO 接收与主循环解析解耦的应用层环形队列。 */
   MotorProtocol_RxItem_t rx_ring[MOTOR_PROTOCOL_RX_RING_SIZE];
 } MotorProtocol_Context_t;
@@ -224,9 +262,23 @@ static void MotorProtocol_SendPowerOnHello(void) {
 /** @brief 把协议层运行请求转交给电机应用层。 */
 static void MotorProtocol_SetRun(uint8_t run) {
   if (motor_protocol.control == NULL) return;
+  if (run == 0U) {
+    if ((foc_motor_state == FOC_MOTOR_CALIBRATION) ||
+        MotorCalibration_LsBusy() ||
+        (motor_protocol.cal_stage != CAL_STAGE_IDLE)) {
+      MotorCalibration_Stop();
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    }
+    MotorApp_RequestRun(0U);
+    return;
+  }
   if (run != 0U) {
     FOC_Control_EnableSpeedLoop(motor_protocol.control, 1U);
   }
+  if ((foc_motor_state != FOC_MOTOR_IDLE) ||
+      MotorCalibration_LsBusy() ||
+      (motor_protocol.cal_stage != CAL_STAGE_IDLE))
+    return;
   /* MotorApp保留当前PCB的校准、IDLE复位和PWM启动时序。 */
   MotorApp_RequestRun(run);
 }
@@ -378,6 +430,227 @@ static void MotorProtocol_HandleBoot(const uint8_t data[8]) {
 #endif
 }
 
+/* ======================== CAN参数辨识扩展（main协议） ======================== */
+static void MotorProtocol_CalPutF32(uint8_t *dst, float value) {
+  memcpy(dst, &value, sizeof(value));
+}
+
+static uint8_t MotorProtocol_CalValid(void) {
+  uint8_t valid = 0U;
+  if ((motor_cal.r_ab > 0.0f) && (motor_cal.r_bc > 0.0f) &&
+      (motor_cal.r_ca > 0.0f) && (motor_cal.r_a > 0.0f) &&
+      (motor_cal.r_b > 0.0f) && (motor_cal.r_c > 0.0f) &&
+      (motor_cal.rs > 0.0f)) valid |= 0x01U;
+  if (motor_cal.ls_ab > 0.0f) valid |= 0x02U;
+  if (motor_cal.ls_bc > 0.0f) valid |= 0x04U;
+  if (motor_cal.ls_ca > 0.0f) valid |= 0x08U;
+  return valid;
+}
+
+static void MotorProtocol_CalEvent(uint8_t event, uint8_t action,
+                                   uint16_t sequence, uint8_t error,
+                                   uint8_t hardware_error) {
+  uint8_t *data;
+  if (motor_protocol.cal_tx_count >= MOTOR_PROTOCOL_CAL_TX_DEPTH) return;
+  data = motor_protocol.cal_tx[motor_protocol.cal_tx_head];
+  memset(data, 0, 64U);
+  data[0] = 1U;
+  data[1] = motor_protocol.node_id;
+  data[2] = event;
+  data[3] = action;
+  data[4] = motor_protocol.cal_stage;
+  data[5] = (uint8_t)motor_cal.phase;
+  data[6] = error;
+  data[7] = MotorProtocol_CalValid();
+  MotorProtocol_PutU16(&data[8], sequence);
+  data[10] = hardware_error;
+  MotorProtocol_CalPutF32(&data[12], motor_cal.rs);
+  MotorProtocol_CalPutF32(&data[16], motor_cal.r_ab);
+  MotorProtocol_CalPutF32(&data[20], motor_cal.r_bc);
+  MotorProtocol_CalPutF32(&data[24], motor_cal.r_ca);
+  MotorProtocol_CalPutF32(&data[28], motor_cal.r_a);
+  MotorProtocol_CalPutF32(&data[32], motor_cal.r_b);
+  MotorProtocol_CalPutF32(&data[36], motor_cal.r_c);
+  MotorProtocol_CalPutF32(&data[40], motor_cal.ls_ab * 1e6f);
+  MotorProtocol_CalPutF32(&data[44], motor_cal.ls_bc * 1e6f);
+  MotorProtocol_CalPutF32(&data[48], motor_cal.ls_ca * 1e6f);
+  motor_protocol.cal_tx_head = (uint8_t)((motor_protocol.cal_tx_head + 1U) % MOTOR_PROTOCOL_CAL_TX_DEPTH);
+  motor_protocol.cal_tx_count++;
+}
+
+static void MotorProtocol_CalFlush(void) {
+  if (motor_protocol.cal_tx_count == 0U) return;
+  if (MotorProtocol_Send(MOTOR_PROTOCOL_ID_CAL_BASE + motor_protocol.node_id,
+                         MOTOR_PROTOCOL_CAL_DLC, FDCAN_FD_CAN,
+                         motor_protocol.cal_tx[motor_protocol.cal_tx_tail], NULL) != HAL_OK)
+    return;
+  motor_protocol.cal_tx_tail = (uint8_t)((motor_protocol.cal_tx_tail + 1U) % MOTOR_PROTOCOL_CAL_TX_DEPTH);
+  motor_protocol.cal_tx_count--;
+}
+
+static uint8_t MotorProtocol_CalExpected(uint8_t action) {
+  switch (action) {
+  case MOTOR_PROTOCOL_CAL_RS: return 0x01U;
+  case MOTOR_PROTOCOL_CAL_LS_ALL: return 0x0EU;
+  case MOTOR_PROTOCOL_CAL_LS_AB: return 0x02U;
+  case MOTOR_PROTOCOL_CAL_LS_BC: return 0x04U;
+  case MOTOR_PROTOCOL_CAL_LS_CA: return 0x08U;
+  case MOTOR_PROTOCOL_CAL_RS_LS: return 0x0FU;
+  default: return 0U;
+  }
+}
+
+static void MotorProtocol_HandleCalibration(const uint8_t data[24]) {
+  uint8_t action = data[3];
+  uint8_t mask = data[2];
+  uint16_t sequence = (uint16_t)data[4] | ((uint16_t)data[5] << 8U);
+  uint8_t is_start = (MotorProtocol_CalExpected(action) != 0U);
+  uint8_t reserved_invalid = 0U;
+  bool started = false;
+  uint8_t needed = (motor_protocol.cal_stage != CAL_STAGE_IDLE) ? 2U : 1U;
+
+  if (is_start || ((motor_protocol.cal_stage != CAL_STAGE_IDLE) &&
+                   (action != MOTOR_PROTOCOL_CAL_STOP))) {
+    needed = 3U;
+  }
+  if ((uint8_t)(MOTOR_PROTOCOL_CAL_TX_DEPTH - motor_protocol.cal_tx_count) < needed) {
+    return;
+  }
+
+  for (uint8_t i = 6U; i < 24U; ++i) reserved_invalid |= data[i];
+  if (reserved_invalid) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_FORMAT, 0U);
+    return;
+  }
+  if ((action != MOTOR_PROTOCOL_CAL_STOP) && (action != MOTOR_PROTOCOL_CAL_READ) && !is_start) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_ACTION, 0U);
+    return;
+  }
+  if (is_start && ((mask == 0U) || ((mask & (uint8_t)(mask - 1U)) != 0U))) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_MASK, 0U);
+    return;
+  }
+  if (action == MOTOR_PROTOCOL_CAL_READ) {
+    MotorProtocol_CalEvent(CAL_EVENT_SNAPSHOT, action, sequence, CAL_ERR_NONE, 0U);
+    return;
+  }
+  if (action == MOTOR_PROTOCOL_CAL_STOP) {
+    if (motor_protocol.cal_stage != CAL_STAGE_IDLE) {
+      MotorCalibration_Stop();
+      MotorProtocol_CalEvent(CAL_EVENT_STOPPED, motor_protocol.cal_action,
+                             motor_protocol.cal_sequence, CAL_ERR_STOPPED, 0U);
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    } else if (MotorCalibration_LsBusy() || (foc_motor_state == FOC_MOTOR_CALIBRATION)) {
+      MotorCalibration_Stop();
+    }
+    MotorProtocol_CalEvent(CAL_EVENT_COMPLETED, action, sequence, CAL_ERR_NONE, 0U);
+    return;
+  }
+  if ((motor_protocol.cal_stage != CAL_STAGE_IDLE) || MotorCalibration_LsBusy() ||
+      (foc_motor_state != FOC_MOTOR_IDLE) ||
+      ((motor_cal.state != CAL_IDLE) && (motor_cal.state != CAL_DONE) &&
+       (motor_cal.state != CAL_ERROR))) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_BUSY, 0U);
+    return;
+  }
+  if ((foc.calibration.calibrated == 0U) || (foc.state.vbus < 5.0f) ||
+      (foc.state.vbus > 50.0f) || ((TIM1->BDTR & TIM_BDTR_MOE) != 0U) ||
+      ((action != MOTOR_PROTOCOL_CAL_RS) && (action != MOTOR_PROTOCOL_CAL_RS_LS) &&
+       !(motor_cal.rs > 0.0f))) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_NOT_READY, 0U);
+    return;
+  }
+  /* 辨识期间强制保持普通FOC运行请求为0；完成后由上位机再次显式run 1。 */
+  MotorApp_RequestRun(0U);
+  if ((action == MOTOR_PROTOCOL_CAL_RS) || (action == MOTOR_PROTOCOL_CAL_RS_LS)) {
+    started = MotorApp_StartRsCalibration();
+  } else if (action == MOTOR_PROTOCOL_CAL_LS_ALL) {
+    started = MotorCalibration_LsStartAll();
+  } else {
+    CalPhase_t phase = (CalPhase_t)(action - MOTOR_PROTOCOL_CAL_LS_AB);
+    started = MotorCalibration_LsStart(phase);
+    if (started) {
+      if (phase == CAL_PHASE_AB) motor_cal.ls_ab = 0.0f;
+      else if (phase == CAL_PHASE_BC) motor_cal.ls_bc = 0.0f;
+      else motor_cal.ls_ca = 0.0f;
+    }
+  }
+  if (!started) {
+    MotorProtocol_CalEvent(CAL_EVENT_REJECTED, action, sequence, CAL_ERR_START, 0U);
+    return;
+  }
+  MotorApp_MarkCalibrationStarted();
+  motor_protocol.cal_action = action;
+  motor_protocol.cal_sequence = sequence;
+  motor_protocol.cal_stage = ((action == MOTOR_PROTOCOL_CAL_RS) ||
+                              (action == MOTOR_PROTOCOL_CAL_RS_LS)) ?
+                             CAL_STAGE_RS : CAL_STAGE_LS;
+  MotorProtocol_CalEvent(CAL_EVENT_ACCEPTED, action, sequence, CAL_ERR_NONE, 0U);
+}
+
+static void MotorProtocol_CalObserve(void) {
+  uint8_t stage = motor_protocol.cal_stage;
+  uint8_t action;
+  uint16_t sequence;
+  uint8_t expected;
+  uint8_t fault;
+  if (stage == CAL_STAGE_IDLE) return;
+  action = motor_protocol.cal_action;
+  sequence = motor_protocol.cal_sequence;
+  expected = MotorProtocol_CalExpected(action);
+  if (stage == CAL_STAGE_WAIT_LS) {
+    if ((motor_cal.state != CAL_DONE) || (foc_motor_state != FOC_MOTOR_IDLE) || MotorCalibration_LsBusy()) {
+      MotorProtocol_CalEvent(CAL_EVENT_STOPPED, action, sequence, CAL_ERR_STOPPED, 0U);
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    } else if (!MotorCalibration_LsStartAll()) {
+      MotorProtocol_CalEvent(CAL_EVENT_FAILED, action, sequence, CAL_ERR_START, 0U);
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    } else {
+      MotorApp_MarkCalibrationStarted();
+      motor_protocol.cal_stage = CAL_STAGE_LS;
+    }
+    return;
+  }
+  if (stage == CAL_STAGE_RS) {
+    if (motor_cal.state == CAL_DONE) {
+      if ((MotorProtocol_CalValid() & 0x01U) == 0U) {
+        MotorProtocol_CalEvent(CAL_EVENT_FAILED, action, sequence, CAL_ERR_RESULT, 0U);
+        motor_protocol.cal_stage = CAL_STAGE_IDLE;
+      } else if (action == MOTOR_PROTOCOL_CAL_RS_LS) {
+        motor_protocol.cal_stage = CAL_STAGE_WAIT_LS;
+        MotorProtocol_CalEvent(CAL_EVENT_RS_DONE, action, sequence, CAL_ERR_NONE, 0U);
+      } else {
+        MotorProtocol_CalEvent(CAL_EVENT_COMPLETED, action, sequence, CAL_ERR_NONE, 0U);
+        motor_protocol.cal_stage = CAL_STAGE_IDLE;
+      }
+    } else if (motor_cal.state == CAL_ERROR) {
+      MotorProtocol_CalEvent(CAL_EVENT_FAILED, action, sequence, CAL_ERR_FAULT, 0U);
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    } else if (motor_cal.state == CAL_IDLE) {
+      MotorProtocol_CalEvent(CAL_EVENT_STOPPED, action, sequence, CAL_ERR_STOPPED, 0U);
+      motor_protocol.cal_stage = CAL_STAGE_IDLE;
+    }
+    return;
+  }
+  if (MotorCalibration_LsBusy()) return;
+  fault = MotorCalibration_LsLastError();
+  if ((MotorProtocol_CalValid() & expected) == expected)
+    MotorProtocol_CalEvent(CAL_EVENT_COMPLETED, action, sequence, CAL_ERR_NONE, 0U);
+  else if (fault != 0U)
+    MotorProtocol_CalEvent(CAL_EVENT_FAILED, action, sequence,
+                           (fault == 6U) ? CAL_ERR_RESULT : CAL_ERR_FAULT, fault);
+  else
+    MotorProtocol_CalEvent(CAL_EVENT_STOPPED, action, sequence, CAL_ERR_STOPPED, 0U);
+  motor_protocol.cal_stage = CAL_STAGE_IDLE;
+}
+
+void MotorProtocol_CalibrationCancel(void) {
+  if (motor_protocol.cal_stage == CAL_STAGE_IDLE) return;
+  MotorProtocol_CalEvent(CAL_EVENT_STOPPED, motor_protocol.cal_action,
+                         motor_protocol.cal_sequence, CAL_ERR_STOPPED, 0U);
+  motor_protocol.cal_stage = CAL_STAGE_IDLE;
+}
+
 /** @brief 解析固定24字节多节点控制帧并更新本节点目标。 */
 static void MotorProtocol_HandleVector(const uint8_t data[24]) {
   /* index指向本节点在速度数组和运行位图中的零基索引。 */
@@ -430,6 +703,8 @@ static void MotorProtocol_HandleVector(const uint8_t data[24]) {
     }
   } else if (data[1] == MOTOR_PROTOCOL_CMD_STATUS_ONCE) {
     MotorProtocol_SendNormalFeedback();
+  } else if (data[1] == MOTOR_PROTOCOL_CMD_CALIBRATION) {
+    MotorProtocol_HandleCalibration(data);
   }
 }
 
@@ -557,6 +832,11 @@ HAL_StatusTypeDef MotorProtocol_Init(FDCAN_HandleTypeDef *hfdcan,
   motor_protocol.debug_suppressed = 0U;
   motor_protocol.timer_slot = 0U;
   motor_protocol.debug_divider = 0U;
+  motor_protocol.cal_stage = CAL_STAGE_IDLE;
+  motor_protocol.cal_action = 0U;
+  motor_protocol.cal_sequence = 0U;
+  motor_protocol.cal_tx_head = motor_protocol.cal_tx_tail =
+      motor_protocol.cal_tx_count = 0U;
   motor_protocol.heartbeat_next_tick = HAL_GetTick() + 1000U +
                                        ((uint32_t)motor_protocol.node_id * 10U);
 
@@ -609,6 +889,8 @@ void MotorProtocol_Process(void) {
   uint32_t now;
   if ((motor_protocol.fdcan == NULL) || (motor_protocol.control == NULL)) return;
 
+  MotorProtocol_CalFlush();
+
   while (motor_protocol.rx_tail != motor_protocol.rx_head) {
     item = motor_protocol.rx_ring[motor_protocol.rx_tail];
     __DMB();
@@ -616,6 +898,9 @@ void MotorProtocol_Process(void) {
                                        MOTOR_PROTOCOL_RX_RING_SIZE);
     MotorProtocol_HandleRx(&item);
   }
+
+  MotorProtocol_CalObserve();
+  MotorProtocol_CalFlush();
 
 #if MOTOR_PROTOCOL_HEARTBEAT_ENABLED
   now = HAL_GetTick();

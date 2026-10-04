@@ -18,11 +18,13 @@ extern "C" {
 #define MOTOR_PROTOCOL_ID_FEEDBACK_BASE     0x200U
 #define MOTOR_PROTOCOL_ID_HEARTBEAT_BASE    0x280U
 #define MOTOR_PROTOCOL_ID_DEBUG_BASE        0x300U
+#define MOTOR_PROTOCOL_ID_CAL_BASE          0x340U
 #define MOTOR_PROTOCOL_ID_HELLO_BASE        0x380U
 
 #define MOTOR_PROTOCOL_CONTROL_DLC          FDCAN_DLC_BYTES_24
 #define MOTOR_PROTOCOL_FEEDBACK_DLC         FDCAN_DLC_BYTES_12
 #define MOTOR_PROTOCOL_DEBUG_DLC            FDCAN_DLC_BYTES_64
+#define MOTOR_PROTOCOL_CAL_DLC              FDCAN_DLC_BYTES_64
 
 /* 当前板卡的CAN收发器只支持1 Mbit/s；CAN FD当前关闭BRS。 */
 #define MOTOR_PROTOCOL_CANFD_BRS_ENABLED    0U
@@ -32,6 +34,17 @@ extern "C" {
 #define MOTOR_PROTOCOL_CMD_RUN_VECTOR       0x11U
 #define MOTOR_PROTOCOL_CMD_DEBUG_SELECT     0x20U
 #define MOTOR_PROTOCOL_CMD_STATUS_ONCE      0x30U
+#define MOTOR_PROTOCOL_CMD_CALIBRATION      0x40U
+
+/* 0x40 Byte3：串口/CAN共用的Rs/Ls参数辨识动作。 */
+#define MOTOR_PROTOCOL_CAL_RS               0x01U
+#define MOTOR_PROTOCOL_CAL_LS_ALL           0x02U
+#define MOTOR_PROTOCOL_CAL_LS_AB             0x03U
+#define MOTOR_PROTOCOL_CAL_LS_BC             0x04U
+#define MOTOR_PROTOCOL_CAL_LS_CA             0x05U
+#define MOTOR_PROTOCOL_CAL_STOP             0x06U
+#define MOTOR_PROTOCOL_CAL_READ             0x07U
+#define MOTOR_PROTOCOL_CAL_RS_LS            0x08U
 
 /* 0x000上的APP管理命令。 */
 #define MOTOR_PROTOCOL_CMD_ENTER_BOOT       0x04U
@@ -54,6 +67,9 @@ void MotorProtocol_Process(void);
  * @param htim HAL定时器句柄；仅处理TIM6。
  */
 void MotorProtocol_TimerTick(TIM_HandleTypeDef *htim);
+
+/* 主循环处理按键/串口停止前取消CAN辨识任务归属，避免串口重启被旧任务覆盖。 */
+void MotorProtocol_CalibrationCancel(void);
 
 #ifdef __cplusplus
 }

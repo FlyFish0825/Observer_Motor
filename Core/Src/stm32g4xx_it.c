@@ -20,6 +20,7 @@
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "stm32g4xx_it.h"
+#include "motor_calibration.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 /* USER CODE END Includes */
@@ -328,6 +329,12 @@ void TIM1_UP_TIM16_IRQHandler(void)
 void TIM6_DAC_IRQHandler(void)
 {
   HAL_TIM_IRQHandler(&htim6);
+}
+
+/** @brief TIM3比较事件：参数辨识Ls脉冲的40/60us边沿。 */
+void TIM3_IRQHandler(void)
+{
+  MotorCalibration_LsTimerIRQ();
 }
 
 /**
