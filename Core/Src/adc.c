@@ -34,7 +34,7 @@
  *     Rank3 = IN11 (U相端电压)
  *     Rank4 = IN14 (W相端电压)
  *   InjectedNbrOfConversion = 4，采样时间6.5周期（电流通道）
- *   规则组2个Rank：Rank1 = PA0母线电压(6.5周期)，Rank2 = 内部温度传感器(247.5周期，需长采样)
+ *   规则组3个Rank：PA0母线电压(6.5周期)、内部温度及VREFINT(均247.5周期)
  *   规则组为间断模式 + 软件触发：每次HAL_ADC_Start只转换一个Rank，读完再推进
  * 公共配置：独立模式、PCLK/4（170 MHz/4）、12位、溢出保留（ADC_OVR_DATA_PRESERVED）、
  *   不使用过采样、不开启连续转换。
@@ -88,7 +88,7 @@ void MX_ADC1_Init(void)
   hadc1.Init.EOCSelection = ADC_EOC_SINGLE_CONV;
   hadc1.Init.LowPowerAutoWait = DISABLE;
   hadc1.Init.ContinuousConvMode = DISABLE;
-  hadc1.Init.NbrOfConversion = 2;
+  hadc1.Init.NbrOfConversion = 3;
   hadc1.Init.DiscontinuousConvMode = ENABLE;
   hadc1.Init.NbrOfDiscConversion = 1;
   hadc1.Init.ExternalTrigConv = ADC_SOFTWARE_START;
@@ -125,6 +125,15 @@ void MX_ADC1_Init(void)
   /** Configure Regular MCU Temperature Sensor Channel */
   sConfig.Channel = ADC_CHANNEL_TEMPSENSOR_ADC1;
   sConfig.Rank = ADC_REGULAR_RANK_2;
+  sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
+  if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /** Configure Regular Internal Reference Channel */
+  sConfig.Channel = ADC_CHANNEL_VREFINT;
+  sConfig.Rank = ADC_REGULAR_RANK_3;
   sConfig.SamplingTime = ADC_SAMPLETIME_247CYCLES_5;
   if (HAL_ADC_ConfigChannel(&hadc1, &sConfig) != HAL_OK)
   {
