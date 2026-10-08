@@ -66,9 +66,9 @@ typedef struct {
   float pll_omega_limit;
 
   /*
-   * 速度上报低通滤波截止频率，Hz；<=0时滤波器退化为直通。
-   * 用于上报值speed_rpm_f及启动速度匹配门。速度 PI 由应用层单独做
-   * 100 Hz 单极点滤波；最低转速、方向和单拍跳变仍用原始speed_rpm。
+   * 速度低通滤波截止频率，Hz；<=0时滤波器退化为直通。
+   * 输出speed_rpm_f同时用于上报、启动速度匹配门与速度 PI 反馈；
+   * 最低转速、方向和单拍跳变仍用原始speed_rpm。
    */
   float speed_filter_fc;
 

@@ -302,7 +302,7 @@ typedef struct {
   /* 反馈量，便于Live Watch和上位机观察 */
   float id_feedback;         /* 最近一拍的 d 轴电流反馈，单位 A，由 FOC_Control_Run 的实参写入。仅作为回显/调试量，PI 内部另有自己的 feedback 字段。 */
   float iq_feedback;         /* 最近一拍的 q 轴电流反馈，单位 A，来源同上。 */
-  float speed_feedback_rpm;  /* 最近一拍的转速反馈，单位 rpm（机械转速），来自观测器 SRF-PLL 的电角速度换算。它是速度 PI 的反馈，也是进入速度模式时 speed_ref_active_rpm 的种子值，使接管瞬间不会产生转速阶跃。 */
+  float speed_feedback;      /* 本拍速度环反馈转速，rpm。由应用层在调用 FOC_Control_Run 前写入：闭环/接管时为观测器滤波值 speed_rpm_f，强制 I/F 时为虚拟转速。控制器只读，用于减速斜坡方向判断、无扰预装与速度 PI 误差。 */
 
   /* 速度斜坡后的内部参考，仅在正常速度闭环中使用 */
   float speed_ref_active_rpm; /* 斜坡平滑后的内部转速参考，单位 rpm。速度模式下每拍由 FOC_SlewSpeedReference 朝终点 speed_ref_rpm 逼近；进入速度模式时可被重置为当前反馈转速（无扰接管）。电流模式下该字段不被斜坡更新。 */

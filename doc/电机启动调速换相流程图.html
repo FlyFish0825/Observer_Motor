@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Observer_Motor：启动 / 调速 / 换相流程图</title>
+<style>
+:root{
+  --bg:#0b1020;--panel:#121a2d;--panel2:#17223b;--text:#e8eefc;--muted:#9fb0cc;
+  --line:#65789b;--accent:#60a5fa;--green:#34d399;--amber:#fbbf24;--red:#fb7185;
+  --purple:#c084fc;--cyan:#22d3ee;--border:#2a3958;--code:#0a1224;--shadow:0 12px 34px rgba(0,0,0,.24)
+}
+body.light{
+  --bg:#f3f6fb;--panel:#ffffff;--panel2:#f7f9fd;--text:#15233b;--muted:#5e6f8a;
+  --line:#8292ab;--accent:#2563eb;--green:#059669;--amber:#d97706;--red:#e11d48;
+  --purple:#7c3aed;--cyan:#0891b2;--border:#d9e1ed;--code:#eef3fa;--shadow:0 10px 28px rgba(33,52,82,.10)
+}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--text);font-family:"Segoe UI","Microsoft YaHei",system-ui,sans-serif;line-height:1.55}
+.wrap{max-width:1560px;margin:auto;padding:28px 28px 80px}
+.hero{display:flex;gap:24px;align-items:flex-start;justify-content:space-between;margin-bottom:20px}
+h1{font-size:32px;margin:0 0 10px;letter-spacing:.2px}
+.subtitle{color:var(--muted);max-width:1040px;font-size:15px}
+.toolbar{display:flex;gap:8px;position:sticky;top:12px;z-index:20}
+button{border:1px solid var(--border);background:var(--panel);color:var(--text);padding:9px 13px;border-radius:10px;cursor:pointer;box-shadow:var(--shadow)}
+button:hover{border-color:var(--accent)}
+.callout{background:linear-gradient(135deg,var(--panel),var(--panel2));border:1px solid var(--border);border-left:4px solid var(--cyan);padding:16px 18px;border-radius:14px;margin:18px 0 28px;box-shadow:var(--shadow)}
+.callout b{color:var(--cyan)}
+.section{background:var(--panel);border:1px solid var(--border);border-radius:18px;padding:22px;margin:20px 0;box-shadow:var(--shadow)}
+.section h2{margin:0 0 6px;font-size:23px}
+.section .hint{color:var(--muted);font-size:14px;margin-bottom:18px}
+.flow{display:flex;flex-direction:column;align-items:center;gap:0}
+.node{width:min(980px,96%);border:1px solid var(--border);border-radius:14px;background:var(--panel2);padding:14px 16px;position:relative}
+.node strong{font-size:17px}
+.node .meta{display:block;color:var(--muted);font-size:13px;margin-top:4px}
+.node code,.code{font-family:Consolas,"Cascadia Code",monospace;background:var(--code);border:1px solid var(--border);padding:1px 5px;border-radius:5px;color:var(--text)}
+.node.blue{border-left:5px solid var(--accent)}
+.node.green{border-left:5px solid var(--green)}
+.node.amber{border-left:5px solid var(--amber)}
+.node.purple{border-left:5px solid var(--purple)}
+.node.red{border-left:5px solid var(--red)}
+.node.cyan{border-left:5px solid var(--cyan)}
+.varrow{height:42px;width:2px;background:var(--line);position:relative}
+.varrow:after{content:"";position:absolute;bottom:-1px;left:-5px;border:6px solid transparent;border-top:9px solid var(--line)}
+.edge-label{font-size:12px;color:var(--muted);background:var(--bg);padding:2px 7px;border-radius:8px;position:absolute;left:10px;top:10px;white-space:nowrap}
+.split{display:grid;grid-template-columns:1fr 70px 1fr;align-items:center;width:100%;gap:12px;margin:6px 0}
+.harrow{height:2px;background:var(--line);position:relative}
+.harrow:after{content:"";position:absolute;right:-1px;top:-5px;border:6px solid transparent;border-left:9px solid var(--line)}
+.state-row{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;align-items:stretch}
+.state{background:var(--panel2);border:1px solid var(--border);border-radius:15px;padding:15px;min-height:190px;position:relative}
+.state:after{content:"→";position:absolute;right:-17px;top:45%;font-size:26px;color:var(--line);z-index:3}
+.state:last-child:after{display:none}
+.state h3{margin:0 0 8px;font-size:17px}
+.state p{margin:6px 0;color:var(--muted);font-size:13px}
+.state .big{font-size:20px;color:var(--text);font-weight:700}
+.state.align{border-top:4px solid var(--amber)}
+.state.open{border-top:4px solid var(--purple)}
+.state.handover{border-top:4px solid var(--cyan)}
+.state.closed{border-top:4px solid var(--green)}
+.pipeline{display:flex;gap:0;align-items:stretch;overflow-x:auto;padding:8px 2px 14px}
+.pbox{min-width:190px;max-width:220px;flex:1;background:var(--panel2);border:1px solid var(--border);border-radius:13px;padding:13px}
+.pbox b{font-size:14px}
+.pbox small{display:block;color:var(--muted);margin-top:5px}
+.parrow{min-width:38px;display:flex;align-items:center;justify-content:center;color:var(--line);font-size:24px}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.pathbox{background:var(--panel2);border:1px solid var(--border);border-radius:15px;padding:16px}
+.pathbox h3{margin-top:0}
+.step{display:flex;gap:10px;margin:10px 0}
+.num{min-width:27px;height:27px;border-radius:50%;display:grid;place-items:center;background:var(--code);border:1px solid var(--border);font-family:Consolas,monospace;font-size:12px}
+.step p{margin:1px 0;color:var(--muted);font-size:14px}
+kbd{font-family:Consolas,monospace;background:var(--code);border:1px solid var(--border);border-bottom-width:2px;padding:2px 6px;border-radius:5px}
+table{width:100%;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;border-bottom:1px solid var(--border);padding:10px 9px;vertical-align:top}
+th{color:var(--muted);font-weight:600}
+details{border:1px solid var(--border);border-radius:12px;margin-top:12px;background:var(--panel2)}
+summary{cursor:pointer;padding:12px 14px;font-weight:650}
+details>div{padding:0 14px 14px;color:var(--muted)}
+.badges{display:flex;gap:7px;flex-wrap:wrap;margin-top:8px}
+.badge{border:1px solid var(--border);border-radius:999px;padding:4px 8px;font-size:12px;color:var(--muted)}
+.legend{display:flex;gap:10px;flex-wrap:wrap;margin:10px 0 0}
+.legend span{font-size:12px;color:var(--muted)}
+.dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}
+.foot{color:var(--muted);font-size:12px;margin-top:22px}
+@media(max-width:1000px){
+  .state-row{grid-template-columns:1fr 1fr}
+  .state:nth-child(2):after{display:none}
+  .two{grid-template-columns:1fr}
+}
+@media(max-width:650px){
+  .wrap{padding:18px 12px 50px}.hero{display:block}.toolbar{position:static;margin-top:12px}
+  .state-row{grid-template-columns:1fr}.state:after{display:none}.split{grid-template-columns:1fr}.harrow{height:35px;width:2px;margin:auto}
+}
+@media print{
+  .toolbar{display:none}.section,.callout{box-shadow:none;break-inside:avoid}body{background:#fff;color:#111}.wrap{max-width:none}
+}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="hero">
+    <div>
+      <h1>Observer_Motor：接收命令 → 启动 → 调速 → 换相</h1>
+      <div class="subtitle">
+        按当前工程源码整理。主链来自 <code>motor_protocol.c</code>、<code>motor_app.c</code>、
+        <code>controller.c</code>、<code>observer.c</code>、<code>foc_math.c</code>。
+        图中把“状态机”和“每个 25 kHz 控制拍的数据流”分开画，便于定位变量是谁改、在哪里生效。
+      </div>
+      <div class="legend">
+        <span><i class="dot" style="background:var(--accent)"></i>命令/通信</span>
+        <span><i class="dot" style="background:var(--amber)"></i>启动定位</span>
+        <span><i class="dot" style="background:var(--purple)"></i>I/F 开环</span>
+        <span><i class="dot" style="background:var(--cyan)"></i>观测器接管</span>
+        <span><i class="dot" style="background:var(--green)"></i>闭环运行</span>
+        <span><i class="dot" style="background:var(--red)"></i>停机/故障</span>
+      </div>
+    </div>
+    <div class="toolbar">
+      <button onclick="document.body.classList.toggle('light')">深/浅主题</button>
+      <button onclick="window.print()">打印 / PDF</button>
+    </div>
+  </div>
+
+  <div class="callout">
+    <b>这里的“换相”不是六步换相。</b>
+    当前是 FOC：通过连续变化的电角度 <code>theta_ctrl</code> 做 Park / 逆 Park，
+    让定子电压矢量持续旋转。启动时角度来自 <code>startup.if_angle</code>，
+    接管时为 <code>phase_raw + handover_offset</code>，闭环后直接来自磁链观测器
+    <code>foc.observer.state.phase_raw</code>。
+  </div>
+
+  <section class="section" id="overview">
+    <h2>1. 从“收到命令”到电机真正开始输出</h2>
+    <div class="hint">通信域只写“意图/目标”；真正开桥由主循环门控，真正控制输出由 ADC 注入中断每拍完成。</div>
+
+    <div class="flow">
+      <div class="node blue">
+        <strong>① 收到速度 / Run 命令</strong>
+        <span class="meta">
+          CAN：<code>MotorProtocol_HandleRx()</code> → <code>MotorProtocol_SetRun()</code><br>
+          速度目标：<code>motor_control.speed_command_rpm</code>；同时置 <code>speed_ref_rpm</code>，并调用
+          <code>FOC_Control_EnableSpeedLoop(...,1)</code>
+        </span>
+      </div>
+      <div class="varrow"><span class="edge-label">run = 1</span></div>
+
+      <div class="node blue">
+        <strong>② MotorApp_RequestRun(1)</strong>
+        <span class="meta">
+          写 <code>motor_run_command=1</code> → <code>MotorApp_ApplyRunCommand()</code> →
+          无故障闭锁时得到 <code>motor_run_requested=1</code>。这里还没有启动 PWM。
+        </span>
+      </div>
+      <div class="varrow"><span class="edge-label">主循环</span></div>
+
+      <div class="node cyan">
+        <strong>③ MotorApp_Process() 启动门控</strong>
+        <span class="meta">
+          必须同时满足：run requested、无 fault latch、ADC 注入配置有效、电流零偏已校准、
+          <code>motor_idle_reset_done=1</code>、当前 <code>FOC_MOTOR_IDLE</code>。
+        </span>
+      </div>
+      <div class="varrow"></div>
+
+      <div class="node amber">
+        <strong>④ MotorApp_StartControlSequence()</strong>
+        <span class="meta">
+          校验 <code>speed_command_rpm</code> / <code>Ts</code> / 极对数 / Vbus；
+          重建 <code>startup</code>，确定方向；设置 I/F 目标；状态切到
+          <code>FOC_MOTOR_ALIGN</code>；最后 <code>FOC_PWM_Start()</code>。
+        </span>
+        <div class="badges">
+          <span class="badge">ALIGN = 30 ms</span>
+          <span class="badge">Id = 1.0 A</span>
+          <span class="badge">I/F Iq = 1.5 A</span>
+          <span class="badge">强制开环阈值 = 800 rpm</span>
+          <span class="badge">接管目标 = 1000 rpm</span>
+        </div>
+      </div>
+      <div class="varrow"><span class="edge-label">进入 25 kHz 控制循环</span></div>
+
+      <div class="node green">
+        <strong>⑤ MotorApp_OnInjectedConversion() 每 40 μs 执行一次</strong>
+        <span class="meta">
+          ADC 电流采样 → Clarke → 观测器输入 → 推进启动状态机 →
+          解析本拍 <code>theta_ctrl / Id_ref / Iq_ref</code> → 电流环 →
+          逆 Park / 逆 Clarke → SVPWM → 写 <code>TIM1 CCR1/2/3</code>。
+        </span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="startup">
+    <h2>2. 启动状态机：角度源是如何从“虚拟角”交给“观测角”的</h2>
+    <div class="hint">这四个状态决定了换相角来自哪里，也决定此时是定位、强拖还是闭环调速。</div>
+
+    <div class="state-row">
+      <div class="state align">
+        <h3>ALIGN</h3>
+        <div class="big">固定电角度 0 rad</div>
+        <p><code>theta_ctrl = 0</code></p>
+        <p><code>Id_ref = 1.0 A</code></p>
+        <p><code>Iq_ref = 0</code></p>
+        <p>持续约 30 ms，把转子拉到已知方向；此阶段不跑观测器。</p>
+      </div>
+
+      <div class="state open">
+        <h3>OPEN_LOOP_IF</h3>
+        <div class="big">虚拟角强拖</div>
+        <p><code>theta_ctrl = startup.if_angle</code></p>
+        <p>虚拟速度按受限斜坡推进，角度采用梯形积分：</p>
+        <p><code>if_angle += 0.5·(ωprev+ωnext)·Ts</code></p>
+        <p>Iq 提供转矩；目标先到 <code>min(|cmd|,1000 rpm)</code>。</p>
+      </div>
+
+      <div class="state handover">
+        <h3>OBSERVER_HANDOVER</h3>
+        <div class="big">平滑接管角度</div>
+        <p><code>theta_ctrl = phase_raw + offset</code></p>
+        <p><code>offset</code> 用 smoothstep 从初值渐消到 0，接管时间约 20–150 ms。</p>
+        <p>每拍旋转 d/q 电流 PI 积分器，避免换坐标系时电压矢量突然转向。</p>
+      </div>
+
+      <div class="state closed">
+        <h3>CLOSED_LOOP</h3>
+        <div class="big">观测器角度换相</div>
+        <p><code>theta_ctrl = phase_raw</code></p>
+        <p>速度反馈：<code>speed_rpm_f</code></p>
+        <p>速度 PI 产生 Iq 目标，电流 PI 产生 Ud/Uq，连续 FOC 换相。</p>
+        <p>首次接管后还有约 50 ms 的启动淡入/限斜坡阶段。</p>
+      </div>
+    </div>
+
+    <details>
+      <summary>OPEN_LOOP_IF 什么时候允许进入 OBSERVER_HANDOVER？</summary>
+      <div>
+        <code>MotorApp_UpdateObserverReady()</code> 负责判定。当前源码要求观测器连续稳定一段时间，
+        同时检查速度、磁链、电流跟踪等条件，并要求累计覆盖一整圈电角度。核心参数包括：
+        Ready 连续时间 30 ms、最低观测转速 800 rpm、速度匹配误差 40 rpm、净电角度覆盖 2π。
+        若目标绝对值 ≤ 800 rpm，则 <code>forced_open_loop=1</code>，保持 I/F，不让观测器参与控制角。
+      </div>
+    </details>
+  </section>
+
+  <section class="section" id="speed">
+    <h2>3. 闭环调速链：转速命令最后怎样变成电机转矩</h2>
+    <div class="hint">速度参考在 25 kHz 每拍平滑推进；速度 PI 本身默认 1/25 分频执行，即约 1 kHz。</div>
+
+    <div class="pipeline">
+      <div class="pbox">
+        <b>目标转速</b>
+        <small><code>speed_command_rpm</code><br>来自 CAN / 控制台</small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>应用层目标仲裁</b>
+        <small><code>speed_ref_rpm</code><br>正常=用户目标；反向制动阶段临时置 0</small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>速度斜坡</b>
+        <small><code>speed_ref_active_rpm</code><br>默认常规斜坡约 20000 rpm/s</small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>速度 PI · 1 kHz</b>
+        <small>误差 = <code>speed_ref_active_rpm - speed_feedback</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>Iq 目标</b>
+        <small><code>iq_ref_target</code> → Iq slew → <code>iq_ref_active</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>q 轴电流 PI</b>
+        <small><code>Iq_ref - Iq</code> → <code>Uq</code><br>决定电磁转矩</small>
+      </div>
+    </div>
+
+    <div class="callout" style="margin-bottom:0">
+      速度环不是直接改 PWM：它只产生 <b>Iq 目标</b>。真正每 40 μs 都在执行的是电流环，
+      所以“调速”的物理链路是：<code>转速误差 → Iq → 转矩 → 转速变化</code>。
+    </div>
+  </section>
+
+  <section class="section" id="commutation">
+    <h2>4. 每个 25 kHz 控制拍：FOC 换相与 PWM 输出</h2>
+    <div class="hint">这是“换相”的核心路径。无论 ALIGN、I/F、接管还是闭环，最终都共用这一条电流控制链。</div>
+
+    <div class="pipeline">
+      <div class="pbox">
+        <b>三相电流采样</b>
+        <small>ADC1/ADC2 注入组<br><code>Ia, Ib, Ic</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>Clarke</b>
+        <small><code>Iabc → Iαβ</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>角度选择</b>
+        <small>
+          ALIGN: 0<br>
+          I/F: <code>if_angle</code><br>
+          HANDOVER: <code>phase_raw+offset</code><br>
+          CLOSED: <code>phase_raw</code>
+        </small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>Park</b>
+        <small><code>Iαβ + theta_ctrl → Id/Iq</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>Id / Iq PI</b>
+        <small><code>Id→Ud</code><br><code>Iq→Uq</code><br>dq 圆形电压限幅</small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>逆 Park + 逆 Clarke</b>
+        <small><code>Ud/Uq → Uαβ → Ua/Ub/Uc</code></small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>SVPWM</b>
+        <small><code>FOC_SVPWM_Run()</code><br>得到 duty 与 CCR</small>
+      </div>
+      <div class="parrow">→</div>
+      <div class="pbox">
+        <b>TIM1 三相桥</b>
+        <small><code>CCR1/2/3</code> 同步更新<br>AH/AL · BH/BL · CH/CL</small>
+      </div>
+    </div>
+
+    <div class="two">
+      <div class="pathbox">
+        <h3>角度反馈支路（磁链观测器）</h3>
+        <div class="step"><span class="num">1</span><p>上一拍实际 duty + Vbus + 本拍 <code>Iαβ</code> + 实测/重构端电压组成 <code>Observer_Input_t</code>。</p></div>
+        <div class="step"><span class="num">2</span><p><code>Observer_Run()</code> 积分磁链并得到 <code>phase_raw</code>。</p></div>
+        <div class="step"><span class="num">3</span><p>PLL 得到电角速度，再换算机械 <code>speed_rpm / speed_rpm_f</code>。</p></div>
+        <div class="step"><span class="num">4</span><p>闭环时 <code>phase_raw</code> 直接成为下一拍 FOC 控制角，形成连续电子换相。</p></div>
+      </div>
+      <div class="pathbox">
+        <h3>为什么角度一变，相电流就“换相”？</h3>
+        <div class="step"><span class="num">1</span><p>Park 把采样电流投影到“随转子旋转”的 d/q 轴。</p></div>
+        <div class="step"><span class="num">2</span><p>PI 在 d/q 轴上算出所需电压矢量 <code>Ud/Uq</code>。</p></div>
+        <div class="step"><span class="num">3</span><p>逆 Park 使用同一个 <code>theta_ctrl</code> 把电压矢量旋回定子 α/β 坐标。</p></div>
+        <div class="step"><span class="num">4</span><p>SVPWM 将这个连续旋转的电压矢量变成三相占空比，因此无需离散“六步换相表”。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="reverse">
+    <h2>5. 运行中调速与反向：当前代码真正走的路径</h2>
+    <div class="hint">同向改速和反向不是同一条逻辑。反向必须跨过低速观测盲区，所以会主动从闭环退回 I/F。</div>
+
+    <div class="two">
+      <div class="pathbox">
+        <h3>同方向改变转速</h3>
+        <div class="step"><span class="num">1</span><p>新命令写入 <code>speed_command_rpm</code>。</p></div>
+        <div class="step"><span class="num">2</span><p><code>CLOSED_LOOP</code> 中将它交给 <code>speed_ref_rpm</code>。</p></div>
+        <div class="step"><span class="num">3</span><p><code>speed_ref_active_rpm</code> 按 slew 平滑向新目标移动。</p></div>
+        <div class="step"><span class="num">4</span><p>速度 PI 改变 Iq，Iq 改变转矩，电机加/减速；换相角仍来自 <code>phase_raw</code>。</p></div>
+      </div>
+
+      <div class="pathbox">
+        <h3>正转 ↔ 反转 / 进入低速区</h3>
+        <div class="step"><span class="num">1</span><p>检测到新命令方向与当前 <code>startup.if_direction</code> 相反，置 <code>closed_loop_braking=1</code>。</p></div>
+        <div class="step"><span class="num">2</span><p>闭环阶段内部把 <code>speed_ref_rpm</code> 暂时设为 0，先用观测器角度制动。</p></div>
+        <div class="step"><span class="num">3</span><p>只有原始与滤波观测速度都进入 ±800 rpm，才调用 <code>MotorApp_BeginForcedOpenLoop()</code>。</p></div>
+        <div class="step"><span class="num">4</span><p>继承当前观测角、速度、实测减速度和 Iq，切到 <code>OPEN_LOOP_IF</code>，虚拟速度连续穿过 0。</p></div>
+        <div class="step"><span class="num">5</span><p>若最终 |目标| ≤ 800 rpm：继续强制 I/F；若目标更高：拉到接管点 → Observer Ready → HANDOVER → CLOSED_LOOP。</p></div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="stop">
+    <h2>6. 停机 / 故障路径</h2>
+    <div class="split">
+      <div class="node red">
+        <strong>速度命令 = 0 或 Run = 0</strong>
+        <span class="meta">
+          主动状态中 <code>command==0</code> 会立即清 MOE、清 run 标志并回 IDLE；
+          Run=0 也会使中断入口回 IDLE，随后统一执行安全复位。
+        </span>
+      </div>
+      <div class="harrow"></div>
+      <div class="node red">
+        <strong>IDLE 安全复位</strong>
+        <span class="meta">
+          停 TIM1 CH1~3 / 互补输出、CCR1~3=0，<code>FOC_Control_Reset()</code> 清 PI 运行状态，
+          观测器/控制缓存恢复为下一次启动的干净起点。
+        </span>
+      </div>
+    </div>
+
+    <div class="split" style="margin-top:18px">
+      <div class="node red">
+        <strong>非有限值 / Vbus 非法 / 启动超时 / Observer 未就绪</strong>
+        <span class="meta"><code>MotorApp_EnterFault(reason)</code></span>
+      </div>
+      <div class="harrow"></div>
+      <div class="node red">
+        <strong>立即撤销 MOE + fault latch</strong>
+        <span class="meta">记录首个故障快照，<code>motor_run_requested=0</code>，状态回 IDLE；显式 Run=0 才解除闭锁。</span>
+      </div>
+    </div>
+  </section>
+
+  <section class="section" id="map">
+    <h2>7. 关键函数 / 变量对应表</h2>
+    <table>
+      <thead><tr><th>阶段</th><th>关键函数</th><th>关键变量</th><th>作用</th></tr></thead>
+      <tbody>
+        <tr><td>命令接收</td><td><code>MotorProtocol_HandleRx()</code></td><td><code>speed_command_rpm</code></td><td>保存最终用户目标转速</td></tr>
+        <tr><td>Run 请求</td><td><code>MotorProtocol_SetRun()</code> → <code>MotorApp_RequestRun()</code></td><td><code>motor_run_command / motor_run_requested</code></td><td>把通信意图变为启动闸门</td></tr>
+        <tr><td>真正启动</td><td><code>MotorApp_Process()</code> → <code>MotorApp_StartControlSequence()</code></td><td><code>startup.*</code></td><td>检查前置条件、初始化启动状态并开 PWM</td></tr>
+        <tr><td>状态推进</td><td><code>MotorApp_AdvanceStateMachine()</code></td><td><code>foc_motor_state</code></td><td>推进 ALIGN / I/F / HANDOVER / CLOSED_LOOP</td></tr>
+        <tr><td>角度/Iq 仲裁</td><td><code>MotorApp_ResolveControlReference()</code></td><td><code>reference.theta_ctrl/id_ref/iq_ref</code></td><td>决定这一拍用什么角、什么 dq 电流目标</td></tr>
+        <tr><td>调速</td><td><code>FOC_Control_Run()</code></td><td><code>speed_ref_active_rpm</code>、<code>iq_ref_active</code></td><td>速度斜坡 + 速度 PI + Iq 限速</td></tr>
+        <tr><td>换相 / FOC</td><td><code>MotorApp_RunCurrentLoop()</code></td><td><code>theta_ctrl</code>、<code>i_dq</code>、<code>u_dq</code></td><td>Park → 电流 PI → 逆 Park</td></tr>
+        <tr><td>PWM</td><td><code>FOC_SVPWM_Run()</code></td><td><code>duty_a/b/c</code>、<code>ccr_a/b/c</code></td><td>连续电压矢量 → 三相占空比</td></tr>
+        <tr><td>观测器</td><td><code>Observer_Run()</code></td><td><code>phase_raw</code>、<code>speed_rpm_f</code></td><td>闭环换相角和速度反馈来源</td></tr>
+        <tr><td>硬件输出</td><td><code>MotorApp_OnInjectedConversion()</code></td><td><code>TIM1->CCR1/2/3</code></td><td>三相比较值同步装载到功率桥</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <div class="foot">
+    依据当前工程版本整理；重点核对文件：
+    <code>Core/Src/motor_protocol.c</code>、
+    <code>Core/Src/motor_app.c</code>、
+    <code>Core/Src/controller.c</code>、
+    <code>Core/Src/observer.c</code>、
+    <code>Core/Src/foc_math.c</code>。
+  </div>
+</div>
+</body>
+</html>
