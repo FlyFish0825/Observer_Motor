@@ -70,14 +70,12 @@ endif()
 add_subdirectory(cmake/stm32cubemx)
 target_compile_definitions(stm32cubemx INTERFACE BOARD_HSE_HZ=${BOARD_HSE_HZ}UL)
 
-# Release speed optimization for the high-frequency FOC control path.
-# The toolchain currently uses -Os for Release; -O3 below appears later
-# on the compiler command line and therefore takes precedence.
-# LTO allows GCC to inline and optimize across main.c/foc_math.c/
-# observer.c/controller.c without changing the source architecture.
+# 25 kHz控制路径在Debug也必须满足40 us预算，不能随-O0调试配置退化。
+# 保留Debug的-g3符号；优化后的变量可能无法逐语句观察，实测优先。
 target_compile_options(${CMAKE_PROJECT_NAME} PRIVATE
-    "$<$<AND:$<CONFIG:Release>,$<COMPILE_LANGUAGE:C>>:-O3;-flto>"
+    "$<$<COMPILE_LANGUAGE:C>:-O3;-flto>"
 )
+target_compile_options(STM32_Drivers PRIVATE "$<$<COMPILE_LANGUAGE:C>:-O3;-flto>")
 
 # Link directories setup
 target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
@@ -86,7 +84,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 
 target_link_options(${PROJECT_NAME} PRIVATE
     -u _printf_float
-    $<$<CONFIG:Release>:-flto>
+    -flto
 )
 
 
@@ -132,5 +130,9 @@ add_custom_command(TARGET ${CMAKE_PROJECT_NAME} POST_BUILD
     COMMAND ${CMAKE_OBJCOPY} -O binary
             $<TARGET_FILE:${CMAKE_PROJECT_NAME}>
             ${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}${APP_OUTPUT_SUFFIX}.bin
+    COMMAND ${CMAKE_COMMAND}
+            -DFIRMWARE_FILE=${CMAKE_BINARY_DIR}/${CMAKE_PROJECT_NAME}${APP_OUTPUT_SUFFIX}.bin
+            -P ${CMAKE_SOURCE_DIR}/cmake/check_firmware_size.cmake
     COMMENT "Generating ${CMAKE_PROJECT_NAME}${APP_OUTPUT_SUFFIX}.bin"
+    VERBATIM
 )

@@ -77,6 +77,9 @@
  * （7 极对），只取正值，方向由 if_direction 统一施加，正反转共用。 */
 #define MOTOR_APP_IF_IQ_A 1.5f
 #define MOTOR_APP_IF_ACCEL_RAD_S2 600.0f
+/* 高速制动的估计减速度不能原样带入低速开环；台架曾继承21723 rpm/s，
+ * 在83ms内穿越+800到-1000并激起持续速度摆动。限制穿零轨迹的最大斜率。 */
+#define MOTOR_APP_RUNTIME_IF_MAX_RPM_S 1500.0f
 
 /* |目标|<=800 rpm 时保持虚拟角强制开环；观测器只作辅助估计，不参与控制角。 */
 #define MOTOR_APP_FORCED_OPEN_LOOP_MAX_RPM 800.0f
@@ -114,7 +117,7 @@
 #define MOTOR_APP_OBSERVER_READY_MAX_LOAD_ANGLE 1.483529864f /* 85 deg */
 
 /* 观测转速与虚拟转速允许偏差（约目标的 4%）：观测器必须锁在同一旋转磁场。
- * 这里使用 Observer 的两级 30 Hz 速度滤波值，避免 PLL 原始速度的单拍尖峰
+ * 这里使用 Observer 的两级 50 Hz 速度滤波值，避免 PLL 原始速度的单拍尖峰
  * 把已经稳定的 Ready 窗口反复清零；原始速度仍由最低转速、方向和单拍跳变门控
  * 约束。验证窗口在 I/F 速度爬升约 1.2 s 后才开始，滤波器不会带来启动初始滞后。 */
 #define MOTOR_APP_OBSERVER_READY_SPEED_ERROR_RPM 40.0f
@@ -151,9 +154,8 @@
 #define MOTOR_APP_HANDOVER_MIN_TIME_MS 20U
 #define MOTOR_APP_HANDOVER_MAX_TIME_MS 150U
 
-/* 接管/闭环跟踪健康门限。当前台架策略不因高速电流误差自动停机；保留
- * 参数供后续需要时重新打开软件健康闸门。 */
-#define MOTOR_APP_CLOSED_LOOP_HEALTH_ENABLE 0U
+/* 接管/闭环持续异常必须撤销输出；有限但错误的观测结果不能继续驱动。 */
+#define MOTOR_APP_CLOSED_LOOP_HEALTH_ENABLE 1U
 #define MOTOR_APP_CLOSED_LOOP_MAX_ID_A 1.5f
 #define MOTOR_APP_CLOSED_LOOP_MAX_IQ_ERROR_A 1.5f
 #define MOTOR_APP_CLOSED_LOOP_FAULT_TIME_MS 20U
@@ -206,6 +208,7 @@ typedef enum {
   MOTOR_APP_FAIL_NONFINITE = 6UL,          /* 关键浮点量出现 NaN/Inf */
   MOTOR_APP_FAIL_HANDOVER_CURRENT = 7UL,   /* 接管电流异常/转矩反向 */
   MOTOR_APP_FAIL_BUS_INVALID = 8UL,        /* 母线电压非法 */
+  MOTOR_APP_FAIL_CONTROL_DEADLINE = 9UL,   /* ADC完整中断连续超期/漏拍 */
 } MotorApp_Fail_t;
 
 /* ObserverReady 判据失败位（按位或累积，0=全部通过；串口显示范围 0~0xFFF，
@@ -232,6 +235,7 @@ typedef enum {
   MOTOR_APP_WAVE_CURRENT = 2, /* 电流跟踪 7 通道 */
   MOTOR_APP_WAVE_VOLTAGE = 3, /* 控制速度/参考/Iq/电压饱和诊断 */
   MOTOR_APP_WAVE_TIMING = 4,  /* DWT 周期/时间/预算占用诊断 */
+  MOTOR_APP_WAVE_PHASE_ADC = 5, /* 5 kHz端电压，关桥后仍可记录自由滑行反电动势 */
 } MotorApp_WaveMode_t;
 
 /* 端电压来源选择与融合权重：中断域每拍更新、主循环只读显示；
@@ -301,6 +305,7 @@ typedef struct {
   float handover_offset_rad;    /* 接管初始角偏置(rad)，随 smoothstep 渐消 */
   uint32_t handover_ticks;      /* 接管已运行拍数(封顶 total) */
   uint32_t handover_ticks_total;/* 接管总拍数(>0，防止 0 拍接管) */
+  uint32_t handover_speed_count; /* 接管期观测坐标系速度PI的1 kHz分频 */
 } MotorApp_Startup_t;
 
 /* JustFloat 波形帧：7 个小端 float + 帧尾 0x7F800000(+Inf 位模式)共 32 字节，
@@ -352,6 +357,11 @@ static volatile uint32_t motor_ready_fail_history = 0U;   /* 本次验证窗口�
 static volatile uint32_t motor_callback_cycles_last = 0U; /* 回调耗时(CPU 周期) */
 static volatile uint32_t motor_callback_cycles_max = 0U;  /* 回调耗时最大值 */
 static volatile uint32_t motor_dwt_hclk_hz = 0U;          /* DWT 周期换算频率 */
+static volatile uint32_t motor_irq_cycles_max = 0U;
+static volatile uint32_t motor_irq_period_max = 0U;
+static volatile uint32_t motor_irq_overruns = 0U;
+static uint32_t motor_irq_previous_start = 0U;
+static uint32_t motor_irq_late_streak = 0U;
 
 /* ---- 波形输出（与文本串口共用 USART1 + DMA） ---- */
 
@@ -515,12 +525,13 @@ static void MotorApp_BeginForcedOpenLoop(float command) {
   if (startup.if_measured_ramp != 0U) {
     startup.if_ramp_rpm_s = fabsf(startup.measured_accel_rpm_s);
   }
+  startup.if_ramp_rpm_s = fminf(startup.if_ramp_rpm_s,
+                               MOTOR_APP_RUNTIME_IF_MAX_RPM_S);
   if (!isfinite(requested_rate) || (requested_rate < 0.0f)) requested_rate = 0.0f;
   /* 已经从闭环实测到的减速度就是低速轨迹的继承量，不再被旧的默认
    * speed_slew 二次削弱；只有没有实测窗口时，冷启动回退斜率才受命令斜率
    * 限制。这样 +2000 -> -8000 穿过低速盲区时不会突然改成另一套速度率。 */
   startup.if_accel_rad_s2 = MotorApp_RpmToElectricalRad(
-      (startup.if_measured_ramp != 0U) ? startup.if_ramp_rpm_s :
       fminf(startup.if_ramp_rpm_s, requested_rate));
   startup.if_iq_reference = motor_control.iq_ref_active;
   startup.if_id_reference = motor_control.reference.id_ref;
@@ -670,12 +681,26 @@ static void MotorApp_ResolveControlReference(void) {
     float blend = 1.0f - x * x * (3.0f - 2.0f * x);
     float offset = startup.handover_offset_rad * blend;
     float d_obs = startup.handover_id_obs * blend;
-    /* 速度模式下 I/F 的恒定 q 转矩不能贯穿整个角度接管：上一拍日志显示
-     * 1000 rpm 接管到闭环首拍已冲到 2600 rpm。让 q 转矩按 blend^2 平滑收敛
-     * 到零，闭环速度环从低转矩状态接手；电流模式仍保持原 q 参考。 */
-    float q_scale = (motor_control.speed_loop_enable != 0U)
-        ? (blend * blend) : 1.0f;
-    float q_obs = startup.handover_iq_obs * q_scale;
+    /* 旧I/F转矩作为前馈逐渐退出，速度反馈从第一拍就补足实际需求。
+     * 既不强制把总转矩降到0，也不把I/F的大电流完整保持到接管结束。
+     * PI输出与前馈同在观测坐标系，之后再统一旋转到当前控制坐标系。 */
+    float q_feedforward = startup.handover_iq_obs * blend * blend;
+    if (motor_control.speed_loop_enable != 0U) {
+      if (++startup.handover_speed_count >= motor_control.speed_loop_divider) {
+        startup.handover_speed_count = 0U;
+        float q = PI_Controller_Run(&motor_control.speed_pi,
+            MotorApp_VirtualRpm(), foc.observer.state.speed_rpm_f) + q_feedforward;
+        float limited = fminf(startup.if_iq_magnitude,
+                             fmaxf(-startup.if_iq_magnitude, q));
+        if (limited != q)
+          PI_Controller_PreloadOutput(&motor_control.speed_pi, limited - q_feedforward,
+              MotorApp_VirtualRpm(), foc.observer.state.speed_rpm_f);
+      }
+    }
+    float q_obs = (motor_control.speed_loop_enable != 0U)
+        ? fminf(startup.if_iq_magnitude, fmaxf(-startup.if_iq_magnitude,
+              q_feedforward + motor_control.speed_pi.output))
+        : startup.handover_iq_obs;
 
     /* PI 积分状态从上一拍坐标系旋转到本拍坐标系（角度=两帧偏置差）：
      * 必须在新旧坐标系间搬运积分器，否则积分项按错误角度继续累积，
@@ -770,7 +795,7 @@ static void MotorApp_RunCurrentLoop(FOC_Control_t *control) {
   FOC_Park(&foc.state.i_alpha_beta, &foc_sin_cos, &foc.state.i_dq);
 
   /* 速度环反馈用观测器 50 Hz 双极点滤波值（与显示/Ready 同源，50 Hz
-   * 双极点直流群延迟约 10.6 ms）。强制 I/F 时只送虚拟速度，不依赖低速
+   * 双极点直流群延迟约 6.4 ms）。强制 I/F 时只送虚拟速度，不依赖低速
    * 观测器。控制器经 control->speed_feedback 读取，不再走形参。 */
   control->speed_feedback = MotorApp_ControlSpeedFeedback();
   FOC_Control_Run(control, foc.state.i_dq.d, foc.state.i_dq.q,
@@ -985,6 +1010,10 @@ static void MotorApp_BeginObserverHandover(void) {
   startup.handover_last_offset = offset; /* 本拍尚未卸掉任何偏置 */
   startup.handover_ticks_total = ticks;
   startup.handover_ticks = 0U;
+  startup.handover_speed_count = 0U;
+  if (motor_control.speed_loop_enable != 0U)
+    PI_Controller_PreloadOutput(&motor_control.speed_pi, 0.0f,
+        MotorApp_VirtualRpm(), foc.observer.state.speed_rpm_f);
   startup.fault_count = 0U; /* 不把 I/F 阶段的异常带进接管 */
   MotorApp_CaptureDiagnostic(&motor_handover_snapshot, MOTOR_APP_FAIL_NONE);
 }
@@ -1132,7 +1161,6 @@ static void MotorApp_AdvanceStateMachine(const Observer_Input_t *input) {
       float requested_rate = motor_control.speed_slew_rpm_per_s;
       if (!isfinite(requested_rate) || (requested_rate < 0.0f)) requested_rate = 0.0f;
       startup.if_accel_rad_s2 = MotorApp_RpmToElectricalRad(
-          (startup.if_measured_ramp != 0U) ? startup.if_ramp_rpm_s :
           fminf(startup.if_ramp_rpm_s, requested_rate));
       /* 减速转矩看轨迹变化方向，不看最终速度符号。+790 -> +500 也要
        * 沿用负 Iq；穿零没有特殊翻转，换目标时仍由控制器限制电流变化率。 */
@@ -1244,6 +1272,14 @@ static void MotorApp_UpdateStateTransition(void) {
       startup.speed_settle_count = 0U;
       startup.speed_startup_active = 1U;
       startup.fault_count = 0U;
+      /* 接管期间速度PI已经工作，保留它的积分及1000 rpm参考；不能把
+       * 瞬态超调速度重新当成目标并再保持50ms。末拍前馈已归零。 */
+      if (motor_control.speed_loop_enable != 0U) {
+        motor_control.speed_loop_enable_last = 1U;
+        motor_control.speed_loop_counter = 0U;
+        motor_control.speed_ref_active_rpm = MotorApp_VirtualRpm();
+        motor_control.speed_ref_previous_rpm = motor_control.speed_command_rpm;
+      }
       foc_motor_state = FOC_MOTOR_CLOSED_LOOP;
     }
     break;
@@ -1307,6 +1343,11 @@ static void MotorApp_StartControlSequence(void) {
   startup = (MotorApp_Startup_t){0};
   motor_callback_cycles_last = 0U;
   motor_callback_cycles_max = 0U;
+  motor_irq_cycles_max = 0U;
+  motor_irq_period_max = 0U;
+  motor_irq_overruns = 0U;
+  motor_irq_previous_start = 0U;
+  motor_irq_late_streak = 0U;
 
   /* 方向由命令符号一次确定，之后同时作用于虚拟角与 Iq；
    * 先置启动过渡标志（它使能闭环健康的"启动期最低转速"检查）。 */
@@ -1535,6 +1576,11 @@ static void MotorApp_DebugStatus(int argc, char *argv[]) {
       (unsigned long)hclk_hz);
   if (motor_fault_latched != 0U)
     DebugConsole_Printf("FAULT latched: inspect startdiag; set run 0 before another start\r\n");
+  DebugConsole_Printf("IRQ max_cycles=%lu period_max=%lu overruns=%lu max_us=%.3f period_max_us=%.3f\r\n",
+      (unsigned long)motor_irq_cycles_max, (unsigned long)motor_irq_period_max,
+      (unsigned long)motor_irq_overruns,
+      hclk_hz ? (double)motor_irq_cycles_max * 1000000.0 / hclk_hz : 0.0,
+      hclk_hz ? (double)motor_irq_period_max * 1000000.0 / hclk_hz : 0.0);
 }
 
 /* Rs单一启动入口：串口、CAN和按键均共用同一套前置条件。 */
@@ -1700,11 +1746,11 @@ static HAL_StatusTypeDef MotorApp_RegisterDebugVariables(void) {
                                       -4.0f, 4.0f, true);
   success &= DebugConsole_RegisterU32("rdy_fail", &motor_ready_fail_mask, 0U,
                                       0xFFFU, true);
-  success &= DebugConsole_RegisterU32("fail", &motor_start_fail_reason, 0U, 8U,
+  success &= DebugConsole_RegisterU32("fail", &motor_start_fail_reason, 0U, 9U,
                                       true);
 
   /* 可写：波形通道选择与 I/F 削减开关。 */
-  success &= DebugConsole_RegisterU32("wave_mode", &motor_wave_mode, 0U, 4U, false);
+  success &= DebugConsole_RegisterU32("wave_mode", &motor_wave_mode, 0U, 5U, false);
   success &= DebugConsole_RegisterBool("if_trim", &motor_if_trim_enable, false);
   success &= DebugConsole_RegisterCommand("startdiag", MotorApp_DebugStartup,
                                            "startdiag: latched handover/closed/fault snapshots");
@@ -1821,6 +1867,13 @@ HAL_StatusTypeDef MotorApp_Init(void) {
   /* DWT：既是微秒级延时的时钟源，也是回调耗时统计的计数器。 */
   if (DWT_Delay_Init() == 0U) return HAL_ERROR;
   motor_dwt_hclk_hz = HAL_RCC_GetHCLKFreq();
+  /* ADC为最高优先级；串口/DMA不能把25kHz控制拍推迟数微秒。
+   * 放在应用初始化中，CubeMX重新生成外设文件后仍保持该约束。 */
+  HAL_NVIC_SetPriority(ADC1_2_IRQn, 0U, 0U);
+  HAL_NVIC_SetPriority(USART1_IRQn, 1U, 0U);
+  HAL_NVIC_SetPriority(DMA1_Channel1_IRQn, 1U, 0U);
+  HAL_NVIC_SetPriority(DMA1_Channel2_IRQn, 1U, 0U);
+  HAL_NVIC_SetPriority(SysTick_IRQn, 2U, 0U);
 
   CORDIC_SinCos_RegisterConfig();
 
@@ -1997,16 +2050,31 @@ void MotorApp_Process(void) {
   MotorCalibration_Process();
 }
 
+/* 统计ADC IRQ处理主体（包括HAL/快速分派），不含CPU异常入栈和出栈。
+ * 同时检查相邻入口间隔；连续3次超预算或明显漏拍时立即撤销功率输出。 */
+void MotorApp_RecordControlIrq(uint32_t start_cycles, uint32_t finish_cycles) {
+  uint32_t period = motor_irq_previous_start ? start_cycles - motor_irq_previous_start : 0U;
+  motor_irq_previous_start = start_cycles;
+  if (MotorApp_IsControlState(foc_motor_state) == 0U) {
+    motor_irq_late_streak = 0U;
+    return;
+  }
+  uint32_t elapsed = finish_cycles - start_cycles;
+  uint32_t budget = motor_dwt_hclk_hz / MOTOR_APP_CONTROL_HZ;
+  if (elapsed > motor_irq_cycles_max) motor_irq_cycles_max = elapsed;
+  if (period > motor_irq_period_max) motor_irq_period_max = period;
+  if ((budget != 0U) && ((elapsed >= budget) || (period > budget + budget / 2U))) {
+    motor_irq_overruns++;
+    if (++motor_irq_late_streak >= 3U)
+      MotorApp_EnterFault(MOTOR_APP_FAIL_CONTROL_DEADLINE);
+  } else motor_irq_late_streak = 0U;
+}
+
 /**
- * @brief 注入转换完成后的实时入口（25 kHz，单拍预算 40 us ≈ 6800 周期）。
- *
- * 只处理 ADC1：ADC2 共享 ADC1_2 中断向量但未开注入中断，显式排除防止
- * 同拍重复执行。ADC1 依次采 Ia/Ic/U端/W端，ADC2 采 Ib/V端；入口由 ADC1
- * 四个 Rank 全部完成后的 JEOS 产生，此时两路结果均已就绪。
- * 每拍流程（顺序不可调换）：停机/状态闸门 -> 零偏校准（未完成则本拍到此
- * 为止：不写 PWM、不统计耗时） -> 采样 Clarke -> 组装观测器输入 -> 主动
- * 控制拍（守卫/状态机/电流环/写 PWM/状态切换） -> 母线电流估算 -> 波形
- * 提交 -> 耗时统计。
+ * @brief 注入转换完成后的25 kHz实时入口，单拍预算40 us。
+ * @note ADC1完成4个Rank时ADC2的2个Rank亦已完成；只执行一次控制。
+ * 流程：状态闸门/零偏校准、采样Clarke、观测器、状态机、电流环、PWM、
+ * 母线电流估算与波形。HAL回调和固定JEOS快路径共用此入口。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
   static uint16_t calibration_count = 0U; /* 零偏校准拍数：唯一跨拍保持量，仅中断域读写 */
@@ -2213,8 +2281,7 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
       }
     }
 
-    /* 可选的接管/闭环健康闸门默认关闭，以免高速负载下把电流跟踪误差当成
-     * 停机条件；有限值、母线和硬件保护路径仍独立有效。需要时将编译宏打开。 */
+    /* 接管与闭环持续异常必须停机；不把仍为有限数的失锁观测当成健康。 */
     if ((MOTOR_APP_CLOSED_LOOP_HEALTH_ENABLE != 0U) &&
         ((foc_motor_state == FOC_MOTOR_OBSERVER_HANDOVER) ||
          (foc_motor_state == FOC_MOTOR_CLOSED_LOOP))) {
@@ -2230,9 +2297,9 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
       if ((foc.observer.state.psi_mag < foc.observer.config.psi_min) ||
           ((foc.observer.config.psi_max > 0.0f) &&
            (foc.observer.state.psi_mag > foc.observer.config.psi_max))) unhealthy = 1U;
-      /* 启动过渡期：观测转速（乘方向）必须高于 400 rpm——远低于接管点
-       * 1000 rpm 的粗判，低于它认为拖动已经丢掉。 */
-      if ((startup.speed_startup_active != 0U) &&
+      /* 非主动制动时持续低于400 rpm/方向错误即认为已失去同步；保护
+       * 覆盖整个闭环运行期，不能在启动保持结束后留下堵转盲区。 */
+      if ((startup.closed_loop_braking == 0U) &&
           (foc.observer.state.speed_rpm * startup.if_direction < 400.0f))
         unhealthy = 1U;
 
@@ -2271,9 +2338,21 @@ void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc) {
    * 不等待、不阻塞 ---- */
   if ((just_float_enabled != 0U) &&
       (motor_console_tx_active == 0U) &&
-      (MotorApp_IsControlState(foc_motor_state) != 0U) &&
+      ((MotorApp_IsControlState(foc_motor_state) != 0U) ||
+       (motor_wave_mode == MOTOR_APP_WAVE_PHASE_ADC)) &&
       ((USART1->ISR & USART_ISR_TC) != 0U)) {
-    if (motor_wave_mode == MOTOR_APP_WAVE_DEFAULT) {
+    if (motor_wave_mode == MOTOR_APP_WAVE_PHASE_ADC) {
+      /* 采样计数模2^20可由float精确表达；MOE=0时三相端电压来自滑行
+       * 电机，离线用相序/过零独立核对运动方向与速度，不依赖Observer。 */
+      if ((motor_adc_irq_count % 5U) == 0U)
+        (void)MotorApp_SendJustFloat((float)(motor_adc_irq_count & 0xFFFFFU),
+            foc.state.u_abc_measured.a, foc.state.u_abc_measured.b,
+            foc.state.u_abc_measured.c,
+            (TIM1->BDTR & TIM_BDTR_MOE) != 0U ? 1.0f : 0.0f,
+            fmaxf(fabsf(foc.state.i_abc.a), fmaxf(fabsf(foc.state.i_abc.b),
+                                               fabsf(foc.state.i_abc.c))),
+            foc.state.vbus);
+    } else if (motor_wave_mode == MOTOR_APP_WAVE_DEFAULT) {
       /* 默认通道（尽力 25 kHz，实际受串口带宽限制）：三相电流、滤波转速、
        * 电角度、母线、原始转速（滤波/原始转速非独立测量，不能据此判定
        * 转子真实转动）。 */

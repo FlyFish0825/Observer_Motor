@@ -48,6 +48,8 @@ void MotorApp_Process(void);
  *       并写TIM1->CCR1~3。不得在其中调用阻塞式HAL函数。
  */
 void MotorApp_OnInjectedConversion(ADC_HandleTypeDef *hadc);
+/* 完整ADC IRQ（含HAL分派）的DWT计时与连续超期保护。 */
+void MotorApp_RecordControlIrq(uint32_t start_cycles, uint32_t finish_cycles);
 
 /**
  * @brief 获取应用层正在使用的FOC控制器，供CAN协议层更新目标参数。

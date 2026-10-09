@@ -768,6 +768,7 @@ void FOC_Control_Init(FOC_Control_t *control, float current_loop_sample_time) {
 
   control->voltage_limit = 0.0f;
   control->speed_voltage_limited = 0U;
+  control->speed_voltage_saturation_window = 0U;
   /* 电压矢量上限初值 0，等第一拍 FOC_Control_Run 用实测母线电压
    * 计算。设 0 而不是某个猜测值，是为了避免在母线电压还没采样到之前就给出
    * 过大电压（那会在启动瞬间冲击电流）。 */
@@ -823,6 +824,7 @@ void FOC_Control_Reset(FOC_Control_t *control) {
   control->uq_output = 0.0f;
   control->voltage_limit = 0.0f;
   control->speed_voltage_limited = 0U;
+  control->speed_voltage_saturation_window = 0U;
   /* 电压侧归零。voltage_limit = 0 会让下一次 SetLimits 把两个电流环
    * 限成 ±0 V，即复位后的第一拍不输出电压；但同一拍 Run 会立刻用实测母线电压
    * 重算 voltage_limit，所以实际上只有"复位到第一拍之间"是零电压窗口。 */
@@ -1052,13 +1054,13 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
        * 溢出（uint16_t 虽然能计到 65535，但保持"到点即清"的语义更清晰）。 */
       float integral_before = control->speed_pi.integral;
       float speed_error = control->speed_ref_active_rpm - control->speed_feedback;
-      float current_error = control->iq_ref_active - iq_feedback;
       /* 电压已打满且电流仍跟不上时，禁止速度积分继续要求同方向转矩。
        * 误差反号立即允许退积分；不降低电压、转速目标或 Iq 软件上限。 */
       control->speed_voltage_limited =
-          (speed_error * current_error > 0.0f) &&
-          (((control->iq_pi.saturation == PI_SATURATION_HIGH) && (speed_error > 0.0f)) ||
-           ((control->iq_pi.saturation == PI_SATURATION_LOW) && (speed_error < 0.0f)));
+          (((control->speed_voltage_saturation_window & 1U) != 0U && speed_error > 0.0f) ||
+           ((control->speed_voltage_saturation_window & 2U) != 0U && speed_error < 0.0f));
+      /* 对整个1ms窗口锁存，避免高速Iq纹波使单拍饱和判据漏检。 */
+      control->speed_voltage_saturation_window = 0U;
       requested = PI_Controller_Run(&control->speed_pi,
           control->speed_ref_active_rpm, control->speed_feedback);
       if (control->speed_voltage_limited != 0U) {
@@ -1098,6 +1100,7 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
     }
   } else {
     control->speed_voltage_limited = 0U;
+    control->speed_voltage_saturation_window = 0U;
     control->iq_ref_target = (leaving_speed_mode != 0U)
         ? control->iq_ref_active : control->reference.iq_ref;
     /* 电流模式（含 ALIGN、OPEN_LOOP_IF 的开环 I/F 阶段）的 Iq 目标：
@@ -1180,6 +1183,10 @@ void FOC_Control_Run(FOC_Control_t *control, float id_feedback,
   PI_Controller_SetLimits(&control->iq_pi, -uq_limit, uq_limit);
   control->uq_output =
       PI_Controller_Run(&control->iq_pi, control->iq_ref_active, iq_feedback);
+  if (control->iq_pi.saturation == PI_SATURATION_HIGH)
+    control->speed_voltage_saturation_window |= 1U;
+  else if (control->iq_pi.saturation == PI_SATURATION_LOW)
+    control->speed_voltage_saturation_window |= 2U;
   /* q 轴参考是前面整条 Iq 链路（速度 PI / 电流模式 / 限速）算出的
    * iq_ref_active，反馈是 Park 后的 iq。返回值即限幅后的 Uq，单位 V。
    * 注意 iq_pi 的限幅是不对称以外的对称区间 ±uq_limit，而 id_pi 的限幅是

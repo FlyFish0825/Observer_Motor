@@ -23,6 +23,7 @@
 #include "motor_calibration.h"
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
+#include "motor_app.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -290,12 +291,36 @@ void DMA1_Channel4_IRQHandler(void)
 void ADC1_2_IRQHandler(void)
 {
   /* USER CODE BEGIN ADC1_2_IRQn 0 */
-
+  uint32_t irq_start_cycles = DWT->CYCCNT;
+#if (USE_HAL_ADC_REGISTER_CALLBACKS == 0)
+  /* 固定FOC配置的JEOS快路径：只在独立外部注入触发、ADC1仅JEOS中断、
+   * ADC2无中断时成立。保持HAL的INJ_EOC状态语义，其余模式仍走HAL。
+   * 先清本次JEOS再计算，避免长边界拍结束时误清下一次转换完成标志。 */
+  if ((ADC1->IER == ADC_IER_JEOSIE) && (ADC2->IER == 0U) &&
+      ((ADC1->ISR & ADC_ISR_JEOS) != 0U) &&
+      ((ADC1->JSQR & ADC_JSQR_JEXTEN) != 0U) &&
+      ((ADC1->CFGR & (ADC_CFGR_JAUTO | ADC_CFGR_JQM)) == 0U) &&
+      ((ADC12_COMMON->CCR & ADC_CCR_DUAL) == 0U) &&
+      ((hadc1.State & HAL_ADC_STATE_ERROR_INTERNAL) == 0U)) {
+    SET_BIT(hadc1.State, HAL_ADC_STATE_INJ_EOC);
+    ADC1->ISR = ADC_ISR_JEOC | ADC_ISR_JEOS;
+    MotorApp_OnInjectedConversion(&hadc1);
+    MotorApp_RecordControlIrq(irq_start_cycles, DWT->CYCCNT);
+    return;
+  }
+#endif
+  /* FOC时ADC2没有使能中断，不必每拍扫描其HAL分支；辨识模式保持
+   * 下方CubeMX双ADC分派。快速路径放在用户区，避免重新生成后丢失。 */
+  if (ADC2->IER == 0U) {
+    HAL_ADC_IRQHandler(&hadc1);
+    MotorApp_RecordControlIrq(irq_start_cycles, DWT->CYCCNT);
+    return;
+  }
   /* USER CODE END ADC1_2_IRQn 0 */
   HAL_ADC_IRQHandler(&hadc1);
   HAL_ADC_IRQHandler(&hadc2);
   /* USER CODE BEGIN ADC1_2_IRQn 1 */
-
+  MotorApp_RecordControlIrq(irq_start_cycles, DWT->CYCCNT);
   /* USER CODE END ADC1_2_IRQn 1 */
 }
 

@@ -154,13 +154,13 @@ typedef struct {
  * - 输出单位：A，即 q 轴电流参考 Iq*，串级结构里直接成为电流环的给定；
  * - 采样周期 = 电流环周期 × FOC_SPEED_LOOP_DIVIDER_DEFAULT = 40 us × 25 = 1 ms，
  *   由 FOC_Control_Init 计算后写入 speed_pi.sample_time；
- * - 数值很小（Kp=5e-4 A/rpm）是因为量纲差异：1000 rpm 误差才产生 0.5 A 的
- *   比例输出，避免速度环一步就把电流环推到限幅；
- * - Ki = 0.005 A/(rpm·s)，每拍积分增量 = 0.005 * error * 0.001 s = 5e-6*error（A），
- *   即 1000 rpm 恒定误差约 20 ms 积到 0.1 A；实际积分还受输出和下游限幅影响。
+ * - Kp=0.0012 A/rpm：1000 rpm误差产生1.2 A比例输出。配合参考斜坡与
+ *   Iq斜坡，避免原参数在6000->1000 rpm降速时制动积分把转子拖至停转。
+ * - Ki=0.0018 A/(rpm·s)：1000 rpm恒定误差在50 ms内积到0.09 A；
+ *   减小积分、提高比例可减轻制动下冲，仍由电压窗口抗饱和约束积分。
  */
-#define FOC_SPEED_PI_KP_DEFAULT 0.0005f              /* 速度环比例增益，单位 A/rpm。调大提速响应但易在观测器噪声上抖动。 */
-#define FOC_SPEED_PI_KI_DEFAULT 0.005f               /* 速度环积分增益，单位 A/(rpm·s)。调大可消静差，过大易与电流限幅耦合产生低频振荡。 */
+#define FOC_SPEED_PI_KP_DEFAULT 0.0012f              /* 速度环比例增益，单位 A/rpm；24 V空气台架整定。 */
+#define FOC_SPEED_PI_KI_DEFAULT 0.0018f              /* 速度环积分增益，单位 A/(rpm·s)；抑制降速积分过量。 */
 #define FOC_SPEED_PI_OUTPUT_MIN_DEFAULT (-10.0f)     /* 速度环输出下限，单位 A。负值表示允许反向电磁转矩（制动/反转），不是"不能为负"。绝对值是软件限幅，不等于硬件过流阈值。 */
 #define FOC_SPEED_PI_OUTPUT_MAX_DEFAULT 10.0f        /* 速度环输出上限，单位 A。与下限对称，见上面的硬件量程推导。 */
 
@@ -319,6 +319,7 @@ typedef struct {
   /* 根据实时母线电压得到的dq电压矢量上限，单位V。 */
   float voltage_limit; /* 本拍允许的 dq 电压矢量最大幅值，单位 V = max(0, Vbus) / sqrt(3)。由 FOC_Control_Run 每拍根据实参 dc_bus_voltage 重算；母线电压非有限值或 <=0 时置 0（此时两轴电压都会被限成 0，电流环失去输出能力，是一种故障态的表现）。 */
   uint8_t speed_voltage_limited; /* 最近一次速度 PI 因下游电压饱和暂停同向积分。 */
+  uint8_t speed_voltage_saturation_window; /* 25拍内q轴饱和方向，供1kHz速度环使用。 */
 } FOC_Control_t;
 
 /* ======================== 通用PI接口 ======================== */
